@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<evaluation name="taobao-sourcing" version="1">
+  <meta>
+    <description>
+      10 independent, read-only, verifiable questions answerable only by using the
+      taobao-sourcing tools. Q1-Q8 are verifiable offline against the committed
+      fixture tests/fixtures/736546459871/detail_res.json (see tests/test_evals.py);
+      Q9-Q10 require a live session (search/reviews). Pass target: >= 8/10.
+    </description>
+    <fixture_product>736546459871</fixture_product>
+  </meta>
+
+  <question id="1" verify="fixture" tool="taobao_fetch_product">
+    <text>What is the cheapest in-stock variant of product 736546459871, and its price?</text>
+    <expected>"P100 质保7天 80个起售" (the 80-unit wholesale tier) at ¥400.</expected>
+  </question>
+  <question id="2" verify="fixture" tool="taobao_fetch_product">
+    <text>What is the most expensive variant of 736546459871, and its price?</text>
+    <expected>"P100 质保3年 以换代修" (3-year warranty) at ¥450.</expected>
+  </question>
+  <question id="3" verify="fixture" tool="taobao_fetch_product">
+    <text>How many SKU variants does 736546459871 offer?</text>
+    <expected>3.</expected>
+  </question>
+  <question id="4" verify="fixture" tool="taobao_fetch_product">
+    <text>What is the price of the 7-day-warranty "volume" tier (退货承担运费20元)?</text>
+    <expected>¥420.</expected>
+  </question>
+  <question id="5" verify="fixture" tool="taobao_fetch_product">
+    <text>Which shop sells 736546459871?</text>
+    <expected>南京海雀显卡.</expected>
+  </question>
+  <question id="6" verify="fixture" tool="taobao_fetch_product">
+    <text>What is the full price range across all variants of 736546459871?</text>
+    <expected>¥400 – ¥450.</expected>
+  </question>
+  <question id="7" verify="fixture" tool="taobao_fetch_product">
+    <text>Are all three variants currently in stock (available)?</text>
+    <expected>Yes — all three have stock &gt; 0 and available=true.</expected>
+  </question>
+  <question id="8" verify="fixture" tool="taobao_fetch_product">
+    <text>What is the single property-group name used by 736546459871's variants?</text>
+    <expected>颜色分类 (it encodes warranty/service tiers, not colours).</expected>
+  </question>
+  <question id="9" verify="live" tool="taobao_fetch_reviews">
+    <text>Among recent reviews of 736546459871, which variant did the reviewer who mentioned "ollama"/"comfyui" buy, and did it include photos?</text>
+    <expected>"P100 质保7天 走量商品 退货承担运费20元", with photos (has_images=true).</expected>
+  </question>
+  <question id="10" verify="live" tool="taobao_search">
+    <text>Searching "tesla p100 16g", what is the top result by units sold, and which shop?</text>
+    <expected>The 736546459871 listing ("特斯拉P100 16G…DeepSeek推荐用卡"), shop 南京海雀显卡, ~700+ 付款.</expected>
+  </question>
+</evaluation>

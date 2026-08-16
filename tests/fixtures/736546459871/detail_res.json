@@ -1,0 +1,196 @@
+{
+  "skuBase": {
+    "props": [
+      {
+        "pid": "1627207",
+        "name": "颜色分类",
+        "values": [
+          {
+            "vid": "42718405231",
+            "name": "P100 质保7天 走量商品 退货承担运费20元"
+          },
+          {
+            "vid": "42718224957",
+            "name": "P100 质保3年 以换代修"
+          },
+          {
+            "vid": "40823846283",
+            "name": "P100 质保7天 80个起售"
+          }
+        ]
+      }
+    ],
+    "skus": [
+      {
+        "propPath": "1627207:42718405231",
+        "skuId": "5731208484120"
+      },
+      {
+        "propPath": "1627207:42718224957",
+        "skuId": "5731208484121"
+      },
+      {
+        "propPath": "1627207:40823846283",
+        "skuId": "5940639352839"
+      }
+    ]
+  },
+  "skuCore": {
+    "sku2info": {
+      "0": {
+        "price": {
+          "priceText": "400",
+          "priceMoney": "40000",
+          "priceTitle": "优惠前",
+          "priceDesc": "起"
+        },
+        "quantity": 150,
+        "quantityText": "有货"
+      },
+      "5940639352839": {
+        "price": {
+          "priceText": "400",
+          "priceMoney": "40000",
+          "priceTitle": "优惠前"
+        },
+        "quantity": 97,
+        "quantityText": "有货"
+      },
+      "5731208484121": {
+        "price": {
+          "priceText": "450",
+          "priceMoney": "45000",
+          "priceTitle": "优惠前"
+        },
+        "quantity": 34,
+        "quantityText": "有货"
+      },
+      "5731208484120": {
+        "price": {
+          "priceText": "420",
+          "priceMoney": "42000",
+          "priceTitle": "优惠前"
+        },
+        "quantity": 19,
+        "quantityText": "有货"
+      }
+    }
+  },
+  "item": {
+    "title": "特斯拉P100 16G显卡Tesla 深度学习Ai部署【DeepSeek推荐用卡】",
+    "itemId": "736546459871",
+    "images": [
+      "https://img.alicdn.com/imgextra/i3/2207319069277/O1CN010YTSC62IOvKmDE3OL_!!2207319069277.jpg",
+      "https://img.alicdn.com/imgextra/i4/2207319069277/O1CN016AJHnh2IOvAkHGWD6_!!2207319069277.jpg",
+      "https://img.alicdn.com/imgextra/i2/2207319069277/O1CN01XAiy7V2IOvAst80GN_!!2207319069277.jpg",
+      "https://img.alicdn.com/imgextra/i4/2207319069277/O1CN010AqdLA2IOvAxfU6Zr_!!2207319069277.jpg",
+      "https://img.alicdn.com/imgextra/i4/2207319069277/O1CN01Mtpyoj2IOvAv8e4oJ_!!2207319069277.jpg"
+    ]
+  },
+  "seller": {
+    "shopName": "南京海雀显卡"
+  },
+  "componentsVO": {
+    "priceVO": {
+      "extraPrice": {
+        "priceUnit": "￥",
+        "priceColor": "#FFFFFF",
+        "priceTitle": "平台加补后",
+        "priceColorNew": "#FF5000",
+        "priceBgColor": "#FF5000",
+        "priceTitleColor": "#FFFFFF",
+        "priceText": "397",
+        "priceDesc": "起",
+        "priceMoney": "39700",
+        "hiddenPrice": "false"
+      },
+      "price": {
+        "priceUnit": "￥",
+        "priceColor": "#FF4F00",
+        "priceTitle": "优惠前",
+        "priceColorNew": "#7A7A7A",
+        "priceTitleColor": "#FF4F00",
+        "priceText": "400",
+        "priceDesc": "起",
+        "priceMoney": "40000",
+        "hiddenPrice": "false"
+      },
+      "isNewStyle": "true"
+    },
+    "extensionInfoVO": {
+      "infos": [
+        {
+          "type": "BASE_PROPS",
+          "items": [
+            {
+              "title": "品牌",
+              "text": [
+                "0431"
+              ]
+            },
+            {
+              "title": "浮点运算精度",
+              "text": [
+                "FP32"
+              ]
+            },
+            {
+              "title": "生产企业",
+              "text": [
+                "英伟达"
+              ]
+            },
+            {
+              "title": "质保期",
+              "text": [
+                "无"
+              ]
+            },
+            {
+              "title": "成色",
+              "text": [
+                "全新"
+              ]
+            },
+            {
+              "title": "颜色分类",
+              "text": [
+                "P100 质保7天 走量商品 退货承担运费20元,P100 质保3年 以换代修,P100 质保7天 80个起售"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "rateVO": {
+      "totalCount": "500+",
+      "favorableRate": {
+        "rateText": "近3个月好评率高达100.0%"
+      },
+      "group": {
+        "items": [
+          {
+            "content": "速度很快，插上就能用，用着没问题",
+            "skuInfo": "颜色分类:P100 质保3年 以换代修",
+            "media": [
+              {
+                "type": "image"
+              }
+            ],
+            "dateTime": "2026-05-26"
+          },
+          {
+            "content": "用的ga-6pxsvl技嘉主板，peux-os。ollama和comfyui都ok，",
+            "skuInfo": "颜色分类:P100 质保7天 走量商品 退货承担运费20元",
+            "media": [
+              {
+                "type": "image"
+              }
+            ],
+            "dateTime": "2026-03-19"
+          }
+        ]
+      }
+    }
+  }
+}

@@ -1,0 +1,20 @@
+[browser]
+channel = "chrome"      # portable default; override per machine in config.local.toml
+executable_path = ""    # optional absolute browser path belongs in config.local.toml
+user_data_dir = "./user_data/chrome_profile"
+locale = "zh-CN"
+timezone = "Asia/Shanghai"
+headless = false              # ALWAYS false. Human watches & solves captcha.
+
+[pacing]
+min_delay_s = 2.0             # random wait between actions
+max_delay_s = 6.0
+scroll_steps = 4              # incremental scroll to trigger lazy load
+max_products_per_minute = 6  # hard cap; never burst
+
+[limits]
+max_reviews = 60             # per product, paginated
+review_pages = 4
+
+[output]
+dir = "./output"

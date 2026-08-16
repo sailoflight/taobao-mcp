@@ -1,0 +1,61 @@
+# Python caches and build artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+build/
+dist/
+
+# Virtual environments
+.venv/
+venv/
+
+# IDE and local agent state
+.idea/
+.vscode/
+/.codex/
+/.agents/
+
+# Secrets and environment files
+.env
+.env.*
+!.env.public.example
+*.pem
+*.key
+*.pfx
+*.p12
+
+# Machine-local plugin and browser configuration
+/.mcp.json
+/config.local.toml
+
+# Browser profiles, cookies, login state, generated exports, and logs
+/user_data/
+/output/
+*.log
+*.har
+*.trace.zip
+cookies*.json
+storage_state*.json
+auth_state*.json
+
+# Raw captures and browser/test artifacts
+tests/fixtures/**/page.html
+/playwright-report/
+/test-results/
+/blob-report/
+/screenshots/
+
+# Private buyer profile
+skills/taobao-sourcing/sourcing_profile.md
+
+# Local one-off reconnaissance scripts may contain account data or machine paths
+scripts/
+
+# Reference checkout, local archives, and platform noise
+_base_repo/
+/src.zip
+/taobao-mcp-*.zip
+.DS_Store
+Thumbs.db
+Desktop.ini
