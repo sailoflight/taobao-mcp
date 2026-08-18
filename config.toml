@@ -18,3 +18,10 @@ review_pages = 4
 
 [output]
 dir = "./output"
+
+[detail]
+# Account/channel marketing id. When present in the item URL (?id=...&mi_id=...), the
+# SSR renders the full 图文详情 (.desc-root); without it the page has no 详情 at all.
+# Discovered live 2026-08-18 (see NOTES.md). This is ACCOUNT-SPECIFIC — keep it in the
+# gitignored config.local.toml (or it's set at runtime by taobao_get_miid → output/.miid.json).
+mi_id = ""
