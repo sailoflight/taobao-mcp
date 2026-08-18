@@ -14,6 +14,7 @@ leave the window visible, and poll until the human clears it. NEVER auto-solve.
 from __future__ import annotations
 
 import asyncio
+import time
 from pathlib import Path
 
 from playwright.async_api import async_playwright
@@ -29,11 +30,68 @@ _STEALTH_JS = "Object.defineProperty(navigator, 'webdriver', {get: () => false})
 
 # URL fragments / DOM hints that mean "a human must act before we can continue".
 _BLOCK_URL_HINTS = ("login.taobao.com", "login.tmall.com", "//login.", "punish", "_____tmd_____", "sec.taobao.com")
-_SLIDER_SELECTORS = ("#nc_1_n1z", ".nc-container", ".nc_iconfont", "iframe[src*='punish']", "iframe[src*='baxia']")
+# Slider/security wall selectors — a human must solve these. `.baxia-dialog` is
+# included only so that a frequency popup whose X could not be auto-clicked is
+# still surfaced as `human_action_required` instead of silently ignored.
+_SLIDER_SELECTORS = (
+    "#nc_1_n1z",
+    ".nc-container",
+    ".nc_iconfont",
+    "iframe[src*='punish']",
+    "iframe[src*='baxia']",
+    ".baxia-dialog",
+)
 
-# Real session-token cookies — present only while logged in and CLEARED on logout
-# (unlike the remembered-nick cookies tracknick/lgc, which persist and falsely read as logged in).
-_AUTH_COOKIE_NAMES = ("_tb_token_", "cookie2", "unb", "sgcookie")
+# Session cookies used only as a CHEAP PRE-FILTER. They are not sufficient on
+# their own: Taobao's guest-friendly homepage now issues anonymous
+# `_tb_token_`/`cookie2` even while logged out (verified 2026-08-18). The
+# authoritative check is a REAL PAGE navigation to a login-gated URL (below),
+# not a background `context.request` call: the background request can be risk-
+# controlled into a login redirect even while the session is still valid, which
+# then produced spurious "扫码 / 快速进入" pages.
+_AUTH_COOKIE_NAMES = ("_tb_token_", "cookie2")
+_LOGIN_GATE_URL = "https://i.taobao.com/my_itaobao"
+_CONFIRMED_TTL_S = 15 * 60  # trust a successful page-verified login for 15 min
+
+# Taobao shows a "快速进入" soft-reauth button when cookies are still valid but
+# the risk layer wants a human click. Clicking it is NOT captcha-solving and
+# does not enter credentials; it simply confirms the existing session.
+_QUICK_ENTRY_JS = r"""() => {
+  const labels = ['快速进入', '快速登录', '一键登录'];
+  const nodes = [...document.querySelectorAll('button, a, [role="button"], div, span')];
+  for (const el of nodes) {
+    const rect = el.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) continue;
+    const t = (el.innerText || '').trim();
+    if (t && t.length <= 30 && labels.some(l => t.includes(l))) {
+      el.click();
+      return t;
+    }
+  }
+  return null;
+}"""
+
+# "访问太频繁" is a soft frequency notice, not a captcha: closing its X is
+# safe and does not solve a slider or enter credentials. If it won't close,
+# guard_captcha() hands it to the human.
+_FREQUENCY_DIALOG_SELECTOR = ".baxia-dialog"
+_FREQUENCY_DIALOG_HINTS = ("访问太频繁", "操作太频繁", "请求过于频繁", "稍后再试")
+_CLOSE_FREQUENCY_DIALOG_JS = r"""() => {
+  const dialog = document.querySelector('.baxia-dialog');
+  if (!dialog) return null;
+  const nodes = [...dialog.querySelectorAll('button, a, [role="button"], i, span, div')];
+  for (const el of nodes) {
+    const rect = el.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) continue;
+    const t = (el.innerText || '').trim();
+    const cls = typeof el.className === 'string' ? el.className : '';
+    if (/close|关闭|×|^x$/i.test(`${t} ${cls}`)) {
+      el.click();
+      return t || cls;
+    }
+  }
+  return null;
+}"""
 
 # Browser state is private to this checkout.  The installed Chrome/Edge binary
 # may be shared with the OS, but its normal user profile must never be opened by
@@ -69,6 +127,8 @@ class BrowserSession:
         self.page = None
         self.status = "uninitialized"
         self.human_action_required = False
+        self.login_confirmed: bool | None = None
+        self.login_confirmed_at: float = 0.0
 
     # ---- lifecycle ---------------------------------------------------------
     async def start(self):
@@ -137,8 +197,20 @@ class BrowserSession:
         self.playwright = None
 
     # ---- login -------------------------------------------------------------
-    async def is_logged_in(self) -> bool:
-        """Cheap cookie check: a nick cookie is present only when logged in."""
+    @staticmethod
+    def _is_login_url(url: str | None) -> bool:
+        u = (url or "").lower()
+        return "login.taobao.com" in u or "login.tmall.com" in u or "//login." in u
+
+    def _mark_logged_in(self) -> str:
+        self.login_confirmed = True
+        self.login_confirmed_at = time.monotonic()
+        self.human_action_required = False
+        self.status = "logged_in"
+        return "logged_in"
+
+    async def _has_auth_cookies(self) -> bool:
+        """Cheap pre-filter only — guests also receive these cookies."""
         if self.context is None:
             return False
         try:
@@ -146,21 +218,98 @@ class BrowserSession:
         except Exception:
             return False
         names = {c.get("name") for c in cookies}
-        return any(name in names for name in _AUTH_COOKIE_NAMES)
+        return bool(names.intersection(_AUTH_COOKIE_NAMES))
+
+    async def _quick_entry_if_available(self, page) -> bool:
+        """Click Taobao's 快速进入 soft-reauth button when it is on screen.
+
+        This is not captcha-solving and does not enter credentials: the button
+        only confirms a session whose cookies are still valid. Returns True when
+        the page leaves the login URL after the click.
+        """
+        for frame in [page, *page.frames]:
+            try:
+                label = await frame.evaluate(_QUICK_ENTRY_JS)
+            except Exception:
+                continue
+            if label:
+                get_logger().info("clicked quick-entry button (%s)", label)
+                await asyncio.sleep(3)
+                try:  # a second confirmation button occasionally appears
+                    await frame.evaluate(_QUICK_ENTRY_JS)
+                    await asyncio.sleep(3)
+                except Exception:
+                    pass
+                return not self._is_login_url(page.url)
+        return False
+
+    async def _verify_via_gate_page(self, page) -> bool:
+        """Authoritative check using a REAL page navigation.
+
+        A background `context.request` was rejected here (2026-08-18): Taobao's
+        risk layer can 302 even a valid session to login.taobao.com, which made
+        the server navigate the visible window to a spurious QR page. Navigating
+        the actual page behaves like the human browser and exposes the 快速进入
+        button when cookies are still valid.
+        """
+        try:
+            await page.goto(_LOGIN_GATE_URL, wait_until="domcontentloaded", timeout=30_000)
+        except Exception:
+            get_logger().warning("login-gate navigation failed", exc_info=True)
+            return self.login_confirmed or False
+        await asyncio.sleep(2)
+        if not self._is_login_url(page.url):
+            return True
+        return await self._quick_entry_if_available(page)
+
+    async def is_logged_in(self) -> bool:
+        """Return the cached page-verified login state.
+
+        Before the first successful `ensure_logged_in` verification the answer is
+        False (safe default) — never a guest-cookie guess.
+        """
+        if self.context is None or self.login_confirmed is None:
+            return False
+        if time.monotonic() - self.login_confirmed_at > _CONFIRMED_TTL_S:
+            self.login_confirmed = None
+            return False
+        if not await self._has_auth_cookies():
+            self.login_confirmed = False
+            self.login_confirmed_at = 0.0
+            return False
+        return self.login_confirmed
 
     async def ensure_logged_in(self, timeout_s: int = 180, poll_s: float = 3.0) -> str:
         """Ensure a logged-in session, actively polling for the human's QR scan.
 
+        Fast path: a recent page-verified login is reused without any extra
+        navigation. Otherwise the visible page is used for verification so the
+        快速进入 button can be clicked automatically when cookies are still valid.
         Returns 'logged_in', or a 'login_required: ...' message if the human
         hasn't scanned within timeout_s.
         """
         page = await self.start()
+
+        if (
+            self.login_confirmed
+            and time.monotonic() - self.login_confirmed_at < _CONFIRMED_TTL_S
+            and await self._has_auth_cookies()
+        ):
+            return self._mark_logged_in()
+
         await page.goto("https://www.taobao.com", wait_until="domcontentloaded")
         await asyncio.sleep(2)
-        if await self.is_logged_in():
-            self.human_action_required = False
-            self.status = "logged_in"
-            return "logged_in"
+
+        # If we are already on a login wall, try the soft quick-entry first.
+        if self._is_login_url(page.url) and await self._quick_entry_if_available(page):
+            return self._mark_logged_in()
+
+        # Authoritative real-page check: logged-out guests 302 to login.*.
+        if await self._verify_via_gate_page(page):
+            return self._mark_logged_in()
+
+        self.login_confirmed = False
+        self.login_confirmed_at = time.monotonic()
 
         # Surface the QR page and wait for the human to scan (warm sessions
         # auto-redirect off login and the poll catches it immediately).
@@ -173,10 +322,15 @@ class BrowserSession:
         while waited < timeout_s:
             await asyncio.sleep(poll_s)
             waited += poll_s
-            if await self.is_logged_in():
-                self.human_action_required = False
-                self.status = "logged_in"
-                return "logged_in"
+
+            if self._is_login_url(page.url):
+                # Quick-entry may appear while the QR page is open (cookies valid).
+                if await self._quick_entry_if_available(page):
+                    if await self._verify_via_gate_page(page):
+                        return self._mark_logged_in()
+            elif await self._verify_via_gate_page(page):
+                # Human scan succeeded and the page redirected away from login.
+                return self._mark_logged_in()
 
         return (
             "login_required: scan the QR code in the Chrome window with the "
@@ -184,6 +338,44 @@ class BrowserSession:
         )
 
     # ---- captcha / punish handoff -----------------------------------------
+    async def dismiss_frequency_dialog(self, page=None) -> bool:
+        """Close Taobao's soft '访问太频繁' popup by clicking its X.
+
+        Returns True when there is no such popup or it was closed, False when a
+        frequency dialog is present but not closable (→ hand to human). A real
+        slider/punish wall is never auto-clicked.
+        """
+        page = page or self.page
+        if page is None:
+            return True
+        for _ in range(3):
+            try:
+                info = await page.evaluate(
+                    """() => {
+                      const d = document.querySelector('.baxia-dialog');
+                      if (!d) return null;
+                      const r = d.getBoundingClientRect();
+                      return { text: (d.innerText || '').slice(0, 200), visible: r.width > 0 && r.height > 0 };
+                    }"""
+                )
+            except Exception:
+                return True
+            if not info or not info.get("visible"):
+                return True
+            text = info.get("text", "")
+            if not any(hint in text for hint in _FREQUENCY_DIALOG_HINTS):
+                # Not the dismissible frequency notice; leave it for guard_captcha.
+                return False
+            try:
+                clicked = await page.evaluate(_CLOSE_FREQUENCY_DIALOG_JS)
+            except Exception:
+                clicked = None
+            if not clicked:
+                return False
+            get_logger().info("closed frequency dialog (%s)", clicked)
+            await asyncio.sleep(1.5)
+        return False
+
     async def _looks_blocked(self, page) -> bool:
         url = (page.url or "").lower()
         if any(hint in url for hint in _BLOCK_URL_HINTS):
@@ -199,11 +391,15 @@ class BrowserSession:
     async def guard_captcha(self, page=None, timeout_s: int = 300, poll_s: float = 3.0) -> None:
         """If a slider/punish/login wall is showing, pause and wait for the human.
 
-        Sets ``human_action_required`` and polls until the page clears. Raises
-        CaptchaError on timeout. Never auto-solves (§7.4).
+        Soft '访问太频繁' popups are dismissed automatically first. Sets
+        ``human_action_required`` and polls until the page clears. Raises
+        CaptchaError on timeout. Never auto-solves a real slider (§7.4).
         """
         page = page or self.page
-        if page is None or not await self._looks_blocked(page):
+        if page is None:
+            return
+        await self.dismiss_frequency_dialog(page)
+        if not await self._looks_blocked(page):
             return
         self.human_action_required = True
         self.status = "human_action_required"
@@ -245,7 +441,7 @@ async def ensure_logged_in() -> str:
 
 
 async def is_logged_in() -> bool:
-    """Cheap cookie/DOM logged-in check."""
+    """Authoritative logged-in check (login-gated URL, not just cookies)."""
     return await get_session().is_logged_in()
 
 

@@ -70,11 +70,16 @@ def test_config_reread_on_mtime_change(tmp_path):
     assert load_config(str(p)).limits.max_reviews == 99
 
 
-def test_auth_cookies_require_session_token():
-    from src.browser.session import _AUTH_COOKIE_NAMES
+def test_auth_cookies_are_prefilter_only():
+    from src.browser.session import _AUTH_COOKIE_NAMES, _LOGIN_GATE_URL
 
+    # Guests now receive _tb_token_/cookie2, so these may only pre-filter the
+    # network check — never decide logged-in by themselves.
     assert "_tb_token_" in _AUTH_COOKIE_NAMES
     assert "tracknick" not in _AUTH_COOKIE_NAMES   # remembered-nick must NOT read as logged in
+    assert "unb" not in _AUTH_COOKIE_NAMES         # guest sessions may carry it
+    assert "sgcookie" not in _AUTH_COOKIE_NAMES    # guest sessions may carry it
+    assert _LOGIN_GATE_URL == "https://i.taobao.com/my_itaobao"
 
 
 def test_browser_profile_is_resolved_inside_project_user_data():
