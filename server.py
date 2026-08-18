@@ -9,6 +9,7 @@ Inspect:      npx @modelcontextprotocol/inspector .venv/bin/python server.py
 
 from __future__ import annotations
 
+import json
 import os
 
 import anyio
@@ -269,6 +270,144 @@ async def taobao_full_picture(seller: str | None = None, order_id: str | None = 
         raise NotLoggedInError()
     await _rate_limiter.acquire()
     return await full_picture(seller=seller, order_id=order_id)
+
+
+@mcp.tool(annotations=ToolAnnotations(
+    readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True
+))
+async def taobao_debug_detail(product_url_or_id: str) -> str:
+    """[DEBUG] Open one product page and dump HOW the 详情 (description strip) loads.
+
+    Returns the embedded-data keys (hunting for descUrl/descPath), the page's
+    iframes, a sample of alicdn image URLs, and which desc hosts appear in the
+    HTML. Read-only and paced — used to build the full-detail extractor, then
+    record the mechanism in NOTES.md. Example: {"product_url_or_id": "736546459871"}
+    """
+    if await ensure_logged_in() != "logged_in":
+        raise NotLoggedInError()
+    await _rate_limiter.acquire()
+    from src.extract.desc import recon_detail
+
+    return json.dumps(await recon_detail(product_url_or_id), ensure_ascii=False, indent=2)
+
+
+@mcp.tool(annotations=ToolAnnotations(
+    readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True
+))
+async def taobao_debug_watch(product_url_or_id: str, watch_seconds: int = 120) -> str:
+    """[DEBUG] Open a product page and WATCH it while a human operates the visible window.
+
+    Attaches a network response listener (mtop/desc/alicdn images) and takes a light
+    DOM snapshot every ~3s for `watch_seconds`. During the window, the human clicks
+    around in the real Chrome window (open 详情, switch tabs, scroll) — everything
+    that loads is recorded: the API/URLs called and when desc containers/images appear.
+    Example: {"product_url_or_id": "755873641229", "watch_seconds": 120}
+    """
+    if await ensure_logged_in() != "logged_in":
+        raise NotLoggedInError()
+    await _rate_limiter.acquire()
+    from src.extract.desc import watch_detail
+
+    return json.dumps(
+        await watch_detail(product_url_or_id, watch_seconds=watch_seconds),
+        ensure_ascii=False, indent=2,
+    )
+
+
+@mcp.tool(annotations=ToolAnnotations(
+    readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True
+))
+async def taobao_debug_entry(entry_url: str, referer: str | None = None) -> str:
+    """[DEBUG] Navigate to an arbitrary entry URL (e.g. a tracking click URL from search)
+    and harvest the 详情 strip — tests which entry makes the SSR render the 详情.
+
+    Scrolls the SKU panel + clicks the 详情 tab, then reports the desc containers and
+    images found, plus any mtop API calls. Example: {"entry_url": "https://detail.tmall.com/item.htm?...&id=755873641229&skuId=..."}
+    """
+    if await ensure_logged_in() != "logged_in":
+        raise NotLoggedInError()
+    await _rate_limiter.acquire()
+    from src.extract.desc import probe_entry
+
+    return json.dumps(await probe_entry(entry_url, referer=referer), ensure_ascii=False, indent=2)
+
+
+@mcp.tool(annotations=ToolAnnotations(
+    readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True
+))
+async def taobao_fetch_detail(product_url_or_id: str) -> str:
+    """Fetch the full 详情 (图文详情) image strip — the long picture list at the bottom.
+
+    Uses the mi_id entry trick so the SSR renders the 详情, then scrolls the SKU panel
+    and harvests every detail image URL (https, deduped). The mi_id page also loads the
+    account's personalized promos/优惠. Read-only.
+    If the result has miid_stale=true, call taobao_get_miid first (a human clicks a
+    product to capture a fresh mi_id), then retry. Example: {"product_url_or_id": "755873641229"}
+    """
+    if await ensure_logged_in() != "logged_in":
+        raise NotLoggedInError()
+    await _rate_limiter.acquire()
+    from src.extract.desc import fetch_detail
+
+    return json.dumps(await fetch_detail(product_url_or_id), ensure_ascii=False, indent=2)
+
+
+@mcp.tool(annotations=ToolAnnotations(
+    readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True
+))
+async def taobao_get_miid(watch_seconds: int = 90, keyword: str = "3D打印机", mode: str = "auto") -> str:
+    """Obtain/refresh the mi_id used by taobao_fetch_detail.
+
+    mode="auto" (default): programmatically reads the mi_id from the homepage 猜你喜欢
+    feed's fixed first link (or clicks it) — no human needed, minimal footprint.
+    mode="human": opens a search page; a person clicks a product; the click-generated
+    tracking URL's mi_id is captured. Either way it's persisted to output/.miid.json
+    and picked up automatically. Call when fetch_detail reports miid_stale=true, or to
+    rotate every few detail fetches. Read-only.
+    Example: {"mode": "auto"} or {"mode": "human", "watch_seconds": 90}
+    """
+    if await ensure_logged_in() != "logged_in":
+        raise NotLoggedInError()
+    await _rate_limiter.acquire()
+    from src.extract.miid import get_miid
+
+    return json.dumps(await get_miid(watch_seconds=watch_seconds, keyword=keyword, mode=mode),
+                      ensure_ascii=False, indent=2)
+
+
+@mcp.tool(annotations=ToolAnnotations(
+    readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True
+))
+async def taobao_debug_miid_watch(watch_seconds: int = 180, keyword: str = "3D打印机") -> str:
+    """[DEBUG] Record EVERY product click's mi_id while someone clicks around.
+
+    Opens a search page and logs each distinct URL + its mi_id in click order. Use it
+    to measure whether mi_id is STABLE across clicks or ROTATES per click, which
+    decides the rotation policy (reuse same mi_id for N detail fetches vs fresh per
+    session). Read-only. Example: {"watch_seconds": 180, "keyword": "3D打印机"}
+    """
+    if await ensure_logged_in() != "logged_in":
+        raise NotLoggedInError()
+    await _rate_limiter.acquire()
+    from src.extract.miid import watch_miid_clicks
+
+    return json.dumps(await watch_miid_clicks(watch_seconds=watch_seconds, keyword=keyword),
+                      ensure_ascii=False, indent=2)
+
+
+@mcp.tool(annotations=ToolAnnotations(
+    readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True
+))
+async def taobao_debug_home() -> str:
+    """[DEBUG] Dump the Taobao homepage's ad/product link structure (for building the
+    auto mi_id click). Returns product-page anchors + ad-like containers. Read-only.
+    """
+    if await ensure_logged_in() != "logged_in":
+        raise NotLoggedInError()
+    await _rate_limiter.acquire()
+    from src.extract.miid import recon_home_ads
+
+    return json.dumps(await recon_home_ads(), ensure_ascii=False, indent=2)
 
 
 @mcp.tool(annotations=ToolAnnotations(
