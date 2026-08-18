@@ -25,6 +25,10 @@ This repository keeps two independent entrypoints:
   service.
 - **Public ChatGPT plugin backend:** set `MCP_TRANSPORT=streamable-http` and run
   the authenticated HTTP server behind a stable HTTPS domain at `/mcp`.
+- **DeepSeek Harness from WSL:** when the server runs on the Windows host (real
+  Chrome + persistent profile), DSH in WSL reaches it through a loopback TCP
+  bridge via the official `@deepseek-ai/dsh-mcp-client` plugin — stdio protocol
+  end to end, no OAuth. See [`DSH_WSL_BRIDGE.md`](DSH_WSL_BRIDGE.md).
 
 An account without Developer Mode cannot register a private MCP connection merely
 by typing `@taobao-mcp`. Its ChatGPT path is a reviewed, published MCP-backed plugin.
