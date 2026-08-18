@@ -201,3 +201,103 @@ Our deliverables: (i) a price for **every** SKU via `skuBase`/`sku2info` join; (
 - **Sourcing Skill + supplier templates, tests, evals** — absent.
 
 **One trap to flag:** the base navigates **everything to Tmall** (`build_product_url(..., 'tmall')`, `:300-302`) regardless of the source platform, and waits on the Tmall title selector `.mainTitle--R75fTcZL`. Taobao-vs-Tmall detail pages differ (and mtop endpoints differ per Appendix A). Our fetcher must branch by platform, not force Tmall.
+
+---
+
+## 详情图长图 (全量详情) — 现场 recon 记录 (2026-08-18)
+
+> 需求:抓商品页底部"详情图长图"(如 3D 打印机那种一长条图片)。以下是完整侦查过程与最终机制,供维护时参考。
+
+### 侦查过程(都试过,记录教训)
+1. **桌面 SSR 页直接访问 `item.taobao.com/item.htm?id=X`** → 页面正确加载(重定向到 `detail.tmall.com`),**但详情容器 `#description` / `.desc-root` 都不存在**;首屏+滚动 12 秒内**没有任何详情相关网络请求**(只有 recommend/querybagcount 之类)。→ 结论:新版桌面页首屏不渲染详情、不主动拉详情。
+2. **H5 壳 `h5.m.taobao.com/awp/core/detail.htm?id=X`** → 302 到 `detail.tmall.com?x-ssr=true&h5_spm=a-tb-item`(移动端 SSR 变体),**选型号后出现"扫码去移动端购买"墙** → 对桌面抓取是死路。
+3. **H5 页调的接口**是 `mtop.taobao.detail.data.get/1.0`(带签名 GET);直接复制签名 URL 重放可拿到响应,但响应里详情字段未定(payload 已变)。
+4. **滚动 SKU 面板 `#tbpcDetail_SkuPanelBody`** → 面板确实可滚,但滚完 `.desc-root` 仍不存在。
+5. **点击"图文详情"标签** → 该标签(`.tabTitleItem--z4AoobEz`)在直接访问时**根本不存在**。
+6. **油猴/搞图宝插件源码**(greasyfork 460143, 2026-01 仍维护;github.com/CJMF-i/gao-tu) → 它的选择器也是 `.desc-root` / `.content-detail` / `[class*="desc-"]` / `[class*="detail-"]`,靠滚动 `#tbpcDetail_SkuPanelBody` 触发懒加载——**前提同样是"页面有详情"**。
+7. **人工监听(taobao_debug_watch)**:用户从详情页去搜索"拓竹a1"→ 点商品 → 那个**带跟踪参数的点击 URL** 进入的页面**详情加载了**。
+8. **二分参数(taobao_debug_entry)**:完整跟踪 URL 触发;逐个剥离后发现 **`mi_id=<值>` 单独即可触发**,而且:
+   - `mi_id` 单独(`?id=X&mi_id=...`)就够,不需要 skuId;
+   - 编造的 `mi_id` 值**不触发**(值有语义);
+   - **同一个 `mi_id` 在多个商品上有效**(拓竹A1 50张 / 纵维立方46张 / Storelite 14张 / 天鼠 23张)→ 账号/渠道级稳定值,非每次点击生成。
+
+### 最终机制
+- **入口**: `https://item.taobao.com/item.htm?id={pid}&mi_id={mi_id}`
+  `mi_id` 让 SSR 渲染出完整图文详情;裸 URL(无 mi_id)页面**根本没有 `.desc-root`**。
+- **容器**: 详情图在 **`.desc-root`** 里(老页面才是 `#description .content`)。
+- **懒加载**: 需先把 SKU 面板滚入视野,再滚 `#tbpcDetail_SkuPanelBody` 内部触发图片;图片真实地址在 `data-ks-lazyload` / `data-src` / `src`。
+- **过滤**: 取 `width>=700` 的图(排除 logo/缩略图),无结果时回退到全部宽度的图。
+- **无需 mtop/签名**: 全部 SSR 渲染进 DOM(`mtop_apis: 0`)。
+
+### 落地
+- `config.toml [detail] mi_id`(默认 `0000aArBeG_hsA1mg1B99KlUQg3VeA5Nf2vZ-C6aSFzldN4`)。
+- `src/extract/desc.py::fetch_detail()` → 返回 `{product_id, url, scope, panel_found, count, detail_images[], caveat}`。
+- MCP 工具 **`taobao_fetch_detail(product_url_or_id)`**。
+- 保留 3 个只读调试工具:`taobao_debug_detail`(机制侦查)、`taobao_debug_entry`(入口 URL 测试)、`taobao_debug_watch`(人工操作+网络/DOM 记录)。
+
+### 风险/注意
+- `mi_id` 是账号/渠道级营销 id,若淘宝轮换/吊销会失效 → 届时重新走 `taobao_debug_entry` 从一次人工点击的 URL 里提取新 `mi_id` 更新 config。
+- 详情容器可能再变(现在是 `.desc-root`,老版本是 `#description .content`)——选择器集中在 `src/extract/selectors.py`。
+- 大长图(50 张)URL 都是 https alicdn 直链,可直接下载;图片本身不带文字,识别需 OCR。
+
+---
+
+## mi_id 续期工具 + 风控策略 (2026-08-18 补充)
+
+### 为什么要续期(风控)
+- 淘宝持续升级反爬/风控(2025–2026 大量实战记录),真实账号自动化有封号案例。
+- 硬编码/反复复用同一 `mi_id` = 每次请求带同一个营销 token,留下**固定足迹**,且淘宝可能轮换它。
+- **低风险方案**:mi_id 由"真人自然点击"生成(真人浏览行为),单独一个工具续期,不长期复用。
+
+### `taobao_get_miid` 工具(新增)
+- 打开搜索结果页(可见 Chrome 窗口)→ **客户像正常购物一样随便点一个商品** → 点击生成的跟踪 URL 带全新 mi_id → 工具捕获并持久化到 `output/.miid.json`(gitignored)。
+- 默认观察 90 秒(可配);要求点击的是"导航到商品页"的左键点击(item.htm 且带 mi_id)。
+- **联动**:`taobao_fetch_detail` 返回 `miid_stale=true`(无 `.desc-root`)时 → 调 `taobao_get_miid` 续期 → 重试。
+- 优先级:`output/.miid.json`(运行时,最新) > `config.toml [detail] mi_id`(静态兜底)。
+- 缓存:`load_config()` 的缓存 key 已含 `.miid.json` mtime,写入新 mi_id 后立即生效。
+
+### 推荐工作流(无 miid 先搜大框 → 确认目标 → 详情)
+1. `taobao_search` 无 miid 大范围搜索(公开搜索,零风险),圈定几个明确目标;
+2. `taobao_fetch_product` 拿型号/规格/价格(无需 miid,正常 SSR);
+3. `taobao_fetch_detail` 拿详情长图 + **定向优惠/个性化促销页**(miid 页附带加载)——
+   若 `miid_stale=true`,先 `taobao_get_miid`(客户点一个商品)再重试。
+
+### 风险边界
+- `taobao_get_miid` 只读 URL(不点购物车/不下单/不写),人类点击是唯一"操作"。
+- 频率仍是关键:详情抓取保持 human-pacing;mi_id 没必要每次刷新,失效/定期再取即可。
+
+---
+
+## mi_id 行为实测 + 轮换策略 (2026-08-18 二补)
+
+### 实测(多商品多点击 + 跨商品/时效验证)
+- **mi_id 不是每次点击随机**:同一商品+同一渠道 → mi_id 固定(广告素材点击 3 次 mi_id 相同,ali_trackid 才每次不同);不同商品 / 不同渠道(搜索 vs 广告)→ mi_id 不同。
+- **任意有效 mi_id 跨商品通用**:某商品点击来的 mi_id 用在别的商品上一样触发详情(.desc-root)。
+- **mi_id 失效很慢**:几小时前抓的 mi_id 仍有效(天鼠 23 张、用户点击过的商品 16 张)。
+- 格式:`0000` + 21~26 位 base62-ish;`spm=a21n57.1.hoverItem.N` 的 N 是页面位置,不是 token。
+
+### 轮换策略
+- 建议 **每 5~10 次详情抓取轮换一次**(`taobao_get_miid` 让客户自然点一个商品即可),或换商品/换渠道时顺手换。
+- 风控足迹风险主要来自"一个 token 反复驱动大量不同商品",轮换即为此。
+- `taobao_fetch_detail` 的 `miid_stale=true` 是失效兜底信号 → 调 `taobao_get_miid` 续期。
+- 监听工具 `taobao_debug_miid_watch`(taobao_debug_miid_watch):打开搜索页逐秒记录 URL+mi_id,用于以后复核 token 行为是否变化。
+
+---
+
+## 自动取 mi_id(mode="auto")+ 风控三条 (2026-08-18 三补)
+
+### 风控推断(结合实测)
+1. **mi_id ≈ 个人+渠道(营销素材级)追踪 id,决定定向优惠** —— 用 mi_id 进的详情页会加载政府补贴/促销横幅等个性化内容。
+2. **警惕同商品会话内"可变量"**:ali_trackid(每次点击)、spm 位置号、priceTId、utparam 都在变 → 正是风控指纹原料。抓详情 URL 应保持干净稳定(`id+mi_id`),不制造变化 token。
+3. **自动获取可行**:首页"猜你喜欢"推荐位(`.tb-pick-feeds-container` 内 `a.item-link`,xxc=home_recommend)**href 直接带 mi_id**,固定位置、可程序化读取/点击。
+
+### taobao_get_miid 的 mode
+- `mode="auto"`(默认):进首页 → 读固定推荐位链接的 mi_id(零点击足迹),失败则模拟点击该固定位,再不行搜索首结果点击。无需人工。实测 2.7s 取到并持久化。
+- `mode="human"`:打开搜索页等真人点一个商品(最低风险兜底)。
+- 持久化到 `output/.miid.json`(Windows 部署为 `C:\MCP\taobao-mcp\output\.miid.json`),优先级 > config.toml,缓存按 mtime 失效。
+- 闭环实测:auto 取新 mi_id → fetch_detail 自动使用 → 拓竹 A1 50 张详情图,miid_stale=False。
+
+### 轮换建议(修订)
+- mi_id 失效慢 + 任意有效 token 跨商品通用 → **每 5~10 次详情抓取轮换一次**即可;`taobao_get_miid(mode="auto")` 一键续。
+- 保持抓取 URL 干净稳定;不要在同一会话里人为制造一堆变化参数。
+- 调试工具 `taobao_debug_home` 可随时复核首页推荐位结构是否变化。
