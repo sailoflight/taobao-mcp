@@ -350,3 +350,8 @@ Our deliverables: (i) a price for **every** SKU via `skuBase`/`sku2info` join; (
 - 新增 `pacing.human_click(page, locator)`:随机落点(偏中心 ±)、动画移动路径(steps=10~24)、微抖动(±2.5px)、可变 hover 停顿与按住时长、down+up。替代 Playwright 原生 `click()`(瞬移中心+零抖动)。
 - **注意**:整个卡片 box 内随机落点会点到悬浮按钮(进入店铺/按图找相似)或删除按钮 → 不导航。**改为点卡片内 `.title` 标题元素**(商品链接的自然目标),抖动围绕标题中心。实机验证:human_click(标题)→ 新标签页 → 全新 mi_id,opened_id 匹配。
 - 应用到收藏链路全部模拟点击:ensure_favorited/ensure_unfavorited 的 `#collectBtn`、click_from_favorites 与 recon_collect 的收藏卡片标题。
+
+### 模拟点击参数入配置(2026-08-18 七补)
+- 新增 `config.toml [click]` 节(ClickCfg):enabled / path_steps_min-max / move_pause / hover_pause / hold / jitter_px / off_center,`human_click` 全部读配置。
+- 光标慢的根因:远程桥接下每个 mouse.move step 都走一次协议往返,原先 10-24 步 × 多次移动累积十几秒。默认改 4-9 步 + 更短停顿(真人 ~0.5s 点击);可再调低,或 enabled=false 退回瞬时 locator.click()。
+- 提示:收藏流程里"等收藏夹渲染 12s + 4 次滚动 ~5s"是页面加载等待,不是光标;如需再提速可在 config/代码里降(风险是列表未渲染全)。

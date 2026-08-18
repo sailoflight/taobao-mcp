@@ -12,6 +12,22 @@ max_delay_s = 6.0
 scroll_steps = 4              # incremental scroll to trigger lazy load
 max_products_per_minute = 6  # hard cap; never burst
 
+[click]
+# Human-like simulated click (pacing.human_click). Keep it a real person's reach (~0.5s) —
+# over the remote bridge each mouse.move step round-trips, so many steps make a click take
+# SECONDS and look MORE robotic. Tune here without touching code.
+enabled = true                # false → plain locator.click() (instant)
+path_steps_min = 4            # animated mouse-path steps during approach
+path_steps_max = 9
+move_pause_min = 0.01         # s, pause between approach segments
+move_pause_max = 0.05
+hover_pause_min = 0.04        # s, pause at element before pressing
+hover_pause_max = 0.12
+hold_min = 0.04               # s, press-and-hold before release
+hold_max = 0.12
+jitter_px = 2.5               # micro-jitter radius at target (px)
+off_center = 0.15             # aim drift from center (fraction of box)
+
 [limits]
 max_reviews = 60             # per product, paginated
 review_pages = 4

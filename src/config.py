@@ -32,6 +32,27 @@ class PacingCfg:
 
 
 @dataclass(frozen=True)
+class ClickCfg:
+    """Human-like simulated click tuning (pacing.human_click).
+
+    Keep cursor speed a real person's reach (~0.3-0.8s total). Over the remote bridge
+    each mouse.move STEP round-trips, so many steps make a click take SECONDS — and
+    artificial slowness looks MORE robotic, not less. Tune here without touching code.
+    """
+    enabled: bool = True
+    path_steps_min: int = 4        # animated mouse-path steps during the approach
+    path_steps_max: int = 9
+    move_pause_min: float = 0.01   # s, pause between approach segments
+    move_pause_max: float = 0.05
+    hover_pause_min: float = 0.04  # s, pause at the element before pressing
+    hover_pause_max: float = 0.12
+    hold_min: float = 0.04         # s, press-and-hold before release
+    hold_max: float = 0.12
+    jitter_px: float = 2.5         # micro-jitter radius at the target (px)
+    off_center: float = 0.15       # aim drift from center (fraction of the box dim)
+
+
+@dataclass(frozen=True)
 class LimitsCfg:
     max_reviews: int = 60
     review_pages: int = 4
@@ -55,6 +76,7 @@ class DetailCfg:
 class Config:
     browser: BrowserCfg
     pacing: PacingCfg
+    click: ClickCfg
     limits: LimitsCfg
     output: OutputCfg
     detail: DetailCfg
@@ -116,6 +138,7 @@ def load_config(path: str | Path = "config.toml") -> Config:
     cfg = Config(
         browser=BrowserCfg(**_filter(BrowserCfg, "browser")),
         pacing=PacingCfg(**_filter(PacingCfg, "pacing")),
+        click=ClickCfg(**_filter(ClickCfg, "click")),
         limits=LimitsCfg(**_filter(LimitsCfg, "limits")),
         output=OutputCfg(**_filter(OutputCfg, "output")),
         detail=DetailCfg(mi_id=_persisted_miid() or _filter(DetailCfg, "detail").get("mi_id", "")),
