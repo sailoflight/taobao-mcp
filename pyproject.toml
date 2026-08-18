@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Local MCP server for human-paced Taobao/Tmall product sourcing: per-SKU prices, variant-linked reviews, Q&A, and xlsx comparison export."
 requires-python = ">=3.11"
 dependencies = [
-    "mcp>=1.2.0",
+    "mcp>=1.2.0,<2",
     "playwright>=1.40.0",
     "pydantic>=2.0.0",
     "openpyxl>=3.1.0",
