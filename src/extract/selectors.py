@@ -297,6 +297,58 @@ SUBSIDY_PRICE_JS = r"""() => {
   return m ? m[1] : null;
 }"""
 
+# --- light price snapshot on a mi_id-entered page (favorite flow): what does the
+# personalized channel actually show? Includes 平台加补后/补贴/优惠前/到手价/券后 lines. ---
+PRICE_LINES_JS = r"""() => {
+  const body = document.body ? document.body.innerText : '';
+  const lines = body.split('\n').map(s => s.trim()).filter(Boolean);
+  // join a bare ￥/¥ onto the following number so prices read as ￥36 not ￥ + 36
+  const joined = [];
+  for (let i = 0; i < lines.length; i++) {
+    let l = lines[i];
+    if (/^[¥￥]$/.test(l) && i + 1 < lines.length && /^[\d.,]/.test(lines[i + 1])) {
+      l = l + lines[i + 1]; i++;
+    }
+    joined.push(l);
+  }
+  const ys = joined.filter(l => /[¥￥]|到手价|券后|立减|优惠|省/.test(l)).slice(0, 40);
+  const kws = ['平台加补后','平台补贴','补贴','优惠前','到手价','券后','立减','促销','满减','红包','超级立减','店铺优惠'];
+  return { priceLines: ys, hasKeywords: kws.filter(k => body.includes(k)) };
+}"""
+
+# --- direct price-node read (the displayed 店铺优惠后/price elements, not body text) ---
+PRICE_NODE_JS = r"""() => {
+  const out = [];
+  const seen = new Set();
+  document.querySelectorAll('[class*="price"], [class*="Price"], [class*="discount"], [class*="subsidy"], [class*="promo"]').forEach(e => {
+    const t = (e.innerText || '').trim().replace(/\s+/g, ' ');
+    if (t && t.length < 60 && /[¥￥][\d.]/.test(t) && !seen.has(t)) {
+      seen.add(t); out.push({ text: t, cls: String(e.className || '').slice(0, 40) });
+    }
+  });
+  return out.slice(0, 20);
+}"""
+
+# --- SKU option chip discovery (for per-variant price sweeps) ---
+CHIP_DISCOVER_JS = r"""() => {
+  const seen = new Set();
+  const out = [];
+  const rx = /cm|特大|加大|超[大中小]?号|色分类|规格|个装|只装|件|米|kg|L\d|M\d|S\d/;
+  document.querySelectorAll('div, span, li, button, a').forEach(e => {
+    if (e.children.length > 2) return;             // leaf-ish chips only
+    const t = (e.innerText || '').trim().replace(/\s+/g, ' ');
+    if (t.length < 2 || t.length >= 46 || seen.has(t)) return;
+    if (!rx.test(t)) return;
+    let r = null;
+    try { r = e.getBoundingClientRect(); } catch (_) {}
+    if (r && r.width > 20 && r.height > 14 && r.width < 400) {  // chip-like dimensions
+      seen.add(t);
+      out.push({ text: t, cls: String(e.className || '').slice(0, 40), tag: e.tagName });
+    }
+  });
+  return out.slice(0, 40);
+}"""
+
 
 def require(value, step: str, selector: str | None = None):
     """Return value, or raise SelectorDriftError if it's falsy/empty.

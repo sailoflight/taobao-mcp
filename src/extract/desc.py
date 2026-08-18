@@ -281,6 +281,220 @@ async def _probe_h5_detail_api(page, pid: str) -> dict:
     return out
 
 
+async def probe_miid_price(product_url_or_id: str, target_chip: str = "特大号") -> dict:
+    """细查观察: 走收藏链路落到带 mi_id 的个性化页面, 尝试选中目标变体芯片
+    (默认"特大号"), 读该页显示的价格(平台加补后/到手价/价格行), 看优惠价是否可见。
+    Read-only navigation + one chip click; un-favorites if we added it this round.
+    """
+    from src.browser.pacing import human_click
+    from src.browser.session import get_session
+    from src.extract.favorite import click_from_favorites, ensure_favorited, ensure_unfavorited
+    from src.extract.product import _to_product_id
+    from src.extract.selectors import PRICE_LINES_JS, SUBSIDY_PRICE_JS
+
+    pid = _to_product_id(product_url_or_id)
+    session = get_session()
+    page = await session.start()
+    out: dict = {"pid": pid, "target_chip": target_chip}
+    fav = await ensure_favorited(page, pid)
+    out["favorite"] = fav
+    res = await click_from_favorites(page, pid, added_by_us=fav.get("state") == "added")
+    popup = res.get("popup")
+    tp = popup or page
+    try:
+        await tp.wait_for_timeout(2500)
+        for _ in range(2):  # light scroll to trigger the price area to render
+            try:
+                await tp.mouse.wheel(0, 400)
+            except Exception:
+                pass
+            await tp.wait_for_timeout(600)
+        try:
+            await tp.evaluate("window.scrollTo(0, 0)")
+        except Exception:
+            pass
+        await tp.wait_for_timeout(1200)
+        out["landed_url"] = (res.get("url") or "")[:160]
+        out["subsidy_default"] = await tp.evaluate(SUBSIDY_PRICE_JS)
+        out["page_default"] = await tp.evaluate(PRICE_LINES_JS)
+    except Exception as exc:
+        out["land_error"] = str(exc)
+
+    # try to select the target chip (特大号 / 56*41*32) inside the sku area
+    chip_clicked = False
+    for sel in (f'[class*="sku"]:has-text("{target_chip}")',
+                f'[class*="Sku"]:has-text("{target_chip}")',
+                f'[class*="skuItem"]:has-text("{target_chip}")',
+                f'[class*="item"]:has-text("{target_chip}")'):
+        try:
+            loc = tp.locator(sel).first
+            if await loc.count() > 0:
+                await human_click(tp, loc)
+                await tp.wait_for_timeout(1800)
+                chip_clicked = True
+                break
+        except Exception:
+            continue
+    out["chip_clicked"] = chip_clicked
+    if chip_clicked:
+        try:
+            await tp.wait_for_timeout(2200)
+            out["subsidy_after_chip"] = await tp.evaluate(SUBSIDY_PRICE_JS)
+            out["page_after_chip"] = await tp.evaluate(PRICE_LINES_JS)
+        except Exception as exc:
+            out["post_chip_error"] = str(exc)
+
+    if fav.get("added_by_us"):
+        try:
+            out["cleanup"] = await ensure_unfavorited(page, pid)
+        except Exception as exc:
+            out["cleanup"] = {"error": str(exc)}
+    if popup and not popup.is_closed():
+        try:
+            await popup.close()
+        except Exception:
+            pass
+    return out
+
+
+async def probe_sku_structure(product_url_or_id: str, target: str = "特大号白色") -> dict:
+    """诊断: SKU 芯片真实结构 + 点击后 selected 态/URL/价格是否变化. 走收藏链路落 mi_id 页."""
+    from src.browser.session import get_session
+    from src.extract.favorite import click_from_favorites, ensure_favorited, ensure_unfavorited
+    from src.extract.product import _to_product_id
+    from src.extract.selectors import PRICE_LINES_JS
+
+    pid = _to_product_id(product_url_or_id)
+    session = get_session()
+    page = await session.start()
+    out: dict = {"pid": pid, "target": target}
+    fav = await ensure_favorited(page, pid)
+    res = await click_from_favorites(page, pid, added_by_us=fav.get("state") == "added")
+    popup = res.get("popup")
+    tp = popup or page
+    await tp.wait_for_timeout(2500)
+
+    SKU_STATE_JS = r"""() => {
+      const out = { chips: [] };
+      document.querySelectorAll('[class*="valueItem"]').forEach(e => {
+        const t = (e.innerText || '').trim().replace(/\s+/g, ' ').slice(0, 30);
+        if (out.chips.length < 10) {
+          out.chips.push({
+            text: t,
+            cls: String(e.className || '').slice(0, 60),
+            selected: /selected|active|cur|on/i.test(String(e.className || '')),
+            html: (e.outerHTML || '').slice(0, 220),
+          });
+        }
+      });
+      return out;
+    }"""
+    try:
+        out["chips_before"] = await tp.evaluate(SKU_STATE_JS)
+        # click the target chip
+        chip = tp.locator('[class*="valueItem"]').filter(has_text=target).first
+        if await chip.count() == 0:
+            chip = tp.get_by_text(target, exact=False).last
+        await chip.click(timeout=6000)
+        await tp.wait_for_timeout(3800)  # price re-render is async
+        out["url_after"] = (tp.url or "")[:200]
+        out["chips_after"] = await tp.evaluate(SKU_STATE_JS)
+        out["price_after"] = await tp.evaluate(PRICE_LINES_JS)
+        from src.extract.selectors import PRICE_NODE_JS
+        out["price_nodes_after"] = await tp.evaluate(PRICE_NODE_JS)
+    except Exception as exc:
+        out["error"] = str(exc)[:120]
+
+    if fav.get("added_by_us"):
+        try:
+            out["cleanup"] = await ensure_unfavorited(page, pid)
+        except Exception as exc:
+            out["cleanup"] = {"error": str(exc)}
+    if popup and not popup.is_closed():
+        try:
+            await popup.close()
+        except Exception:
+            pass
+    return out
+
+
+async def sweep_variant_prices(product_url_or_id: str, max_chips: int = 12) -> dict:
+    """细查变体价格扫描: 走收藏链路落到带 mi_id 的个性化页面, 逐个点击 SKU 型号芯片,
+    读每个型号的显示价格(店铺优惠后/券后/到手价/价格行) — 确认能分清每个 SKU 型号的价格。
+    Read-only navigation + per-chip clicks; un-favorites if we added it this round.
+    """
+    from src.browser.pacing import human_click
+    from src.browser.session import get_session
+    from src.extract.favorite import click_from_favorites, ensure_favorited, ensure_unfavorited
+    from src.extract.product import _to_product_id
+    from src.extract.selectors import CHIP_DISCOVER_JS, DESC_PANEL_JS, PRICE_LINES_JS
+
+    pid = _to_product_id(product_url_or_id)
+    session = get_session()
+    page = await session.start()
+    out: dict = {"pid": pid}
+    fav = await ensure_favorited(page, pid)
+    res = await click_from_favorites(page, pid, added_by_us=fav.get("state") == "added")
+    popup = res.get("popup")
+    tp = popup or page
+    try:
+        # DESC_PANEL scroll trick renders the whole page (prices included) — proven in fetch_detail
+        await tp.evaluate(DESC_PANEL_JS)
+        await tp.evaluate("window.scrollTo(0, 0)")
+        await tp.wait_for_timeout(1000)
+    except Exception:
+        pass
+    out["landed_url"] = (res.get("url") or "")[:160]
+    try:
+        out["base"] = await tp.evaluate(PRICE_LINES_JS)
+    except Exception as exc:
+        out["base"] = {"error": str(exc)[:80]}
+    try:
+        chips = await tp.evaluate(CHIP_DISCOVER_JS)
+    except Exception as exc:
+        chips = []
+        out["chip_discover_error"] = str(exc)
+    out["chips"] = chips
+    out["per_variant"] = {}
+    clicked = 0
+    for ch in chips[:max_chips]:
+        text = (ch or {}).get("text", "")
+        if not text or text in ("规格", "颜色分类") or "物品类型" in text or "重量" in text:
+            continue
+        # only the real SKU option chips (valueItem) carrying a size/color marker
+        try:
+            size_part = text.split("【")[0].strip()
+            chip = tp.locator('[class*="valueItem"]').filter(has_text=size_part).first
+            if await chip.count() == 0:
+                chip = tp.get_by_text(text, exact=False).last
+            await chip.click(timeout=6000)  # native click — reliable selection for this diagnostic
+            await tp.wait_for_timeout(3200)  # the price/URL re-render is async — give it time
+            url_now = tp.url or ""
+            # upStreamPrice in the URL is Taobao's own per-variant price (authoritative)
+            import re as _re
+            m = _re.search(r'upStreamPrice=(\d+)', url_now)
+            out["per_variant"][text] = {
+                "url": url_now[:200],
+                "upstream_price": (m.group(1)[:-2] + "." + m.group(1)[-2:]) if m else None,
+                "price": await tp.evaluate(PRICE_LINES_JS),
+            }
+            clicked += 1
+        except Exception as exc:
+            out["per_variant"][text] = {"error": str(exc)[:80]}
+    out["chips_clicked"] = clicked
+    if fav.get("added_by_us"):
+        try:
+            out["cleanup"] = await ensure_unfavorited(page, pid)
+        except Exception as exc:
+            out["cleanup"] = {"error": str(exc)}
+    if popup and not popup.is_closed():
+        try:
+            await popup.close()
+        except Exception:
+            pass
+    return out
+
+
 async def fetch_detail(product_url_or_id: str, miid_source: str = "config") -> dict:
     """Fetch the full 详情 (图文详情) image strip for one product.
 
@@ -367,6 +581,21 @@ async def fetch_detail(product_url_or_id: str, miid_source: str = "config") -> d
     except Exception:
         pass
 
+    # Price observation (fine-compare): on the mi_id-entered page the personalized
+    # channel may show the platform-subsidy / coupon price (e.g. 平台加补后 ¥33.75).
+    price_observed: dict = {}
+    if miid_source == "favorite" and not entry.get("favorite_fallback"):
+        from src.extract.selectors import PRICE_LINES_JS, SUBSIDY_PRICE_JS
+
+        try:
+            price_observed["platform_subsidy_after"] = await harvest_page.evaluate(SUBSIDY_PRICE_JS)
+        except Exception:
+            price_observed["platform_subsidy_after"] = None
+        try:
+            price_observed["page"] = await harvest_page.evaluate(PRICE_LINES_JS)
+        except Exception:
+            pass
+
     # Cleanup (user rule): if WE favorited it this round, un-favorite — no residue.
     if miid_source == "favorite" and entry.get("added_by_us"):
         try:
@@ -388,6 +617,7 @@ async def fetch_detail(product_url_or_id: str, miid_source: str = "config") -> d
         "url": (harvest_page.url or "")[:220],
         "miid_used": miid_from_url(harvest_page.url or ""),
         "entry": entry,
+        "price_observed": price_observed,
         "scope": harvest.get("scope"),
         "panel_found": harvest.get("panelFound"),
         "count": len(normalized),

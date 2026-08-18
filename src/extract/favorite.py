@@ -171,24 +171,30 @@ async def ensure_unfavorited(page, pid: str) -> dict:
 async def click_from_favorites(page, pid: str, added_by_us: bool = True) -> dict:
     """Open the 收藏夹, click the target card, return the opened item URL + fresh mi_id.
 
-    A fresh favorite sits at the TOP of the list → click the first goodsItem card. The
-    click opens a NEW TAB with a tracking URL (spm=tbpc.mytb_itemcollect.item.goods,
-    fresh mi_id) — validated live. For added_by_us=False we still click the top card but
-    VERIFY the opened id == pid; a mismatch means the target is buried elsewhere → return
-    it so the caller falls back (we never disturb/re-order existing favorites).
+    A fresh favorite sits at the TOP of the list → for added_by_us we wait for the FIRST
+    card to render (event-driven, no fixed 15s wait + no scroll-to-find — user's
+    simplification) and click it directly. The click opens a NEW TAB with a tracking URL
+    (spm=tbpc.mytb_itemcollect.item.goods, fresh mi_id) — validated live. For
+    added_by_us=False we still click the top card but VERIFY the opened id == pid; a
+    mismatch means the target is buried elsewhere → the caller falls back (we never
+    disturb/re-order existing favorites).
     """
     from urllib.parse import parse_qs, urlparse
 
     from src.extract.miid import miid_from_url
 
     await page.goto(COLLECT_URL, wait_until="domcontentloaded")
-    await page.wait_for_timeout(12000)
-    for _ in range(4):
-        try:
+    # Event-driven: wait for the first goodsItem card instead of a fixed long sleep.
+    first = page.locator('[class*="goodsItem"]').first
+    try:
+        await first.wait_for(state="visible", timeout=18000)
+    except Exception:
+        try:  # a light scroll may be what triggers the JS list render
             await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            await page.wait_for_timeout(2500)
+            await first.wait_for(state="visible", timeout=10000)
         except Exception:
-            pass
-        await page.wait_for_timeout(1200)
+            return {"url": None, "reason": "no goodsItem cards rendered"}
     try:
         await page.evaluate("window.scrollTo(0, 0)")
     except Exception:

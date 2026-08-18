@@ -294,6 +294,72 @@ async def taobao_debug_detail(product_url_or_id: str) -> str:
 @mcp.tool(annotations=ToolAnnotations(
     readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True
 ))
+async def taobao_debug_cart_prices() -> str:
+    """[DEBUG] 读购物车每行商品的实际价格(到手价), 确认如天鼠特大号的实际价(如 ¥33.75).
+    Read-only. No writes.
+    """
+    if await ensure_logged_in() != "logged_in":
+        raise NotLoggedInError()
+    await _rate_limiter.acquire()
+    from src.extract.cart_price import read_cart_prices
+
+    return json.dumps(await read_cart_prices(), ensure_ascii=False, indent=2)
+
+
+@mcp.tool(annotations=ToolAnnotations(
+    readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=True
+))
+async def taobao_debug_sku_structure(product_url_or_id: str, target: str = "特大号白色") -> str:
+    """[DEBUG] 诊断 SKU 芯片真实结构: 走收藏链路落 mi_id 页, dump valueItem 芯片的
+    selected 态/外层 HTML, 点击目标芯片后对比 URL/价格是否变化 — 定位点击为何不选中。
+    Example: {"product_url_or_id":"862892097837","target":"特大号白色"}
+    """
+    if await ensure_logged_in() != "logged_in":
+        raise NotLoggedInError()
+    await _rate_limiter.acquire()
+    from src.extract.desc import probe_sku_structure
+
+    return json.dumps(await probe_sku_structure(product_url_or_id, target=target),
+                      ensure_ascii=False, indent=2)
+
+
+@mcp.tool(annotations=ToolAnnotations(
+    readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=True
+))
+async def taobao_debug_sweep_price(product_url_or_id: str, max_chips: int = 12) -> str:
+    """[DEBUG] 细查逐型号价格扫描: 走收藏链路落到带 mi_id 的页面, 逐个点击 SKU 型号芯片,
+    读每个型号的价格(店铺优惠后/券后/到手价) — 确认能分清每个 SKU 的价格。
+    May add+cleanup a favorite (benign, reversible). Example: {"product_url_or_id":"862892097837"}
+    """
+    if await ensure_logged_in() != "logged_in":
+        raise NotLoggedInError()
+    await _rate_limiter.acquire()
+    from src.extract.desc import sweep_variant_prices
+
+    return json.dumps(await sweep_variant_prices(product_url_or_id, max_chips=max_chips),
+                      ensure_ascii=False, indent=2)
+
+
+@mcp.tool(annotations=ToolAnnotations(
+    readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=True
+))
+async def taobao_debug_miid_price(product_url_or_id: str, target_chip: str = "特大号") -> str:
+    """[DEBUG] 细查观察: 走收藏链路落到带 mi_id 的个性化页面, 尝试选中目标变体芯片,
+    读该页显示的价格(平台加补后/到手价/价格行), 看优惠价是否可见(如天鼠 ¥33.75)。
+    May add+cleanup a favorite (benign, reversible). Example: {"product_url_or_id":"862892097837","target_chip":"特大号"}
+    """
+    if await ensure_logged_in() != "logged_in":
+        raise NotLoggedInError()
+    await _rate_limiter.acquire()
+    from src.extract.desc import probe_miid_price
+
+    return json.dumps(await probe_miid_price(product_url_or_id, target_chip=target_chip),
+                      ensure_ascii=False, indent=2)
+
+
+@mcp.tool(annotations=ToolAnnotations(
+    readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True
+))
 async def taobao_fetch_detail(product_url_or_id: str, miid_source: str = "config") -> str:
     """Fetch the full 详情 (图文详情) image strip — the long picture list at the bottom.
 

@@ -355,3 +355,11 @@ Our deliverables: (i) a price for **every** SKU via `skuBase`/`sku2info` join; (
 - 新增 `config.toml [click]` 节(ClickCfg):enabled / path_steps_min-max / move_pause / hover_pause / hold / jitter_px / off_center,`human_click` 全部读配置。
 - 光标慢的根因:远程桥接下每个 mouse.move step 都走一次协议往返,原先 10-24 步 × 多次移动累积十几秒。默认改 4-9 步 + 更短停顿(真人 ~0.5s 点击);可再调低,或 enabled=false 退回瞬时 locator.click()。
 - 提示:收藏流程里"等收藏夹渲染 12s + 4 次滚动 ~5s"是页面加载等待,不是光标;如需再提速可在 config/代码里降(风险是列表未渲染全)。
+
+### 每型号价格 + 优惠价观察(2026-08-18 八补,天鼠实测)
+- 粗查 `taobao_fetch_product` 嵌入数据可分清每型号价:加大号¥36/特大号¥42.25/超大号¥54.75(1个装)。
+- mi_id 页(收藏链路)优惠价以"起"价显示:「店铺优惠后 ¥28.8起」「超级立减活动价¥36起」「超级立减20%省7.2元」。belt 价选型号后不变 → 具体到手价看购物车。
+- **天鼠特大号实际到手 ¥33.75 = 标价¥42.25 − 超级立减¥8.5**(购物车确认,显示¥33)。Purable 50# ≈ ¥18.9 − 立减¥3 ≈ ¥15.9。
+- 芯片点击:valueItem 芯片有 data-vid;点后 URL 更新 sku_properties(选中 vid)但 upStreamPrice 不随页面内选型变(仍是原始点击价)。
+- 简化:`click_from_favorites` 改事件驱动(等首个 goodsItem 卡出现即点,不再固定15s+滚动)。
+- 新增工具:`taobao_debug_sweep_price`(逐型号点芯片读价)、`taobao_debug_sku_structure`(芯片结构诊断)、`taobao_debug_cart_prices`(购物车实际到手价)、`taobao_debug_miid_price`(落地页价格观察)。
