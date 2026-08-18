@@ -72,62 +72,6 @@ async def recon_home_ads() -> dict:
     return await page.evaluate(HOME_AD_RECON_JS)
 
 
-async def watch_miid_clicks(watch_seconds: int = 180, keyword: str = "3D打印机") -> dict:
-    """Record EVERY product click's mi_id while a human (or bot) clicks around.
-
-    Opens a search page and polls the tab URL ~1x/s, logging each distinct URL and
-    its mi_id in click order. Use this to measure whether mi_id is STABLE across
-    clicks or ROTATES per click — which decides the rotation policy (e.g. reuse the
-    same mi_id for N detail fetches, or grab a fresh one per session).
-    """
-    from urllib.parse import quote
-
-    from src.browser.session import get_session
-
-    session = get_session()
-    page = await session.start()
-    await page.goto("https://s.taobao.com/search?q=" + quote(keyword), wait_until="domcontentloaded")
-    await session.guard_captcha(page)
-
-    events: list[dict] = []
-    last_url: str | None = None
-    start = time.time()
-    deadline = start + watch_seconds
-    while time.time() < deadline:
-        try:
-            u = page.url or ""
-        except Exception:
-            u = ""
-        if u != last_url:
-            last_url = u
-            events.append({
-                "t": round(time.time() - start, 1),
-                "url": u[:220],
-                "miid": miid_from_url(u),
-                "is_product": "item.htm" in u,
-                "is_search": "s.taobao.com/search" in u,
-            })
-        try:
-            await page.wait_for_timeout(1000)
-        except Exception:
-            break
-
-    miids = [e["miid"] for e in events if e["miid"]]
-    unique: list[str] = []
-    for m in miids:
-        if m not in unique:
-            unique.append(m)
-    return {
-        "keyword": keyword,
-        "watch_seconds": watch_seconds,
-        "event_count": len(events),
-        "click_count_estimate": len([e for e in events if e.get("is_product")]),
-        "distinct_miids": unique,
-        "miid_rotates": len(unique) > 1,
-        "events": events,
-    }
-
-
 async def _auto_acquire_miid(page, keyword: str = "3D打印机") -> str | None:
     """Programmatically obtain a fresh mi_id from the homepage rec-feed (fixed position).
 

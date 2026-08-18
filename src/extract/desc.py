@@ -281,97 +281,24 @@ async def _probe_h5_detail_api(page, pid: str) -> dict:
     return out
 
 
-async def watch_detail(product_url_or_id: str, watch_seconds: int = 120) -> dict:
-    """Open a product page and WATCH it while a human operates the visible window.
-
-    Attaches a network response listener (mtop / desc / alicdn images) and takes a
-    light DOM snapshot every ~3s for `watch_seconds`. Whatever the human clicks in
-    the real Chrome window during the window is recorded — the definitive way to
-    discover how the 详情 loads when automated probes keep missing it.
-    """
-    import asyncio
-    import time
-
-    from src.browser.session import get_session
-    from src.extract.product import _to_product_id
-    from src.extract.selectors import SNAPSHOT_JS
-
-    pid = _to_product_id(product_url_or_id)
-    session = get_session()
-    page = await session.start()
-    url = f"https://item.taobao.com/item.htm?id={pid}"
-    await page.goto(url, wait_until="domcontentloaded")
-    await session.guard_captcha(page)
-
-    net: list[dict] = []
-
-    def on_resp(resp):
-        try:
-            u = resp.url or ""
-            if ("mtop" in u and "taobao.com" in u) or "desc" in u or ("imgextra" in u and "alicdn" in u):
-                entry: dict = {"t": round(time.time(), 1), "status": resp.status, "url": u[:180]}
-                try:
-                    entry["ct"] = (resp.headers or {}).get("content-type", "")[:40]
-                except Exception:
-                    pass
-                if "mtop" in u:
-                    try:
-                        entry["method"] = resp.request.method
-                        pd = resp.request.post_data or ""
-                        entry["post"] = pd[:300]
-                    except Exception:
-                        pass
-                net.append(entry)
-                if len(net) > 300:
-                    net.pop(0)
-        except Exception:
-            pass
-
-    page.on("response", on_resp)
-
-    timeline: list[dict] = []
-    start = time.time()
-    deadline = start + watch_seconds
-    while time.time() < deadline:
-        try:
-            snap = await page.evaluate(SNAPSHOT_JS)
-            snap["t"] = round(time.time() - start, 1)
-            snap["net_count"] = len(net)
-            snap["url"] = (page.url or "")[:180]
-            timeline.append(snap)
-        except Exception:
-            pass
-        await asyncio.sleep(min(3.0, max(0.5, deadline - time.time())))
-
-    page.remove_listener("response", on_resp)
-    try:
-        await page.evaluate("window.scrollTo(0, 0)")
-    except Exception:
-        pass
-    return {
-        "url": url,
-        "watch_seconds": watch_seconds,
-        "final_url": (page.url or "")[:180],
-        "net_count": len(net),
-        "timeline_count": len(timeline),
-        "net": net,
-        "timeline": timeline,
-    }
-
-
-async def fetch_detail(product_url_or_id: str, miid_source: str = "favorite") -> dict:
+async def fetch_detail(product_url_or_id: str, miid_source: str = "config") -> dict:
     """Fetch the full 详情 (图文详情) image strip for one product.
 
-    miid_source="favorite" (default, LOW-RISK, user-designed, CLAUDE.md §7 paced):
+    TWO-PHASE WORKFLOW (query separation, user-designed): 粗查定位 uses
+    taobao_search + taobao_fetch_product (NEVER favorites, never regenerates mi_id);
+    细查对比 uses this tool with miid_source="favorite" ONLY on shortlisted products.
+
+    miid_source="config" (DEFAULT — safe, no favorite): uses the static mi_id. Use it
+    for a quick look during 粗查 without touching favorites.
+    miid_source="favorite" (LOW-RISK, fine-compare, CLAUDE.md §7 paced):
       1. ensure_favorited — judge the #collectBtn color; ONLY add when not favorited,
          never touch/re-order an existing favorite (added_by_us tracks cleanup need).
-      2. click_from_favorites — a fresh favorite sits at the TOP of the 收藏夹; clicking
-         its card opens a NEW TAB with a natural tracking URL carrying a FRESH mi_id
-         (spm=tbpc.mytb_itemcollect.item.goods) every time → harvest .desc-root from it.
+      2. click_from_favorites — a fresh favorite sits at the TOP of the 收藏夹; a REAL
+         simulated click on its card opens a NEW TAB with a natural tracking URL
+         carrying a FRESH mi_id + favorites-channel params (spm=tbpc.mytb_itemcollect)
+         every time → harvest .desc-root from that exact clicked page (all params kept).
       3. cleanup — if we added the favorite this round, un-favorite it afterwards
          (no residue); close the popup tab (single-tab hygiene).
-    miid_source="config" uses the static mi_id (fast fallback). Slow but risk-friendly:
-    every query regenerates a fresh, product-scoped mi_id from a real user-data path.
     """
     from src.browser.pacing import human_delay
     from src.browser.session import get_session
@@ -471,16 +398,6 @@ async def fetch_detail(product_url_or_id: str, miid_source: str = "favorite") ->
                    "no .desc-root found — the mi_id is stale. Run taobao_fetch_detail again "
                    "(favorite flow regenerates a fresh one) or taobao_get_miid (auto)."),
     }
-
-
-async def probe_entry(entry_url: str, referer: str | None = None) -> dict:
-    """Navigate to an arbitrary entry URL and harvest the 详情 — tests which entry
-    (tracking URL / referer) makes the SSR render the 详情 strip."""
-    from src.browser.session import get_session
-
-    session = get_session()
-    page = await session.start()
-    return await _probe_pc_detail(page, entry_url, referer=referer)
 
 
 async def recon_detail(product_url_or_id: str) -> dict:

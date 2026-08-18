@@ -249,95 +249,73 @@ async def _read_fav_popup(page) -> dict:
         return {}
 
 
-async def recon_collect_list(target_pid: str | None = None) -> dict:
-    """Recon the 收藏夹 item list: the collections.get API payload (folder layering +
-    item ids) and the .item card DOM. Pass target_pid to report where it sits."""
-    import json as _json
+async def recon_collect(target_pid: str = "") -> dict:
+    """One-pass 收藏夹 recon: JS-rendered goodsItem grid + the click-generated tracking URL.
+
+    Waits for the grid (~12s + scroll), dumps card samples, then clicks the FIRST card
+    (a fresh favorite sits at top) and captures the NEW-TAB tracking URL with its fresh
+    mi_id (spm=tbpc.mytb_itemcollect.item.goods) — the exact mechanism the favorite
+    fetch_detail uses. Pass target_pid to report whether the top card is that item.
+    Read-only (a click + popup open, no writes).
+    """
+    from urllib.parse import parse_qs, urlparse
+
     from src.browser.session import get_session
+    from src.extract.miid import miid_from_url
 
     session = get_session()
     page = await session.start()
-    captured: list = []
-
-    def on_resp(resp):
+    out: dict = {"target_pid": target_pid}
+    await page.goto(COLLECT_URL, wait_until="domcontentloaded")
+    await page.wait_for_timeout(12000)
+    for _ in range(4):
         try:
-            u = resp.url or ""
-            if "collections.get" in u or "mercury.platform.collections" in u:
-                captured.append(resp)
+            await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
         except Exception:
             pass
-
-    page.on("response", on_resp)
-    out: dict = {"target_pid": target_pid}
+        await page.wait_for_timeout(1200)
     try:
-        await page.goto(COLLECT_URL, wait_until="domcontentloaded")
-        await page.wait_for_timeout(7000)
-        for _ in range(3):
+        await page.evaluate("window.scrollTo(0, 0)")
+    except Exception:
+        pass
+
+    out["cards"] = await page.evaluate(
+        """() => {
+          const cs = [...document.querySelectorAll('[class*="goodsItem"]')];
+          return {
+            count: cs.length,
+            firstTitle: cs.length ? ((cs[0].querySelector('[class*="title"]') || {}).innerText || '').slice(0, 44) : '',
+            sample: cs.slice(0, 2).map(e => ({ cls: String(e.className || '').slice(0, 40), html: (e.outerHTML || '').slice(0, 300) })),
+          };
+        }"""
+    )
+    try:
+        card = page.locator('[class*="goodsItem"]').first
+        if await card.count() > 0:
+            async with page.expect_popup(timeout=15000) as pi:
+                await card.click(timeout=8000)
+            popup = await pi.value
             try:
-                await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                await popup.wait_for_load_state("domcontentloaded", timeout=20000)
             except Exception:
                 pass
-            await page.wait_for_timeout(1500)
-
-        # 1) collections.get payload → folder layering + item ids (store FULL url, re-fetch)
-        for r in captured[:3]:
-            try:
-                full_url = r.url or ""
-            except Exception:
-                full_url = ""
-            if not full_url:
-                continue
-            try:
-                r2 = await page.request.get(full_url, timeout=20000)
-                body = await r2.text()
-            except Exception:
-                body = None
-            if body and body[:1] in "{[":
+            await popup.wait_for_timeout(2500)
+            url = (popup.url or "") if not popup.is_closed() else ""
+            out["clicked"] = {
+                "url": url[:240],
+                "mi_id": miid_from_url(url),
+                "opened_id": (parse_qs(urlparse(url or "").query).get("id") or [None])[0],
+                "matches_target": bool(target_pid and target_pid in (url or "")),
+            }
+            if not popup.is_closed():
                 try:
-                    j = _json.loads(body)
-                    out["collections_api_url"] = full_url[:160]
-                    out["collections_api_keys"] = list(j.keys()) if isinstance(j, dict) else type(j).__name__
-                    s = _json.dumps(j, ensure_ascii=False)
-                    out["collections_api_len"] = len(s)
-                    out["folder_names"] = _json_scan_for(j, ("folderName", "collectionName", "cateName", "name", "title"))[:12]
-                    out["target_in_payload"] = (target_pid and target_pid in s) if target_pid else None
-                except Exception as exc:
-                    out["collections_api_error"] = str(exc)
-                break
-
-        # 2) .item card FULL outerHTML (to see the real link structure)
-        out["item_card_html"] = await page.evaluate(
-            """() => {
-              const cards = document.querySelectorAll('.item');
-              const out = [];
-              for (let i = 0; i < cards.length && i < 3; i++) {
-                const e = cards[i];
-                out.push({ idx: i, cls: String(e.className||'').slice(0,50), html: (e.outerHTML||'').slice(0, 600) });
-              }
-              return out;
-            }"""
-        )
+                    await popup.close()
+                except Exception:
+                    pass
+        else:
+            out["clicked"] = {"error": "no goodsItem cards rendered"}
     except Exception as exc:
-        out["error"] = str(exc)
-    finally:
-        page.remove_listener("response", on_resp)
-    return out
-
-
-def _json_scan_for(obj, keys: tuple, depth: int = 0, out: list | None = None) -> list:
-    """Collect string values whose key matches one of `keys` (shallow, bounded)."""
-    if out is None:
-        out = []
-    if depth > 5 or len(out) > 20:
-        return out
-    if isinstance(obj, dict):
-        for k, v in obj.items():
-            if isinstance(v, str) and any(kk in str(k) for kk in keys) and len(v) < 30:
-                out.append(v)
-            _json_scan_for(v, keys, depth + 1, out)
-    elif isinstance(obj, list):
-        for i, v in enumerate(obj[:30]):
-            _json_scan_for(v, keys, depth + 1, out)
+        out["clicked"] = {"error": str(exc)[:120]}
     return out
 
 

@@ -326,3 +326,22 @@ Our deliverables: (i) a price for **every** SKU via `skuBase`/`sku2info` join; (
 4. **单标签卫生**:抓完关掉弹窗标签页(CLAUDE.md §7.3 不批量开 tab)。
 - 实测:已收藏商品(拓竹 A1)→ 不动、收藏夹点击新 mi_id、50 张图;未收藏商品(欧丝轩阁 PETG 干燥箱)→ 添加→点击新 mi_id→12 张图→查完取消收藏(cleanup=removed)。
 - 调试工具:`taobao_debug_pages_watch`(多页面 URL+mi_id 录制)、`taobao_debug_favorite`(按钮/弹窗/收藏夹)、`taobao_debug_collect(_deep)/goodsitem/collect_click`(收藏夹结构/点击行为)。
+
+---
+
+## 工具整合 + 查询分离 + 模拟点击确认 (2026-08-18 五补)
+
+### 工具清理(25 → 19)
+- 删除 6 个冗余调试工具:`taobao_debug_watch`/`taobao_debug_entry`(被 `pages_watch`+`detail` 取代)、`taobao_debug_miid_watch`(被多页面 `pages_watch` 取代)、`taobao_debug_collect_click`/`taobao_debug_goodsitem`/`taobao_debug_collect_deep`(整合进 `taobao_debug_collect`)。
+- 整合:收藏夹结构/卡片/点击探测 → **一个 `taobao_debug_collect(target_pid)`**(等 JS 渲染 → 卡片样例 → 点第一张卡 → 新标签页取全新 mi_id + opened_id 校验)。
+- 删除模块 `collect_deep.py`/`collect_goodsitem.py`(逻辑并入 favorite.py 的 `recon_collect`);删除死代码 `probe_entry`/`watch_detail`(desc.py)、`watch_miid_clicks`(miid.py)、`_json_scan_for`(favorite.py)。
+- 保留 5 个调试工具:`taobao_debug_detail`/`taobao_debug_home`/`taobao_debug_pages_watch`/`taobao_debug_collect`/`taobao_debug_favorite`。
+
+### 查询分离(粗查定位 → 细查对比,用户要求)
+- **粗查定位**:`taobao_search` + `taobao_fetch_product`——绝不碰收藏、绝不重新生成 mi_id,纯筛选对比候选。
+- **细查对比**:`taobao_fetch_detail(miid_source="favorite")` **仅对短名单商品用**——每次真实模拟点击生成全新 mi_id。
+- **`fetch_detail` 默认改为 `miid_source="config"`**(静态 mi_id、零收藏操作)→ 粗查阶段误调也不会触发收藏。要细查必须显式 `miid_source="favorite"`。
+
+### 模拟点击 + 其他追踪参数(风控确认)
+- **是的,已实现真实模拟点击**:收藏夹卡片用 Playwright 真鼠标点击 → 新标签页带**该渠道的自然追踪参数**(`mi_id` 全新 + `spm=tbpc.mytb_itemcollect.item.goods` + `upStreamPrice` + `sku_properties`),抓详情**直接在那个被点击页面上进行**(所有参数原样保留,不做二次干净跳转)。
+- `ali_trackid`/`priceTId`/`utparam` 是**搜索/广告渠道**的每次点击变量,收藏夹渠道点击天然不带——我们**不伪造**(制造假追踪比缺失更可疑,与"不人为制造变化 token"原则一致)。每次查询 = 一次真实渠道点击 = 全新 mi_id + 该渠道参数,足迹自然。
