@@ -109,14 +109,58 @@ async def parse_search(keyword: str, page_num: int = 1, filters: dict | None = N
 
     from src.browser.pacing import human_delay, human_scroll
     from src.browser.session import get_session
+    from src.log import get_logger
 
     session = get_session()
     page = await session.start()
-    url = f"https://s.taobao.com/search?q={quote(keyword)}&page={page_num}"
+    # New SPA normalizes the URL to ...&tab=all&page=N; include tab=all up
+    # front and fall back to clicking the pagination 下一页 button when the
+    # SPA still lands on page 1 (observed 2026-08-18: requested page=2 was
+    # rewritten by the page to page=1).
+    url = f"https://s.taobao.com/search?q={quote(keyword)}&tab=all&page={page_num}"
+    get_logger().info("search: requested page=%s url=%s", page_num, url)
     await page.goto(url, wait_until="domcontentloaded")
     await session.guard_captcha(page)
     for _ in range(3):
         await human_scroll(page, 3)
         await human_delay(1.0, 2.0)
+
+    if page_num > 1:
+        # If the SPA rewrote the URL to page=1, use its own pagination widget.
+        for target in range(2, page_num + 1):
+            current = page.url
+            if f"page={target}" in current.replace("%2C", ","):
+                break
+            # A soft 访问太频繁 popup blocks pointer events — close its X first.
+            await session.dismiss_frequency_dialog(page)
+            try:
+                next_btn = page.locator("button.next-pagination-item.next-next").first
+                await next_btn.click(timeout=5_000)
+                get_logger().info("search: clicked 下一页 toward page=%s url=%s", target, page.url)
+                await human_delay(1.0, 2.0)
+                await page.wait_for_load_state("domcontentloaded")
+                for _ in range(2):
+                    await human_scroll(page, 3)
+                    await human_delay(0.5, 1.0)
+            except Exception as exc:
+                get_logger().warning("search: pagination click failed for page=%s: %s", target, exc)
+                # Popup may have appeared between the dismiss and the click.
+                if await session.dismiss_frequency_dialog(page):
+                    try:
+                        await page.locator("button.next-pagination-item.next-next").first.click(timeout=5_000)
+                        get_logger().info("search: retried 下一页 toward page=%s url=%s", target, page.url)
+                        await human_delay(1.0, 2.0)
+                        await page.wait_for_load_state("domcontentloaded")
+                        for _ in range(2):
+                            await human_scroll(page, 3)
+                            await human_delay(0.5, 1.0)
+                    except Exception as retry_exc:
+                        get_logger().warning("search: pagination retry failed for page=%s: %s", target, retry_exc)
+                        break
+                else:
+                    break
+    else:
+        get_logger().info("search: loaded page=%s url=%s", page_num, page.url)
+
     raw = await page.evaluate(EXTRACT_JS)
     return parse_cards(raw)
