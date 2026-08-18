@@ -47,6 +47,48 @@ async def move_mouse_randomly(page) -> None:
         await asyncio.sleep(random.uniform(0.1, 0.4))
 
 
+async def human_click(page, locator) -> None:
+    """Human-like click on a locator: RANDOM point inside the element (not center),
+    animated mouse path (steps), micro-jitter, varied hover/hold, then down+up.
+
+    Unlike Playwright's ``locator.click()`` (instant teleport to center + zero-jitter
+    down/up), this looks like a real person reaching for the element. Falls back to
+    ``locator.click()`` if the box can't be read or the mouse path fails (e.g. the
+    element scrolled under a sticky bar).
+    """
+    box = None
+    try:
+        box = await locator.bounding_box()
+    except Exception:
+        box = None
+    if not box or box.get("width", 0) <= 0 or box.get("height", 0) <= 0:
+        await locator.click(timeout=8000)
+        return
+    try:
+        # random point inside the box, biased slightly off-center
+        px = box["x"] + box["width"] * random.uniform(0.32, 0.68)
+        py = box["y"] + box["height"] * random.uniform(0.35, 0.65)
+        # hover start: off to the side / above the element (a person approaching)
+        sx = box["x"] + box["width"] * random.uniform(0.0, 1.0) + random.uniform(-60, 60)
+        sy = box["y"] + box["height"] * random.uniform(-0.4, 0.6) + random.uniform(-30, 30)
+        await page.mouse.move(sx, sy, steps=random.randint(5, 12))
+        await asyncio.sleep(random.uniform(0.05, 0.2))
+        # approach with several animated steps
+        await page.mouse.move(px, py, steps=random.randint(10, 24))
+        await asyncio.sleep(random.uniform(0.03, 0.12))
+        # micro-jitter at the target before committing
+        await page.mouse.move(px + random.uniform(-2.5, 2.5), py + random.uniform(-2.5, 2.5), steps=2)
+        await asyncio.sleep(random.uniform(0.06, 0.28))  # hover pause
+        await page.mouse.down()
+        await asyncio.sleep(random.uniform(0.06, 0.22))  # varied hold
+        await page.mouse.up()
+    except Exception:
+        try:
+            await locator.click(timeout=8000)
+        except Exception:
+            raise
+
+
 class RateLimiter:
     """Hard cap on actions per minute (default from config max_products_per_minute).
 

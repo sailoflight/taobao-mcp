@@ -345,3 +345,8 @@ Our deliverables: (i) a price for **every** SKU via `skuBase`/`sku2info` join; (
 ### 模拟点击 + 其他追踪参数(风控确认)
 - **是的,已实现真实模拟点击**:收藏夹卡片用 Playwright 真鼠标点击 → 新标签页带**该渠道的自然追踪参数**(`mi_id` 全新 + `spm=tbpc.mytb_itemcollect.item.goods` + `upStreamPrice` + `sku_properties`),抓详情**直接在那个被点击页面上进行**(所有参数原样保留,不做二次干净跳转)。
 - `ali_trackid`/`priceTId`/`utparam` 是**搜索/广告渠道**的每次点击变量,收藏夹渠道点击天然不带——我们**不伪造**(制造假追踪比缺失更可疑,与"不人为制造变化 token"原则一致)。每次查询 = 一次真实渠道点击 = 全新 mi_id + 该渠道参数,足迹自然。
+
+### 模拟点击抖动(2026-08-18 六补)
+- 新增 `pacing.human_click(page, locator)`:随机落点(偏中心 ±)、动画移动路径(steps=10~24)、微抖动(±2.5px)、可变 hover 停顿与按住时长、down+up。替代 Playwright 原生 `click()`(瞬移中心+零抖动)。
+- **注意**:整个卡片 box 内随机落点会点到悬浮按钮(进入店铺/按图找相似)或删除按钮 → 不导航。**改为点卡片内 `.title` 标题元素**(商品链接的自然目标),抖动围绕标题中心。实机验证:human_click(标题)→ 新标签页 → 全新 mi_id,opened_id 匹配。
+- 应用到收藏链路全部模拟点击:ensure_favorited/ensure_unfavorited 的 `#collectBtn`、click_from_favorites 与 recon_collect 的收藏卡片标题。

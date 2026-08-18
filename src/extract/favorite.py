@@ -126,7 +126,9 @@ async def ensure_favorited(page, pid: str) -> dict:
             return {"already": True, "state": "already_via_list", "added_by_us": False, "clicked": 0}
     # clearly not favorited → add (can only add)
     try:
-        await btn.click(timeout=6000)
+        from src.browser.pacing import human_click
+
+        await human_click(page, btn)
     except Exception as exc:
         return {"already": False, "state": "click_failed", "added_by_us": False, "clicked": 0,
                 "error": str(exc)}
@@ -156,7 +158,9 @@ async def ensure_unfavorited(page, pid: str) -> dict:
     if _btn_state(await _btn_outer(page)) != "favorited":
         return {"state": "not_favorited", "clicked": False}
     try:
-        await btn.click(timeout=6000)
+        from src.browser.pacing import human_click
+
+        await human_click(page, btn)
     except Exception as exc:
         return {"state": "click_failed", "clicked": False, "error": str(exc)}
     await page.wait_for_timeout(1200)
@@ -193,9 +197,16 @@ async def click_from_favorites(page, pid: str, added_by_us: bool = True) -> dict
     card = page.locator('[class*="goodsItem"]').first
     if await card.count() == 0:
         return {"url": None, "reason": "no goodsItem cards rendered"}
+    # Click the TITLE inside the card (the natural product link target) with human jitter —
+    # a random point over the whole card can hit the hover overlay buttons (进入店铺/按图找
+    # 相似) or the delete button, which don't navigate to the item.
     try:
-        async with page.expect_popup(timeout=15000) as pi:
-            await card.click(timeout=8000)
+        from src.browser.pacing import human_click
+
+        title = card.locator('[class*="title"]').first
+        target = title if await title.count() > 0 else card
+        async with page.expect_popup(timeout=20000) as pi:
+            await human_click(page, target)
         popup = await pi.value
         try:
             await popup.wait_for_load_state("domcontentloaded", timeout=20000)
@@ -290,10 +301,14 @@ async def recon_collect(target_pid: str = "") -> dict:
         }"""
     )
     try:
+        from src.browser.pacing import human_click
+
         card = page.locator('[class*="goodsItem"]').first
         if await card.count() > 0:
-            async with page.expect_popup(timeout=15000) as pi:
-                await card.click(timeout=8000)
+            title = card.locator('[class*="title"]').first
+            target = title if await title.count() > 0 else card
+            async with page.expect_popup(timeout=20000) as pi:
+                await human_click(page, target)
             popup = await pi.value
             try:
                 await popup.wait_for_load_state("domcontentloaded", timeout=20000)
