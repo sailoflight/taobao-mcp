@@ -359,38 +359,71 @@ async def watch_detail(product_url_or_id: str, watch_seconds: int = 120) -> dict
     }
 
 
-async def fetch_detail(product_url_or_id: str) -> dict:
+async def fetch_detail(product_url_or_id: str, miid_source: str = "favorite") -> dict:
     """Fetch the full 详情 (图文详情) image strip for one product.
 
-    Entry trick (discovered live 2026-08-18, see NOTES.md): the new SSR page renders
-    the 详情 only when the request carries the account's ``mi_id`` marketing param —
-    a bare ``item.htm?id=`` has NO ``.desc-root`` at all. Navigate with mi_id, scroll
-    the SKU panel to trigger lazy images, then harvest ``.desc-root`` imgs
-    (data-ks-lazyload / data-src / src, width>=700 with a no-filter fallback).
+    miid_source="favorite" (default, LOW-RISK, user-designed, CLAUDE.md §7 paced):
+      1. ensure_favorited — judge the #collectBtn color; ONLY add when not favorited,
+         never touch/re-order an existing favorite (added_by_us tracks cleanup need).
+      2. click_from_favorites — a fresh favorite sits at the TOP of the 收藏夹; clicking
+         its card opens a NEW TAB with a natural tracking URL carrying a FRESH mi_id
+         (spm=tbpc.mytb_itemcollect.item.goods) every time → harvest .desc-root from it.
+      3. cleanup — if we added the favorite this round, un-favorite it afterwards
+         (no residue); close the popup tab (single-tab hygiene).
+    miid_source="config" uses the static mi_id (fast fallback). Slow but risk-friendly:
+    every query regenerates a fresh, product-scoped mi_id from a real user-data path.
     """
     from src.browser.pacing import human_delay
     from src.browser.session import get_session
     from src.config import load_config
+    from src.extract.miid import miid_from_url
     from src.extract.product import _to_product_id
     from src.extract.selectors import DESC_PANEL_JS
 
     pid = _to_product_id(product_url_or_id)
-    mi_id = load_config().detail.mi_id
     session = get_session()
     page = await session.start()
-    url = f"https://item.taobao.com/item.htm?id={pid}"
-    if mi_id:
-        url += f"&mi_id={mi_id}"
-    await page.goto(url, wait_until="domcontentloaded")
-    await session.guard_captcha(page)
+
+    entry: dict = {"miid_source": miid_source, "added_by_us": False, "favorite_fallback": False}
+    harvest_page = page
+    popup = None
+    if miid_source == "favorite":
+        from src.extract.favorite import click_from_favorites, ensure_favorited, ensure_unfavorited
+
+        fav = await ensure_favorited(page, pid)
+        entry["favorite"] = fav
+        entry["added_by_us"] = bool(fav.get("added_by_us"))
+        res = await click_from_favorites(page, pid, added_by_us=entry["added_by_us"])
+        popup = res.get("popup")
+        if res.get("mi_id") and res.get("matches_target"):
+            entry["clicked_url"] = res["url"]
+            entry["miid_from"] = "favorite_click"
+            harvest_page = popup or page
+        else:
+            entry["favorite_fallback"] = True  # click missed/not found → static config below
+            entry["click_fail_reason"] = res.get("reason")
+            entry["clicked_opened_id"] = res.get("opened_id")
+    else:
+        entry["favorite"] = None
+
+    # Ensure we're on an item page carrying a usable mi_id (fallback / config path).
+    if not (harvest_page.url and "item.htm" in harvest_page.url and miid_from_url(harvest_page.url or "")):
+        mi_id = load_config().detail.mi_id
+        url = f"https://item.taobao.com/item.htm?id={pid}"
+        if mi_id:
+            url += f"&mi_id={mi_id}"
+        await page.goto(url, wait_until="domcontentloaded")
+        await session.guard_captcha(page)
+        harvest_page = page
+
     for _ in range(2):  # bring the SKU panel into view before scrolling it internally
         try:
-            await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            await harvest_page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
         except Exception:
             pass
         await human_delay(0.8, 1.5)
 
-    harvest = await page.evaluate(DESC_PANEL_JS)
+    harvest = await harvest_page.evaluate(DESC_PANEL_JS)
     raw = harvest.get("imgs") or harvest.get("imgsAnyWidth") or []
     normalized: list[str] = []
     for u in raw:
@@ -403,23 +436,40 @@ async def fetch_detail(product_url_or_id: str) -> dict:
             normalized.append(s)
 
     try:
-        await page.evaluate("window.scrollTo(0, 0)")
+        await harvest_page.evaluate("window.scrollTo(0, 0)")
     except Exception:
         pass
+
+    # Cleanup (user rule): if WE favorited it this round, un-favorite — no residue.
+    if miid_source == "favorite" and entry.get("added_by_us"):
+        try:
+            entry["cleanup"] = await ensure_unfavorited(page, pid)
+        except Exception as exc:
+            entry["cleanup"] = {"error": str(exc)}
+    else:
+        entry["cleanup"] = {"state": "not_added_by_us", "clicked": False}
+    # Single-tab hygiene (CLAUDE.md §7.3): close the popup tab we opened.
+    if popup and not popup.is_closed():
+        try:
+            await popup.close()
+        except Exception:
+            pass
+
     stale = not harvest.get("scope")
     return {
         "product_id": pid,
-        "url": url,
+        "url": (harvest_page.url or "")[:220],
+        "miid_used": miid_from_url(harvest_page.url or ""),
+        "entry": entry,
         "scope": harvest.get("scope"),
         "panel_found": harvest.get("panelFound"),
         "count": len(normalized),
         "detail_images": normalized,
-        # Signal to the caller: mi_id is stale/expired → run taobao_get_miid (human click)
-        # to capture a fresh one, then retry.
+        # Signal to the caller: mi_id is stale/expired → the favorite flow regenerates one.
         "miid_stale": stale,
         "caveat": (None if not stale else
-                   "no .desc-root found — mi_id is stale. Call taobao_get_miid (human clicks a "
-                   "product) to refresh it, then retry this tool."),
+                   "no .desc-root found — the mi_id is stale. Run taobao_fetch_detail again "
+                   "(favorite flow regenerates a fresh one) or taobao_get_miid (auto)."),
     }
 
 

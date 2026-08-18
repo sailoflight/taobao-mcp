@@ -301,3 +301,28 @@ Our deliverables: (i) a price for **every** SKU via `skuBase`/`sku2info` join; (
 - mi_id 失效慢 + 任意有效 token 跨商品通用 → **每 5~10 次详情抓取轮换一次**即可;`taobao_get_miid(mode="auto")` 一键续。
 - 保持抓取 URL 干净稳定;不要在同一会话里人为制造一堆变化参数。
 - 调试工具 `taobao_debug_home` 可随时复核首页推荐位结构是否变化。
+
+---
+
+## 收藏链路取 mi_id(每次详情查询都重新生成)(2026-08-18 四补)
+
+用户设计(手动验证通过):确认要访问的商品后,通过收藏/购物车把它放到近似固定位置 → 模拟点击直接生成完整参数链接 → 每次查询详情都重新生成,完美避开"一个 token 反复驱动大量商品"的足迹。低效率可接受。
+
+### 手动录制验证(g2_pages_watch,多页面监听)
+- 加购物车 → 从购物车点击 → `?from=cart&id=X&mi_id=<全新>`。
+- 进收藏夹(`i.taobao.com/my_itaobao/itao-tool/collect`)→ 点收藏的商品 → `?id=X&mi_id=<全新>&spm=tb...`。
+- 3 个不同 mi_id,每次点击都生成新值 → 设计成立。
+
+### 收藏夹页面的真实结构(深度 recon 结论)
+- 商品列表是 JS 加载(等 ~12s + 反复滚动才渲染),不在 iframe 里(iframe 只是 search-suggest/push 基建)。
+- 卡片 = `div.goodsItem--hCuMGp0I card--Je2jHg4e`,**无 <a> 链接、DOM 里无 pid**;点击由 JS 事件绑定。
+- **点击卡片 → 新标签页打开**商品:`detail.tmall.com/item.htm?id=X&mi_id=<全新>&spm=tbpc.mytb_itemcollect.item.goods&upStreamPrice=…`。新收藏在列表**最前**(位置≈固定)。
+- 收藏判定信号:**`#collectBtn` 按钮颜色/icon**(favorited = `icon-taobaoyishoucang`+文字"已收藏"+橙 `rgb(255,80,0)`;not = `icon-taobaoshoucang`+"收藏"+深色)。比一次性 toast 持久可靠。**别点外层 div `.RightButtonList`(无 handler),要点 `#collectBtn`**。
+
+### fetch_detail(miid_source="favorite") 四条规则(用户定,均已实现并实机闭环)
+1. **按钮颜色判态**:已收藏 → 不碰(绝不 remove+re-favorite,不破坏收藏夹分层位置);未收藏 → 点 `#collectBtn` 添加,验证按钮翻转。`added_by_us` 标记本轮是否我们加的。
+2. **找位置点击**:进收藏夹 → 等渲染 → 点第一个 `goodsItem` 卡片(新收藏在最前)→ 新标签页带全新 mi_id;用 `expect_popup` 接住 → 校验打开的商品 `id==pid`(防点错/已收藏沉底的兜底:不匹配就回退 config mi_id,绝不乱猜)。
+3. **查完清理**:`added_by_us=true` → `ensure_unfavorited`(点 `#collectBtn` 取消,验证颜色复原)→ 零残留;非本轮收藏不清理。
+4. **单标签卫生**:抓完关掉弹窗标签页(CLAUDE.md §7.3 不批量开 tab)。
+- 实测:已收藏商品(拓竹 A1)→ 不动、收藏夹点击新 mi_id、50 张图;未收藏商品(欧丝轩阁 PETG 干燥箱)→ 添加→点击新 mi_id→12 张图→查完取消收藏(cleanup=removed)。
+- 调试工具:`taobao_debug_pages_watch`(多页面 URL+mi_id 录制)、`taobao_debug_favorite`(按钮/弹窗/收藏夹)、`taobao_debug_collect(_deep)/goodsitem/collect_click`(收藏夹结构/点击行为)。

@@ -181,6 +181,89 @@ async def _auto_acquire_miid(page, keyword: str = "3D打印机") -> str | None:
     return None
 
 
+async def watch_pages(watch_seconds: int = 180, start_url: str | None = None) -> dict:
+    """Record URL changes + mi_id across MULTIPLE pages/tabs while a human operates.
+
+    Attaches to the browser CONTEXT (not just the main tab), so new tabs/pages opened
+    by the human are tracked too. Every URL change on every page is logged with its
+    mi_id. Use it to record a manual 收藏→收藏夹→点击 flow, then build the automated
+    version from the recorded sequence.
+    """
+    from src.browser.session import get_session
+
+    session = get_session()
+    page = await session.start()
+    ctx = session.context
+    states: dict[int, dict] = {id(page): {"page": page, "last": page.url or "", "tag": "main"}}
+    events: list[dict] = []
+    start = time.time()
+
+    def _tag_of(p) -> str:
+        u = p.url or ""
+        if "cart" in u:
+            return "cart"
+        if "favorite" in u or "collect" in u or "my_itaobao" in u or "my_taobao" in u:
+            return "fav"
+        if "item.htm" in u:
+            return "item"
+        if "search" in u:
+            return "search"
+        return "other"
+
+    def on_page(p):
+        states[id(p)] = {"page": p, "last": p.url or "", "tag": "new_tab"}
+        events.append({"t": round(time.time() - start, 1), "kind": "new_page", "tag": "new_tab", "url": (p.url or "")[:160]})
+        try:
+            p.on("close", lambda pp=id(p): events.append({"t": round(time.time() - start, 1), "kind": "close_page", "page_id": pp}))
+        except Exception:
+            pass
+
+    ctx.on("page", on_page)
+    try:
+        if start_url:
+            await page.goto(start_url, wait_until="domcontentloaded")
+            states[id(page)]["last"] = page.url or ""
+    except Exception:
+        pass
+
+    deadline = start + watch_seconds
+    while time.time() < deadline:
+        for pid, st in list(states.items()):
+            p = st.get("page")
+            try:
+                u = p.url or ""
+            except Exception:
+                u = ""
+            if u and u != st.get("last"):
+                st["last"] = u
+                events.append({
+                    "t": round(time.time() - start, 1),
+                    "kind": "url_change",
+                    "tag": st.get("tag", _tag_of(p)),
+                    "url": u[:200],
+                    "miid": miid_from_url(u),
+                })
+        try:
+            await page.wait_for_timeout(1000)
+        except Exception:
+            break
+
+    # summary
+    miids = [e["miid"] for e in events if e.get("miid")]
+    unique: list[str] = []
+    for m in miids:
+        if m not in unique:
+            unique.append(m)
+    return {
+        "watch_seconds": watch_seconds,
+        "event_count": len(events),
+        "pages_tracked": len(states),
+        "distinct_miids": unique,
+        "miid_rotates": len(unique) > 1,
+        "events": events,
+    }
+
+
 async def get_miid(watch_seconds: int = 90, keyword: str = "3D打印机", mode: str = "auto") -> dict:
     """Obtain/refresh mi_id — auto (simulated click on a fixed homepage feed position)
     or human (a person clicks a product). Persists to output/.miid.json.

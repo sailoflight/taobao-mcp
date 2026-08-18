@@ -335,21 +335,24 @@ async def taobao_debug_entry(entry_url: str, referer: str | None = None) -> str:
 @mcp.tool(annotations=ToolAnnotations(
     readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True
 ))
-async def taobao_fetch_detail(product_url_or_id: str) -> str:
+async def taobao_fetch_detail(product_url_or_id: str, miid_source: str = "favorite") -> str:
     """Fetch the full 详情 (图文详情) image strip — the long picture list at the bottom.
 
-    Uses the mi_id entry trick so the SSR renders the 详情, then scrolls the SKU panel
-    and harvests every detail image URL (https, deduped). The mi_id page also loads the
-    account's personalized promos/优惠. Read-only.
-    If the result has miid_stale=true, call taobao_get_miid first (a human clicks a
-    product to capture a fresh mi_id), then retry. Example: {"product_url_or_id": "755873641229"}
+    miid_source="favorite" (default, LOW-RISK): ensures the product is favorited, opens
+    the 收藏夹, clicks it from there → each call gets a FRESH product-scoped mi_id in a
+    natural tracking URL, then harvests .desc-root in place. Slow but risk-friendly.
+    miid_source="config": uses the static mi_id (fast fallback). The mi_id page also
+    loads the account's personalized promos/优惠. Read-only (favoriting is benign).
+    If the result has miid_stale=true, re-run (favorite flow regenerates) or call
+    taobao_get_miid. Example: {"product_url_or_id": "755873641229", "miid_source": "favorite"}
     """
     if await ensure_logged_in() != "logged_in":
         raise NotLoggedInError()
     await _rate_limiter.acquire()
     from src.extract.desc import fetch_detail
 
-    return json.dumps(await fetch_detail(product_url_or_id), ensure_ascii=False, indent=2)
+    return json.dumps(await fetch_detail(product_url_or_id, miid_source=miid_source),
+                      ensure_ascii=False, indent=2)
 
 
 @mcp.tool(annotations=ToolAnnotations(
@@ -408,6 +411,108 @@ async def taobao_debug_home() -> str:
     from src.extract.miid import recon_home_ads
 
     return json.dumps(await recon_home_ads(), ensure_ascii=False, indent=2)
+
+
+@mcp.tool(annotations=ToolAnnotations(
+    readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=True
+))
+async def taobao_debug_collect_click() -> str:
+    """[DEBUG] Click the first 收藏夹 card (a fresh favorite sits at top) and report
+    whether it navigates to the product with a fresh mi_id — validates the
+    click-from-favorites step. Read-only navigation; no writes.
+    """
+    if await ensure_logged_in() != "logged_in":
+        raise NotLoggedInError()
+    await _rate_limiter.acquire()
+    from src.extract.collect_goodsitem import probe_collect_click
+
+    return json.dumps(await probe_collect_click(), ensure_ascii=False, indent=2)
+
+
+@mcp.tool(annotations=ToolAnnotations(
+    readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=True
+))
+async def taobao_debug_goodsitem(target_pid: str = "") -> str:
+    """[DEBUG] Dump the 收藏夹 goodsItem card's full structure (links/attrs/onclick) to
+    find the clickable element + how the pid is exposed. Read-only.
+    Example: {"target_pid": "755873641229"}
+    """
+    if await ensure_logged_in() != "logged_in":
+        raise NotLoggedInError()
+    await _rate_limiter.acquire()
+    from src.extract.collect_goodsitem import recon_goodsitem
+
+    return json.dumps(await recon_goodsitem(target_pid or ""), ensure_ascii=False, indent=2)
+
+
+@mcp.tool(annotations=ToolAnnotations(
+    readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=True
+))
+async def taobao_debug_collect_deep(target_pid: str = "") -> str:
+    """[DEBUG] Deep recon of the 收藏夹 list: iframes, item cards inside each frame,
+    and the collections.get API payload (folders + item ids). Read-only.
+    Example: {"target_pid": "755873641229"}
+    """
+    if await ensure_logged_in() != "logged_in":
+        raise NotLoggedInError()
+    await _rate_limiter.acquire()
+    from src.extract.collect_deep import recon_collect_deep
+
+    return json.dumps(await recon_collect_deep(target_pid or ""), ensure_ascii=False, indent=2)
+
+
+@mcp.tool(annotations=ToolAnnotations(
+    readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=True
+))
+async def taobao_debug_collect(target_pid: str = "") -> str:
+    """[DEBUG] Recon the 收藏夹 page: the collections.get API payload (folder layering +
+    item ids) and the .item card DOM. Pass target_pid to report where that item sits.
+    Read-only (URL/DOM/network observation). No writes.
+    Example: {"target_pid": "755873641229"}
+    """
+    if await ensure_logged_in() != "logged_in":
+        raise NotLoggedInError()
+    await _rate_limiter.acquire()
+    from src.extract.favorite import recon_collect_list
+
+    return json.dumps(await recon_collect_list(target_pid=target_pid or None), ensure_ascii=False, indent=2)
+
+
+@mcp.tool(annotations=ToolAnnotations(
+    readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=True
+))
+async def taobao_debug_favorite(product_url_or_id: str) -> str:
+    """[DEBUG] Probe the 收藏 (favorite) flow for the fixed-position mi_id design:
+    finds the 收藏 button on the product page, clicks it, then checks which favorites
+    page URL lists the item and whether its links carry mi_id. May ADD the product to
+    the account's favorites (benign, reversible). Example: {"product_url_or_id": "755873641229"}
+    """
+    if await ensure_logged_in() != "logged_in":
+        raise NotLoggedInError()
+    await _rate_limiter.acquire()
+    from src.extract.favorite import recon_favorite
+
+    return json.dumps(await recon_favorite(product_url_or_id), ensure_ascii=False, indent=2)
+
+
+@mcp.tool(annotations=ToolAnnotations(
+    readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True
+))
+async def taobao_debug_pages_watch(watch_seconds: int = 180, start_url: str = "https://detail.tmall.com/item.htm?id=755873641229") -> str:
+    """[DEBUG] Record URL changes + mi_id across MULTIPLE pages/tabs while a human operates.
+
+    Tracks every page in the browser context (new tabs included). Every URL change is
+    logged with its mi_id, tagged item/fav/cart/search. Use it to record a manual
+    收藏→收藏夹→点击 flow so we can automate it. Read-only (URL/DOM observation).
+    Example: {"watch_seconds": 180, "start_url": "https://detail.tmall.com/item.htm?id=755873641229"}
+    """
+    if await ensure_logged_in() != "logged_in":
+        raise NotLoggedInError()
+    await _rate_limiter.acquire()
+    from src.extract.miid import watch_pages
+
+    return json.dumps(await watch_pages(watch_seconds=watch_seconds, start_url=start_url),
+                      ensure_ascii=False, indent=2)
 
 
 @mcp.tool(annotations=ToolAnnotations(
