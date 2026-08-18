@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from datetime import datetime, timezone
 
 from src.errors import ProductNotFoundError, SelectorDriftError, SkuIncompleteError
@@ -336,23 +337,50 @@ def _to_product_id(product_url_or_id: str) -> str:
     raise ProductNotFoundError(product_url_or_id)
 
 
+_DEEP_PRICE_TIME_BUDGET_S = 40.0
+_DEEP_PRICE_ESTIMATED_PER_SKU_S = 2.5
+
+
+def _append_subsidy_note(product: Product, note: str) -> None:
+    product.subsidy_caveat = " ".join(
+        part for part in (product.subsidy_caveat, note) if part
+    )
+
+
 async def fill_subsidy_prices(page, product, max_skus: int = 24) -> None:
     """deep_price: click each variant to read its live 平台加补后 (after-subsidy) price.
 
-    Replaces SkuVariant.price with the displayed subsidized price — the realistic cost
-    for a mainland account + China address. Skipped when a product has > max_skus variants
-    (too many clicks → slow + flag risk). Multi-group: selects one value per group; uses
-    exact text match to hit the real chip (not the spec table).
+    Budget-limited so a many-SKU listing can never blow the MCP tool timeout:
+    - more than `max_skus` clickable variants → skip clicks and say so;
+    - otherwise stop when ~40s of click budget is spent and mark the result as
+      partial (the caller still gets every SKU; unclicked rows keep the embedded
+      优惠前 price).
     """
     from src.browser.pacing import human_delay
     from src.extract.selectors import SUBSIDY_PRICE_JS
 
     variants = product.variants
-    if not variants or len(variants) > max_skus:
+    if not variants:
         return
 
+    clickable = [v for v in variants if v.available and v.price is not None]
+    if len(clickable) > max_skus:
+        _append_subsidy_note(
+            product,
+            f"deep_price skipped: {len(clickable)} clickable variants > safe budget "
+            f"({max_skus}); per-SKU prices shown are the embedded 优惠前 figures.",
+        )
+        return
+
+    deadline = time.monotonic() + _DEEP_PRICE_TIME_BUDGET_S
     got_any = False
+    processed = 0
     for v in variants:
+        if time.monotonic() + _DEEP_PRICE_ESTIMATED_PER_SKU_S > deadline:
+            break
+        if not (v.available and v.price is not None):
+            continue
+
         ok = True
         for value in v.properties.values():
             try:
@@ -367,6 +395,7 @@ async def fill_subsidy_prices(page, product, max_skus: int = 24) -> None:
             await human_delay(0.6, 1.2)
         if not ok:
             continue
+        processed += 1
         await human_delay(0.8, 1.4)
         try:
             shown = await page.evaluate(SUBSIDY_PRICE_JS)
@@ -379,14 +408,22 @@ async def fill_subsidy_prices(page, product, max_skus: int = 24) -> None:
             except (TypeError, ValueError):
                 pass
 
+    if processed < len(clickable):
+        _append_subsidy_note(
+            product,
+            f"deep_price partial: updated {processed}/{len(clickable)} variants within "
+            f"{_DEEP_PRICE_TIME_BUDGET_S:.0f}s; remaining rows keep the embedded 优惠前 price.",
+        )
+
     if got_any:
         priced = [x.price for x in variants if x.price is not None]
         if priced:
             product.price_range = (min(priced), max(priced))
-        product.subsidy_caveat = (
-            "Per-SKU prices are the live 平台加补后 (after-subsidy) figures. The government 国补 "
-            "portion can be ID/quantity-limited (often ~1 per category), so on bulk the units "
-            "beyond the limit pay the platform-subsidized price."
+        _append_subsidy_note(
+            product,
+            "Deep-priced rows are the live 平台加补后 figures; 国补 can be "
+            "ID/quantity-limited (often ~1 per category), so bulk units beyond the limit pay "
+            "the platform-subsidized price.",
         )
 
 
