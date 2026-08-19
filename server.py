@@ -224,9 +224,11 @@ async def taobao_product(
             "specs": p.specs,
             "detail": detail,
         }
+        # 细查默认同时检查 评论+问答(用户设计: 问答往往含关键信息[密封条等], 评论可能注水→分层抽样);
+        # 问答便宜且关键 → 始终带出; 评论按 with_reviews 决定。
+        out["qa"] = list((detail or {}).get("qa") or [])
         if with_reviews:
             out["reviews"] = list((detail or {}).get("reviews") or [])
-            out["qa"] = list((detail or {}).get("qa") or [])
         if save_images:
             out["saved_images"] = await save_detail_images(product_url_or_id, detail=detail)
         elif with_images:
@@ -624,7 +626,8 @@ async def taobao_debug(
                   const titles = [...document.querySelectorAll('[class*="footerCard"]')]
                     .map(c => { const t = c.querySelector('[class*="titleWrap"]'); return t ? (t.innerText || '').trim().slice(0, 40) : ''; })
                     .filter(Boolean).slice(0, 5);
-                  return {url: location.href, titles};
+                  const body = (document.body && document.body.innerText || '').replace(/\\s+/g, ' ').slice(0, 260);
+                  return {url: location.href, titles, body};
                 }""")
             except Exception as exc:
                 res["structure_error"] = str(exc)[:100]
