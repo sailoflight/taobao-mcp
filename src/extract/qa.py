@@ -61,7 +61,9 @@ async def parse_qa(product_url_or_id: str, page=None) -> list[QAPair]:
         await human_delay(0.6, 1.0)
     except Exception:
         pass
-    for lbl in ("查看全部问答", "全部问答", "查看更多", "更多问答"):
+    # 只用问答区专属展开标签(避免误点通用"查看更多"等其它按钮);
+    # 无展开按钮(产品无问答区/已全显)则跳过 → 取可见卡或 []。
+    for lbl in ("查看全部问答", "全部问答", "更多问答"):
         try:
             loc = page.get_by_text(lbl, exact=False).first
             if await loc.count() > 0:
