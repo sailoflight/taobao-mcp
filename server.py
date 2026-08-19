@@ -288,13 +288,20 @@ async def taobao_compare(
 @mcp.tool(annotations=ToolAnnotations(
     readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True
 ))
-async def taobao_track_orders(only_active: bool = True, max: int = 12, force: bool = False) -> list[OrderStatus]:
-    """Track 已买到的宝贝: per order — status, carrier + tracking#, 取件码 (pickup OTP) + station.
+async def taobao_tracking(
+    action: str = "list",        # list
+    only_active: bool = True,
+    max: int = 12,
+    force: bool = False,
+    format: str = "md",          # list 时: md | json
+) -> list[OrderStatus] | str:
+    """物流跟踪(一个工具 + action 参数)。list 返回今日订单物流摘要: 状态/快递/运单号/取件码📦/驿站.
 
-    Read-only daily digest to forward to your China agent for collection. Drills logistics
-    only for active orders (待发货/待收货/运输中/待取件). RUNS ONCE PER DAY: the first call each
-    day fetches live; later same-day calls return the cache (no Taobao traffic). Set
-    force=true only to refresh mid-day. Example: {"only_active": true, "max": 12}
+    每日首次实机抓取(限速, 由 anti_risk.track_cache 控制) + 同日缓存(零流量); force=true 强制同日刷新。
+    只读 — 不写入/不付款/不发消息。摘要转发给中国代购收件。
+    format=md(默认)可读摘要表; format=json 结构化。
+    导出 md 文件请用 taobao_export(type=tracking)。
+    Example: {"only_active": true, "max": 12}
     """
     if await ensure_logged_in() != "logged_in":
         raise NotLoggedInError()
@@ -302,7 +309,14 @@ async def taobao_track_orders(only_active: bool = True, max: int = 12, force: bo
 
     if force or not has_cached_today():   # pace only when we'll actually hit Taobao
         await _rate_limiter.acquire()
-    return await track_orders(only_active=only_active, max_drill=max, force=force)
+    orders = await track_orders(only_active=only_active, max_drill=max, force=force)
+    if str(format).strip().lower() == "json":
+        return orders
+    from src.extract.orders import _tracking_markdown
+
+    md = _tracking_markdown(orders)
+    return md + "\n\n<details><summary>JSON 明细</summary>\n\n```json\n" + \
+        json.dumps([o.model_dump() for o in orders], ensure_ascii=False, indent=2) + "\n```\n</details>"
 
 
 @mcp.tool(annotations=ToolAnnotations(
@@ -713,47 +727,6 @@ async def taobao_activity_report(limit: int = 12, days: int | None = None) -> st
     md = "\n".join(head)
     return md + "\n\n<details><summary>JSON 明细</summary>\n\n```json\n" + \
         json.dumps(data, ensure_ascii=False, indent=2) + "\n```\n</details>"
-
-
-@mcp.tool(annotations=ToolAnnotations(
-    readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True
-))
-async def taobao_export_tracking(only_active: bool = True, max: int = 12,
-                                 filename: str = "", title: str = "") -> str:
-    """把今日订单物流摘要导出为 md 文件(output/tracking_<ts>.md) — 转发代购收件用.
-
-    读今日缓存(零淘宝流量, 若今日已抓过); 否则走 track_orders 每日一次抓取(限速)。
-    只读浏览 + 落盘本地 md(带时间戳头); title 可选(自定义标题)。
-    Example: {"max": 12, "title": "今日物流"}
-    """
-    if await ensure_logged_in() != "logged_in":
-        raise NotLoggedInError()
-    from src.extract.orders import _load_cached_today, _today_cn
-
-    cached = _load_cached_today()
-    if cached is not None:
-        orders = cached
-    else:
-        await _rate_limiter.acquire()  # 会实际抓取
-        from src.extract.orders import track_orders
-
-        orders = await track_orders(only_active=only_active, max_drill=max)
-    from datetime import datetime, timezone
-    from pathlib import Path
-    from src.config import load_config
-    from src.extract.orders import _tracking_markdown
-
-    md = _tracking_markdown(orders)
-    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    fname = filename or f"tracking_{ts}.md"
-    out_dir = Path(load_config().output.dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    path = out_dir / fname
-    head = f"> 导出时间: {ts} (今日 {_today_cn()})"
-    if title:
-        head += f" — {title}"
-    path.write_text(head + "\n\n" + md + "\n", encoding="utf-8")
-    return f"已导出今日物流摘要到 {path} ({len(orders)} 单)\n\n{head}\n\n{md}"
 
 
 @mcp.tool(annotations=ToolAnnotations(
