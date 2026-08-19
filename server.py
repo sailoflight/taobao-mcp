@@ -668,23 +668,21 @@ async def taobao_debug_pages_watch(watch_seconds: int = 180, start_url: str = "h
 @mcp.tool(annotations=ToolAnnotations(
     readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=True
 ))
-async def taobao_export_inventory(
+async def taobao_inventory(
+    action: str = "export",      # export(用缓存) | refresh(实机重抓+导出)
     since: str = "2025-01-01",
     filename: str = "inventory_2025_2026.xlsx",
     embed_images: bool = True,
-    refresh: bool = True,
 ) -> str:
-    """Export the full purchase history as a visual inventory workbook with LANDED cost.
+    """库存台账(一个工具 + action 参数)。把全部购买历史导出为带含运成本的可视库存表。
 
-    Pages the buyer order list back to `since` (the only path to full history), computes each
-    line's landed cost (product price + order shipping allocated by qty), categorizes products,
-    and writes Image · Date · Category · Seller · Product · Variant · Qty · Unit ¥ · Line ¥ ·
-    Ship ¥ · Landed/u ¥ · Landed ¥ + a By-Category sheet. embed_images=true embeds thumbnails
-    (open in Numbers/Excel); false writes =IMAGE() URLs for Google Sheets. refresh=false reuses
-    the last crawl cache (no Taobao traffic, no login needed) unless the cache doesn't reach
-    back to `since`. Food/instant-delivery orders are excluded by the list itself.
-    Example: {"since":"2025-01-01","embed_images":true}
+    action=export(默认): 复用上次爬取缓存(零淘宝流量, 无需登录, 除非缓存没回溯到 since)。
+    action=refresh: 实机分页抓订单列表(唯一能到全历史的路径, 限速) + 重新导出。
+    每行含含运成本(商品价+按件分摊运费), 按类目分; 工作表 Inventory + By Category。
+    embed_images=true 内嵌缩略图(Excel/Numbers); false 写 =IMAGE() URL(Google Sheets)。
+    Food/即时配送单由列表本身排除。Example: {"since":"2025-01-01","embed_images":true}
     """
+    refresh = str(action).strip().lower() == "refresh"
     from src.inventory import needs_live_crawl
 
     if needs_live_crawl(since, refresh):   # offline re-export from cache needs no login/pacing
