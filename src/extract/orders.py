@@ -13,6 +13,7 @@ import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from src.config import load_config
 from src.models import OrderStatus
 
 CARRIERS = ("顺丰", "中通", "圆通", "韵达", "申通", "邮政", "京东", "极兔", "德邦", "百世", "菜鸟")
@@ -30,7 +31,6 @@ def _today_cn() -> str:
 
 
 def _state_file() -> Path:
-    from src.config import load_config
     return Path(load_config().output.dir) / ".track_state.json"
 
 
