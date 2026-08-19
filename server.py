@@ -576,41 +576,32 @@ async def taobao_debug_collect(target_pid: str = "") -> str:
 @mcp.tool(annotations=ToolAnnotations(
     readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True
 ))
-async def taobao_list_favorites(limit: int = 30, sort_by: str = "") -> str:
-    """只读: 列出收藏夹前 N 个商品(标题+价), 买家挑选/回顾已收藏时常用.
+async def taobao_favorites(
+    action: str = "list",        # list
+    limit: int = 30,
+    sort_by: str = "",
+    format: str = "md",          # list 时: md | json
+) -> str:
+    """收藏夹(一个工具 + action 参数)。list 只读列出收藏前 N 个商品(标题+价), 买家挑选/回顾已收藏常用。
 
-    sort_by: ""(页面顺序, 默认) / "price_asc"(价格从低到高) / "price_desc"(从高到低),
-    缺价排最后。Read-only — 不写入、不收藏、不发消息.
-    Example: {"limit": 30, "sort_by": "price_asc"}
+    sort_by: ""(页面顺序, 默认) / "price_asc"(价格从低到高) / "price_desc"(从高到低), 缺价排最后。
+    format=md(默认)可读表+JSON明细; format=json 仅结构化。
+    只读 — 不写入、不收藏、不发消息。导出候选清单请用 taobao_export(type=favorites)。
+    取 mi_id 已内建(由 taobao_product mode=fine 走收藏-模拟点击-完整追踪参数自行使用, 不再暴露独立工具)。
+    Example: {"action": "list", "limit": 30, "sort_by": "price_asc"}
     """
     if await ensure_logged_in() != "logged_in":
         raise NotLoggedInError()
     await _rate_limiter.acquire()
-    from src.extract.favorite import _favorites_markdown, list_favorites
+    if str(action).strip().lower() == "list":
+        from src.extract.favorite import _favorites_markdown, list_favorites
 
-    data = await list_favorites(limit=limit, sort_by=sort_by)
-    return _favorites_markdown(data) + "\n\n<details><summary>JSON 明细</summary>\n\n```json\n" + \
-        json.dumps(data, ensure_ascii=False, indent=2) + "\n```\n</details>"
-
-
-@mcp.tool(annotations=ToolAnnotations(
-    readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True
-))
-async def taobao_export_favorites(limit: int = 30, sort_by: str = "", filename: str = "",
-                                   title: str = "") -> str:
-    """把收藏夹导出为 md 文件(output/favorites_<ts>.md) — 候选清单留档.
-
-    只读浏览收藏夹 + 落盘本地 md(带时间戳头), 不写入、不收藏、不发消息。
-    sort_by 同 list_favorites(''/'price_asc'/'price_desc'); title 可选(自定义标题)。
-    Example: {"limit": 30, "sort_by": "price_asc", "title": "收纳箱候选"}
-    """
-    if await ensure_logged_in() != "logged_in":
-        raise NotLoggedInError()
-    await _rate_limiter.acquire()
-    from src.extract.favorite import export_favorites_markdown
-
-    res = await export_favorites_markdown(limit=limit, sort_by=sort_by, filename=filename, title=title)
-    return f"已导出候选清单到 {res['path']} ({res['count']} 个)\n\n{res['markdown']}"
+        data = await list_favorites(limit=limit, sort_by=sort_by)
+        if str(format).strip().lower() == "json":
+            return json.dumps(data, ensure_ascii=False, indent=2)
+        return _favorites_markdown(data) + "\n\n<details><summary>JSON 明细</summary>\n\n```json\n" + \
+            json.dumps(data, ensure_ascii=False, indent=2) + "\n```\n</details>"
+    return f"未知 action={action}; 支持 list"
 
 
 @mcp.tool(annotations=ToolAnnotations(
