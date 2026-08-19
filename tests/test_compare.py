@@ -172,3 +172,87 @@ def test_to_markdown_best_unit_recommendation():
     assert "💰 最低单价推荐: 天鼠收纳箱 (每件¥30.33)" in md
     md2 = _to_markdown([{"product_id": "a", "title": "无单价", "cheapest_unit": None}], 1)
     assert "最低单价推荐" not in md2
+
+
+def test_match_cart_price_by_variant_text():
+    """购物车到手价按型号文本匹配到变体(cart 模式核心) — 2026-08-19."""
+    from src.extract.compare import _match_cart_price
+    from src.models import SkuVariant
+
+    variants = [
+        SkuVariant(sku_id="a", properties={"颜色分类": "10个袋子30*34cm+2夹子"},
+                   price=13.5, stock=1, available=True),
+        SkuVariant(sku_id="b", properties={"颜色分类": "便携式抽真空机一台"},
+                   price=15.9, stock=1, available=True),
+    ]
+    cart = [
+        {"product_id": "1039147294809", "variant": "10个袋子30*34cm+2夹子",
+         "after_price": None, "platform_after": "11.4"},
+        {"product_id": "1039147294809", "variant": "便携式抽真空机一台",
+         "after_price": None, "platform_after": "13.43"},
+        {"product_id": "999", "variant": "别的", "after_price": "1", "platform_after": None},
+    ]
+    out = _match_cart_price("1039147294809", variants, cart)
+    assert out["颜色分类:10个袋子30*34cm+2夹子"]["cart_price"] == 11.4
+    assert out["颜色分类:便携式抽真空机一台"]["cart_price"] == 13.43
+    # 只匹配同一 product_id 的行
+    assert len(out) == 2
+
+
+def test_summarize_cart_override_basis():
+    """cart 覆盖后行级标 price_basis + cheapest 用手价口径 — 2026-08-19."""
+    from src.extract.compare import _match_cart_price, _summarize
+    from src.models import Product, SkuVariant
+
+    variants = [
+        SkuVariant(sku_id="a", properties={"颜色分类": "10个袋子30*34cm+2夹子"},
+                   price=13.5, stock=1, available=True),
+    ]
+    p = Product(product_id="1039147294809", url="u", title="便携式电动手持真空封口抽气泵",
+                shop_name="華人包装", price_range=(13.5, 13.5), variants=variants,
+                reviews=[], scraped_at="x")
+    cart = [{"product_id": "1039147294809", "variant": "10个袋子30*34cm+2夹子",
+             "after_price": None, "platform_after": "11.4"}]
+    co = _match_cart_price("1039147294809", variants, cart)
+    row = _summarize(p, cart_overrides=co)
+    assert row["price_basis"] == "cart"
+    assert row["cheapest_available"] == 11.4  # 用购物车到手价, 不是粗查原价 13.5
+    assert row["cart_overrides"] and row["cart_overrides"][0]["cart_price"] == 11.4
+
+
+def test_summarize_no_cart_falls_back_coarse():
+    """购物车无该商品 → 退回粗查原价, price_basis='coarse' — 2026-08-19."""
+    from src.extract.compare import _match_cart_price, _summarize
+    from src.models import Product, SkuVariant
+
+    variants = [SkuVariant(sku_id="a", properties={"颜色分类": "特大号30*34"},
+                           price=12.5, stock=1, available=True)]
+    p = Product(product_id="111", url="u", title="t", shop_name="s",
+                price_range=(12.5, 12.5), variants=variants, reviews=[], scraped_at="x")
+    co = _match_cart_price("111", variants, [])  # 购物车空
+    row = _summarize(p, cart_overrides=co)
+    assert row["price_basis"] == "coarse"
+    assert row["cheapest_available"] == 12.5
+    assert not row["cart_overrides"]
+
+
+def test_skus_restrict_variants():
+    """skus 严格指定型号 → 只保留该型号(cart 优先, 无则粗查价) — 2026-08-19."""
+    from src.extract.compare import _match_cart_price, _summarize
+    from src.models import Product, SkuVariant
+
+    variants = [
+        SkuVariant(sku_id="a", properties={"颜色分类": "10个袋子30*34cm+2夹子"},
+                   price=13.5, stock=1, available=True),
+        SkuVariant(sku_id="b", properties={"颜色分类": "10个袋子26*34cm+2夹子"},
+                   price=11.8, stock=1, available=True),
+    ]
+    p = Product(product_id="1039147294809", url="u", title="t", shop_name="華人包装",
+                price_range=(11.8, 13.5), variants=variants, reviews=[], scraped_at="x")
+    p.variants = [v for v in variants if "30*34" in "; ".join(v.properties.values())]
+    cart = [{"product_id": "1039147294809", "variant": "10个袋子30*34cm+2夹子",
+             "after_price": None, "platform_after": "11.4"}]
+    co = _match_cart_price("1039147294809", p.variants, cart)
+    row = _summarize(p, cart_overrides=co)
+    assert row["variant_count"] == 1
+    assert row["cheapest_available"] == 11.4

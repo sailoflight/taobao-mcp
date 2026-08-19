@@ -172,6 +172,7 @@ async def list_cart(max_items: int = 50, exclude_unavailable: bool = False) -> d
         """() => {
           // 祖先查找: 每个 cartItemInfo 向上找最近的含 cartShopInfo 的祖先取店名
           // (文档序单遍在页面有隐藏/克隆副本时会错位, 祖先法更稳)
+          // 每个 item 块内找商品链接 id(product_id) — 供 compare 购物车模式精确关联型号
           const out = [];
           document.querySelectorAll('[class*="cartItemInfo"]').forEach(e => {
             const t = (e.innerText || '').replace(/\\s+/g, ' ').trim();
@@ -182,8 +183,13 @@ async def list_cart(max_items: int = 50, exclude_unavailable: bool = False) -> d
               if (sh) { shop = (sh.innerText || '').trim().replace(/\\s+/g, ' '); break; }
               a = a.parentElement;
             }
-            // 数量输入框在购物车用非标准结构, 不在此提取(避免死代码)
-            out.push({ shop, text: t });
+            let pid = null;
+            const lnk = e.querySelector('a[href*="item.htm"], a[href*="detail.tmall.com"]');
+            if (lnk) {
+              const m = (lnk.getAttribute('href') || '').match(/[?&]id=(\\d{6,})/);
+              if (m) pid = m[1];
+            }
+            out.push({ shop, pid, text: t });
           });
           return out;
         }"""
@@ -193,6 +199,7 @@ async def list_cart(max_items: int = 50, exclude_unavailable: bool = False) -> d
     for b in blocks[:max_items]:
         r = _parse_cart_item(b.get("text", ""))
         r["shop"] = b.get("shop", "")
+        r["product_id"] = b.get("pid")
         key = (r["title"], r["variant"], r["after_price"] or r["platform_after"])
         if key in seen:
             continue  # the item block + a nested container both carry the text

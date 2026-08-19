@@ -260,16 +260,26 @@ async def taobao_compare(
     max_items: int = 10,
     sort_by: str = "",
     min_review_total: int = 0,
+    source: str = "cart",        # cart(默认: 购物车到手价优先, 无则退回粗查原价) | coarse(纯原价)
+    skus: list[str] | None = None,  # 严格指定型号文本(与 product_ids 一一对应); 缺省自动匹配购物车
 ) -> str:
-    """粗查批量对比(买家挑选常用): 输入最小化 — 仅商品 id/URL 列表(自动提取 id)。
+    """批量对比(买家挑选常用): 输入最小化 — 仅商品 id/URL 列表(自动提取 id)。
 
     参数: product_ids(必填, 商品ID或URL列表, 自动提取 id) · format=md(默认, 可读对比表+JSON明细)|json ·
       deep_price(bool, true 读实时"平台加补后"价, 较慢) · max_items(默认10, 上限20) ·
-      sort_by(''输入序/'price'有货最低价升/'unit'最低单价升) · min_review_total(过滤低评价)。
-    format=md(默认): 一屏对比行(标题/店铺/价区间/型号数/价格示例/评论/补贴提示) + JSON 明细;
+      sort_by(''输入序/'price'有货最低价升/'unit'最低单价升) · min_review_total(过滤低评价) ·
+      source=cart(默认)|coarse · skus(可选, 严格指定型号, 与 product_ids 一一对应)。
+    source=cart(默认): 先读购物车到手价(含平台加补后/优惠), 按型号文本匹配到对应变体,
+      命中型号用购物车到手价覆盖原价(粗查只有原价, 会漏长期优惠/补贴) → 行级 price_basis
+      标 cart|mixed|coarse; 购物车没有该商品时自动退回粗查原价(零成本兜底)。
+    source=coarse: 纯粗查原价(旧行为)。
+    skus: 严格指定要比的型号文本(如 ["10个袋子30*34cm+2夹子", ...]), 与 product_ids 一一对应;
+      传了则只对该型号取价(购物车价优先, 无则粗查价); 不传则自动匹配购物车全部型号。
+    format=md(默认): 一屏对比行(标题/店铺/价区间/型号数/价格示例/评论/补贴提示/价格口径) + JSON 明细;
     format=json: 仅结构化 JSON(供后续复用)。
     只读 — 不收藏/不重新生成 mi_id/不发消息。留档导出请用 taobao_export(type=compare)。
-    Example: {"product_ids": ["862892097837", "759429259765"], "sort_by": "unit", "min_review_total": 500}
+    Example: {"product_ids": ["1039147294809"], "source": "cart"} /
+      {"product_ids": ["1039147294809"], "skus": ["10个袋子30*34cm+2夹子"], "sort_by": "unit"}
     """
     if await ensure_logged_in() != "logged_in":
         raise NotLoggedInError()
@@ -278,7 +288,8 @@ async def taobao_compare(
     from src.extract.compare import _to_markdown, compare_products
 
     data = await compare_products(product_ids, deep_price=deep_price, max_items=max_items,
-                                  sort_by=sort_by, min_review_total=min_review_total)
+                                  sort_by=sort_by, min_review_total=min_review_total,
+                                  source=source, skus=skus)
     if str(format).strip().lower() == "json":
         return json.dumps(data, ensure_ascii=False, indent=2)
     rows = data.get("products") or []
@@ -343,12 +354,15 @@ async def taobao_export(
     seller: str = "",                     # dossier
     order_id: str = "",                   # dossier
     with_reviews: bool = False,           # product
+    source: str = "cart",                 # compare: cart(购物车到手价优先)|coarse(原价)
+    skus: list[str] | None = None,        # compare: 严格指定型号(与 product_ids 一一对应)
 ) -> str:
     """通用导出(一个工具 + type 参数): 把各域结果导出为 md/xlsx 文件(output/)留档/交接代购.
 
     参数: type(必填)=compare|cart|favorites|tracking|dossier|product · format=md(默认)|xlsx(仅 compare) ·
       filename/title(可选) · product_ids(compare 必填) · deep_price/sort_by/with_variants/min_review_total/max_items(compare) ·
-      limit/sort_by(favorites) · exclude_unavailable/max_items(cart) · only_active/max(tracking) · seller/order_id(dossier) ·
+      source/skus(compare: 购物车到手价优先 / 严格型号) · limit/sort_by(favorites) ·
+      exclude_unavailable/max_items(cart) · only_active/max(tracking) · seller/order_id(dossier) ·
       product_url_or_id/with_reviews(product)。
     只读浏览 + 落盘本地文件(gitignored); 不写入购物车/收藏, 不发消息。
     tracking: 读今日缓存(零流量)否则每日一次抓取(限速); 含取件码📦摘要。
@@ -372,7 +386,8 @@ async def taobao_export(
         res = await export_compare_markdown(product_ids or [], deep_price=deep_price,
                                             max_items=max_items, sort_by=sort_by,
                                             with_variants=with_variants,
-                                            min_review_total=min_review_total, title=title)
+                                            min_review_total=min_review_total, title=title,
+                                            source=source, skus=skus)
         return f"已导出对比到 {res['path']} ({res['count']} 件)\n\n{res['markdown']}"
 
     if typ == "cart":

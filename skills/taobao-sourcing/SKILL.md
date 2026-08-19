@@ -49,6 +49,8 @@ acting; the entries give the通用套路 to apply:
   directly (zero OCR, zero guess) → E7.
 - **同款跨店比价** / same spec, same price across shops — compare QA reputation + 赠品, not just
   price → E8.
+- **购物车到手价对比** / `source=cart` / `skus` / `price_basis` — compare 用购物车到手价
+  (含优惠/补贴)覆盖粗查原价; 可严格指定型号; 购物车没有则回退粗查 → E9.
 
 ## Hard rules (never break)
 - **Never log in for the human.** Login is a QR scan they do on their phone. If a

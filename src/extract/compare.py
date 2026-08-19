@@ -10,22 +10,116 @@ from __future__ import annotations
 import asyncio
 import re
 
+from src.extract.units import unit_price_from_label
+
 
 def _unit_price(v) -> float | None:
     """Pure: 型号标签含 'N个装' 时算每件单价(共享 helper, 防漂移)."""
-    from src.extract.units import unit_price_from_label
-
     return unit_price_from_label("; ".join((v.properties or {}).values()), v.price)
 
 
-def _summarize(p) -> dict:
-    """Fold a Product (or an error dict) into one comparison row."""
+def _variant_label(v) -> str:
+    """变体的规格文本('颜色:黑; 尺寸:L') — 用于与购物车行 variant 匹配."""
+    return "; ".join(f"{k}:{val}" for k, val in (v.properties or {}).items())
+
+
+def _norm(text: str) -> str:
+    """规范化文本用于宽松匹配: 去空白/全角/常见噪声, 小写."""
+    if not text:
+        return ""
+    t = str(text).lower()
+    t = re.sub(r"\s+", "", t)
+    t = t.replace("（", "(").replace("）", ")").replace("：", ":").replace("，", ",")
+    return t
+
+
+def _match_cart_price(product_id: str, variants, cart_items: list[dict]) -> dict:
+    """Pure: 把购物车到手价按型号文本匹配到粗查变体.
+
+    返回 {sku_label: {"cart_price": 到手价, "coarse_price": 原价, "matched": bool}}.
+    匹配策略(宽松, 因购物车 variant 文本与 SKU label 格式不完全一致):
+      1) 同一 product_id 的购物车行;
+      2) 规范化文本: 变体 label 与购物车 variant 一方包含另一方(双向子串),
+         或逐 property 值双向包含;
+      3) 同一商品多行命中时, 每行匹配到对应变体; 无精确命中的变体保留粗查价。
+    """
+    rows_for_pid = [it for it in cart_items if str(it.get("product_id")) == str(product_id)]
+    if not rows_for_pid:
+        return {}
+    out: dict = {}
+    # 优先精确: 变体 label 规范化 == 购物车 variant 规范化
+    for v in variants:
+        label = _variant_label(v)
+        n_label = _norm(label)
+        matched_row = None
+        for it in rows_for_pid:
+            n_var = _norm(it.get("variant", ""))
+            if n_var and n_var == n_label:
+                matched_row = it
+                break
+        if matched_row:
+            cart_price = matched_row.get("after_price") or matched_row.get("platform_after")
+            out[label] = {
+                "cart_price": float(cart_price) if cart_price else None,
+                "coarse_price": v.price,
+                "matched": True,
+            }
+    # 剩余: 子串匹配(双向包含, 逐 property 值)
+    for v in variants:
+        label = _variant_label(v)
+        if label in out:
+            continue
+        n_label = _norm(label)
+        for it in rows_for_pid:
+            n_var = _norm(it.get("variant", ""))
+            if not n_var:
+                continue
+            hit = (n_var in n_label) or (n_label in n_var)
+            if not hit:  # 逐 property 值
+                hit = any(_norm(val) and (_norm(val) in n_var or n_var in _norm(val))
+                          for val in (v.properties or {}).values())
+            if hit:
+                cart_price = it.get("after_price") or it.get("platform_after")
+                out[label] = {
+                    "cart_price": float(cart_price) if cart_price else None,
+                    "coarse_price": v.price,
+                    "matched": True,
+                }
+                break
+    return out
+
+
+def _summarize(p, cart_overrides: dict | None = None) -> dict:
+    """Fold a Product (or an error dict) into one comparison row.
+
+    cart_overrides: _match_cart_price 的结果 — 命中型号用购物车到手价覆盖原价,
+    行级标 price_basis='cart'|'mixed'|'coarse' 供调用方感知优惠口径。
+    """
     if isinstance(p, dict) and p.get("error"):
         return {"product_id": p.get("product_id"), "error": p.get("error")[:140]}
     variants = getattr(p, "variants", None) or []
-    prices = sorted({v.price for v in variants if v.price is not None})
-    avail_prices = sorted({v.price for v in variants if v.available and v.price is not None})
-    unit_prices = [u for u in (_unit_price(v) for v in variants if v.available) if u is not None]
+    co = cart_overrides or {}
+    # 有效价 = 购物车到手价(命中) 否则 粗查价; 按变体逐条算, 空/重复 label 不互相覆盖
+    eff_prices: list[tuple[float | None, bool]] = []  # (effective_price, available)
+    for v in variants:
+        label = _variant_label(v)
+        ov = co.get(label)
+        eff = ov["cart_price"] if (ov and ov.get("matched") and ov.get("cart_price") is not None) else v.price
+        eff_prices.append((eff, v.available))
+    prices = sorted({p_ for p_, _ in eff_prices if p_ is not None})
+    avail_prices = sorted({p_ for p_, avail in eff_prices if avail and p_ is not None})
+    unit_prices = []
+    for v, (eff, avail) in zip(variants, eff_prices):
+        if not avail or eff is None:
+            continue
+        u = unit_price_from_label("; ".join((v.properties or {}).values()), eff)
+        if u is not None:
+            unit_prices.append(u)
+    matched_labels = {k for k, v in co.items() if v.get("matched") and v.get("cart_price") is not None}
+    if co and matched_labels:
+        basis = "cart" if len(matched_labels) >= len(variants) else "mixed"
+    else:
+        basis = "coarse"
     return {
         "product_id": getattr(p, "product_id", None),
         "title": (getattr(p, "title", "") or "")[:70],
@@ -41,18 +135,21 @@ def _summarize(p) -> dict:
         "favorable_rate": getattr(p, "favorable_rate", None),
         "subsidy_caveat": getattr(p, "subsidy_caveat", None),
         "url": getattr(p, "url", None),
+        "price_basis": basis,
+        "cart_overrides": [{"label": k, "cart_price": v["cart_price"], "coarse_price": v["coarse_price"]}
+                           for k, v in co.items() if v.get("matched")],
     }
 
 
 def _to_markdown(rows: list[dict], count: int) -> str:
     """Render compare rows as a readable markdown table (for the GUI/in-chat)."""
     head = ("### 短名单对比({} 件)\n\n"
-            "| 商品 | 店铺 | 价区间 | 型号数 | 价格示例(¥) | 评论 | 补贴/提示 |\n"
-            "|---|---|---|---|---|---|---|").format(count)
+            "| 商品 | 店铺 | 价区间 | 型号数 | 价格示例(¥) | 评论 | 价格口径 | 补贴/提示 |\n"
+            "|---|---|---|---|---|---|---|---|").format(count)
     lines = [head]
     for r in rows:
         if "error" in r:
-            lines.append(f"| `{r.get('product_id')}` | — | — | — | — | — | ⚠️ {r['error'][:24]} |")
+            lines.append(f"| `{r.get('product_id')}` | — | — | — | — | — | — | ⚠️ {r['error'][:24]} |")
             continue
         caveat = (r.get("subsidy_caveat") or "")[:18]
         sample = ", ".join(str(p) for p in (r.get("price_sample") or [])[:5])
@@ -63,15 +160,17 @@ def _to_markdown(rows: list[dict], count: int) -> str:
         ca = r.get("cheapest_available")
         c = r.get("cheapest")
         cu = r.get("cheapest_unit")
+        basis = r.get("price_basis", "coarse")
+        basis_cell = {"cart": "🛒到手价", "mixed": "🛒+原价", "coarse": "原价"}.get(basis, basis)
         pr_cell = str(pr) if pr else "—"
         if ca is not None and (c is None or ca != c):
             pr_cell += f" · 有货{ca:g}"
         if cu is not None:
             pr_cell += f" · 最低单价¥{cu:.2f}"
         lines.append(
-            f"| {r.get('title','')[:32]} | {r.get('shop') or ''} "
+            f"| {r.get('title','')[:30]} | {r.get('shop') or ''} "
             f"| {pr_cell} | {r.get('variant_count')} "
-            f"| {sample} | {review_cell} | {caveat} |"
+            f"| {sample} | {review_cell} | {basis_cell} | {caveat} |"
         )
     # 最低单价推荐(有货最低单价最小的商品) — 买家一眼看最优
     unit_rows = [(r.get("title") or r.get("product_id"), r.get("cheapest_unit"))
@@ -132,27 +231,59 @@ def _sort_rows(rows: list[dict], sort_by: str = "") -> list[dict]:
 
 async def compare_products(product_ids: list[str], deep_price: bool = False, max_items: int = 10,
                            sort_by: str = "", detailed: bool = False,
-                           min_review_total: int = 0) -> dict:
-    """粗查批量对比: 对每个短名单商品跑 parse_product, 折叠成对比行.
+                           min_review_total: int = 0, source: str = "coarse",
+                           skus: list[str] | None = None) -> dict:
+    """批量对比: 对每个短名单商品跑 parse_product(coarse), 折叠成对比行.
 
     Read-only — 不收藏、不重新生成 mi_id、不发送任何消息。deep_price=True 逐型号点芯片
     读平台加补后价(慢, 适合型号少的商品)。单会话顺序执行 + 限速, 不批量开 tab(CLAUDE.md §7.3)。
-    detailed=True 时每行附 variants_summary(全型号价/库存), 供 with_variants 导出完整报告。
+    detailed=True 时每行附 variants_summary(全型号价/库存/选项图), 供 with_variants 导出完整报告。
     min_review_total>0 时过滤掉评价数低于阈值的商品(避开低评价商品)。
+
+    source='cart'(默认建议): 先读购物车到手价(after_price/platform_after), 用型号文本
+      匹配到对应变体 → 命中型号用购物车到手价覆盖原价(coarse 只取原价, 会漏长期优惠/
+      补贴), 行级标 price_basis='cart'|'mixed'|'coarse'。购物车没有该商品时自动退回
+      coarse 原价(零成本兜底)。
+    source='coarse': 纯粗查原价(旧行为)。
+    skus: 严格指定要比的型号文本列表(与 product_ids 一一对应; 或 {"pid": [型号,...]} 由
+      server 层展平)。传了 sku 时, 只对该型号取价(购物车价优先, 无则粗查价)。
     """
     from src.extract.product import parse_product
 
     ids = [str(x) for x in product_ids[:max_items]]
+    # 购物车数据(只读, 一次抓取)
+    cart_items: list[dict] = []
+    if str(source).strip().lower() == "cart":
+        try:
+            from src.extract.cart_price import list_cart
+
+            cart_items = (await list_cart(max_items=100)).get("items", []) or []
+        except Exception:
+            cart_items = []  # 购物车不可用 → 静默退回粗查
     rows = []
     for i, pid in enumerate(ids):
         try:
             p = await asyncio.wait_for(parse_product(pid, deep_price=deep_price), timeout=45)
-            row = _summarize(p)
+            # sku 严格指定: 只保留指定型号的变体(购物车优先, 无则粗查价)
+            want = None
+            if skus is not None and i < len(skus) and skus[i]:
+                want = str(skus[i]).strip()
+            if want:
+                keep = []
+                for v in (getattr(p, "variants", None) or []):
+                    label = _variant_label(v)
+                    if want in label or _norm(want) == _norm(label) or _norm(label) in _norm(want):
+                        keep.append(v)
+                if keep:
+                    p.variants = keep
+            co = _match_cart_price(pid, getattr(p, "variants", None) or [], cart_items)
+            row = _summarize(p, cart_overrides=co)
             if detailed:
                 row["variants_summary"] = [
-                    {"label": "; ".join(f"{k}:{val}" for k, val in (v.properties or {}).items()),
+                    {"label": _variant_label(v),
                      "price": v.price, "stock": v.stock, "available": v.available,
-                     "image": v.image}  # 选项图 URL(尺寸/规格常印在图内)
+                     "image": v.image,  # 选项图 URL(尺寸/规格常印在图内)
+                     "cart_price": (co.get(_variant_label(v)) or {}).get("cart_price")}
                     for v in (getattr(p, "variants", None) or [])
                 ]
             rows.append(row)
@@ -174,19 +305,21 @@ async def compare_products(product_ids: list[str], deep_price: bool = False, max
 async def export_compare_markdown(product_ids: list[str], deep_price: bool = False,
                                   max_items: int = 10, sort_by: str = "", with_variants: bool = False,
                                   min_review_total: int = 0, title: str = "",
-                                  out_dir: str = "output") -> dict:
+                                  out_dir: str = "output", source: str = "cart",
+                                  skus: list[str] | None = None) -> dict:
     """跑短名单对比并把 markdown 表落盘(output/compare_<ts>.md), 买家留档。
 
     Reuses compare_products (只读浏览) + _to_markdown; 唯一写入是本地产出文件
     (gitignored), 不收藏、不重新生成 mi_id、不发消息。返回路径 + markdown 内容。
     with_variants=True 时追加每个商品的全型号价表(完整报告)。
+    source/skus 透传给 compare_products(购物车到手价优先 / 严格型号)。
     """
     from datetime import datetime
     from pathlib import Path
 
     data = await compare_products(product_ids, deep_price=deep_price, max_items=max_items,
                                   sort_by=sort_by, detailed=with_variants,
-                                  min_review_total=min_review_total)
+                                  min_review_total=min_review_total, source=source, skus=skus)
     rows = data.get("products") or []
     md = _to_markdown(rows, data.get("count", 0))
     if with_variants:
