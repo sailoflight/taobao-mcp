@@ -1399,3 +1399,13 @@ Our deliverables: (i) a price for **every** SKU via `skuBase`/`sku2info` join; (
 - **收官审计**: 全量编译通过, 39 工具(31 正式 + 8 debug), 29 测试, 49 文件与 /mnt/c 全同步, 工作区 clean。
 - **收官非搜索冒烟**: daily_summary / compare(最低单价推荐) / export_tracking(title+完整单号) 全绿。
 - **打磨终点**: 256 轮打磨, 292+ 个未 push 提交全部留本地供明日人工核验 (`git log origin/main..main`)。
+
+## 📦 工具面重构(REFACTOR)记录 2026-08-19
+> 用户指令: git 每功能一提交 · 导出收敛为 export+参数 · 搜索合并 format/headless ·
+> 商品三态查询(A搜索/B粗查/C细查) · 收藏/购物车单工具+action · 每日报告删除 ·
+> debug 合并+监听器 · 文档压缩 · 防风控入 config · 评论分层抽样。计划见 REFACTOR_PLAN.md。
+- 重构后工具面: **39 → 13**(session/search/product/compare/cart/favorites/tracking/dossier/message/inventory/config/debug/export)
+- 每步一个提交(见 git log): config(6a5dddb) → search(6f2a502) → product(63e18c4) →
+  compare(2dfc2b6) → cart(b5bde71) → favorites(93db993) → tracking(2d49e47) → dossier(bf71e33) →
+  message(5243d5d) → inventory(1acca0a) → export(610149a) → debug(e87fa2c) → session(d562b80) →
+  daily删除(2e93654) → 文档压缩(本提交)

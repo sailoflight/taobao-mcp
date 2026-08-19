@@ -1,231 +1,103 @@
 # Taobao Sourcing Assistant
 
-A **local, human-paced MCP server** that removes the drudgery of sourcing products
-on Taobao/Tmall. You keep all judgment (search intuition, buy decisions, sending
-supplier messages); the tool drives a real Chrome window to extract — for every
-product — **a price for every SKU variant**, specs, images, and **reviews linked to
-the variant bought**, then tabulates it into a comparison spreadsheet. Ships with a
-ChatGPT/Codex **Skill** (sourcing playbook) and **Chinese supplier-message templates**
-(drafted by the assistant, sent via confirm-then-send — you approve each message).
+A **local, human-paced MCP server** that removes the drudgery of sourcing on Taobao/Tmall.
+You keep all judgment (search intuition, buy decisions, confirming each supplier message);
+the tool drives a real Chrome window to extract — for every product — **a price for every SKU
+variant**, specs, images, and **reviews linked to the variant bought** (stratified 好/中/差
+sampling), then tabulates it into a comparison sheet.
 
-> Built on the QR-login + persistent-session approach of `JeremyDong22/taobao_mcp`,
-> rebuilt as **12 FastMCP tools** with embedded-data + DOM extraction (mtop interception
-> kept as a fallback): search, per-SKU pricing, variant-linked reviews, xlsx export,
-> **gated cart staging** (adds via the `mtop.trade.addBag` API — works on Taobao *and*
-> Tmall), **confirm-then-send seller messaging**, and a **daily order-tracking + 取件码
-> pickup-code digest** — plus a **vendor-joined full picture** and a **full-history
-> landed-cost inventory export**, a captcha human-handoff, and anti-detection pacing.
-
-## Local Codex and public ChatGPT modes
-
-This repository keeps two independent entrypoints:
-
-- **Local Codex:** `.codex-plugin/plugin.json` loads the skill and `.mcp.json`
-  starts the existing stdio server. This remains the default and needs no public
-  service.
-- **Public ChatGPT plugin backend:** set `MCP_TRANSPORT=streamable-http` and run
-  the authenticated HTTP server behind a stable HTTPS domain at `/mcp`.
-- **DeepSeek Harness from WSL:** when the server runs on the Windows host (real
-  Chrome + persistent profile), DSH in WSL reaches it through a loopback TCP
-  bridge via the official `@deepseek-ai/dsh-mcp-client` plugin — stdio protocol
-  end to end, no OAuth. See [`DSH_WSL_BRIDGE.md`](DSH_WSL_BRIDGE.md).
-
-An account without Developer Mode cannot register a private MCP connection merely
-by typing `@taobao-mcp`. Its ChatGPT path is a reviewed, published MCP-backed plugin.
-The repository includes `.app.json` only as an intentionally empty development-state
-entry (`{"apps": {}}`). It is wired into the plugin manifest but connects to nothing.
-Do not add a placeholder or real `plugin_asdk_app_...` ID unless the user explicitly
-authorizes it after a real MCP connection has been registered.
-
-See [`PUBLIC_DEPLOYMENT.md`](PUBLIC_DEPLOYMENT.md) and `.env.public.example` for
-the public endpoint, OAuth, domain-verification, testing, and submission checklist.
-
-### Set up another machine
-
-Machine paths are never committed. After cloning, create the virtual environment,
-install dependencies, put any browser-path override in the Git-ignored
-`config.local.toml`, then generate that clone's local Codex wiring:
-
-```bash
-python configure_codex.py
-```
-
-This writes a Git-ignored `.mcp.json` containing absolute paths for the current
-machine. Run `python run_mcp_stdio.py` for direct stdio or
-`python run_mcp_http.py` for authenticated public HTTP.
-
-Before committing or pushing a clone, verify the local-data boundary:
-
-```bash
-python verify_git_safety.py
-git status --short --ignored
-```
-
-The repository is intentionally initialized without a commit or remote. After
-reviewing the files yourself, publish manually:
-
-```bash
-git add .
-python verify_git_safety.py
-git commit -m "Initial taobao-mcp import"
-git remote add origin https://github.com/YOUR_ACCOUNT/YOUR_REPOSITORY.git
-git push -u origin main
-```
-
-`user_data/` is a strict local-data boundary. It contains browser profiles,
-cookies, and login state; it is ignored by version control and must never be
-uploaded, published, attached, or copied into a distributable plugin package.
-The code also rejects any `browser.user_data_dir` outside this checkout's
-`user_data/` directory. Chrome or Edge itself may be installed system-wide, but
-this MCP never opens that browser's normal operating-system user profile.
-Generated `output/` files are local-only as well unless the user explicitly asks
-to share a specific export.
-
-The public endpoint carries MCP requests and tool results needed for the current
-ChatGPT conversation, but deployment artifacts must never contain `user_data/`.
-The browser profile, cookies, and login state remain on the machine running the
-interactive browser process.
+> **Tool surface is parameterized — 13 tools** (was 39): each domain is ONE tool with an
+> `action`/`mode`/`format` parameter, and all file exports go through one `taobao_export(type=…)`.
+> This keeps the MCP guide compact and the AI's context cost low. Anti-risk parameters live in
+> `config.toml [anti_risk]` and are viewable/editable via `taobao_config` (set requires a
+> confirm=true second call + a human reminder). `mi_id` is internal (收藏链路内建) — no exposed
+> miid tool.
 
 ## Scope — it does four things
-**Find** legitimate products · **add to cart** · **communicate with sellers** (you confirm
-each message) · **track orders** (+ 取件码 pickup codes). You + your buying agent handle
-**payment, the delivery address, checkout, and all logistics** — the tool hands off at the
-cart and the tracking digest.
-
-## What it does NOT do
-No headless scraping, no proxy rotation, no captcha-solving service, no cloud. It **never
-pays, checks out, or picks a shipping address**, and it **never blind-sends** a seller
-message (confirm-then-send — you approve each one). **Not getting your account flagged is
-the priority, not speed.**
-
----
+**Find** · **add to cart** · **communicate with sellers** (confirm-then-send) · **track orders**
+(+ 取件码 pickup codes). You + your buying agent handle **payment, delivery address, checkout,
+and all logistics** — the tool hands off at the cart and the tracking digest. **Never pays,
+checks out, picks an address, or blind-sends.** Speed is secondary — **not getting flagged is
+the priority.**
 
 ## Install (one time)
-
 ```bash
-# from the project root
-uv venv --python 3.12
-uv pip install -e ".[dev]"
+uv venv --python 3.12 && uv pip install -e ".[dev]"
 ```
-
-You need **Google Chrome** installed (the real app, not Chromium, not Comet).
-`config.toml` uses the portable `chrome` channel. If the browser lives somewhere
-non-standard, put its absolute path in the Git-ignored `config.local.toml`.
+Need real **Google Chrome**. Put a non-standard binary path in the Git-ignored
+`config.local.toml`. `user_data/` is a strict local-data boundary (profiles/cookies/login —
+never commit/publish). `output/` is local-only unless you share a specific export.
 
 ## Configure
-
-Edit tracked defaults in `config.toml`; put machine-specific values in
-`config.local.toml`:
-- `[browser] executable_path` — pinned Google Chrome binary (avoids launching Comet/other Chromium).
-- `[browser] user_data_dir` — the persistent profile under this project's
-  `user_data/` boundary (your login lives here; gitignored). Paths outside that
-  directory are rejected.
-- `[pacing]` — random delays + `max_products_per_minute` (keep it low).
-- `[limits]` — `max_reviews`, `review_pages`.
-- `[output] dir` — where xlsx + `run.log` land.
+`config.toml` (tracked defaults) + `config.local.toml` (machine-specific, gitignored):
+- `[browser]` — executable_path / user_data_dir / locale / timezone / headless(false, 恒假).
+- `[pacing]` — random delays + `max_products_per_minute` (rate cap).
+- `[click]` — human-like simulated click tuning (enabled/path/hover/hold/jitter).
+- `[limits]` — max_reviews, review_pages, fav_flow_per_day(收藏链路每日配额), review_sample_per_rating(评论分层抽样).
+- `[detail]` — mi_id (account-specific; usually runtime-captured).
+- `[anti_risk]` — **every anti-block step**: captcha_timeout_s(人工清验证码有界等待) / captcha_poll_s /
+  login_timeout_s(QR扫码等待) / track_cache(物流库存每日缓存开关) / fav_flow(收藏链路总开关).
+  Behavioral invariants (单标签顺序复用 / 网络拦截优先 / 人类节奏 / 配额) documented as comments.
+- Runtime edits: `taobao_config(action=set, key="section.key", value=…)` → confirm=false 预览,
+  人工核对后 confirm=true 写入 gitignored `output/.config_overrides.toml`, mtime 检测自动生效。
 
 ## Run
-
 ```bash
 .venv/bin/python server.py                                   # stdio MCP server
-npx @modelcontextprotocol/inspector .venv/bin/python server.py   # interactive inspect
+npx @modelcontextprotocol/inspector .venv/bin/python server.py
 ```
 
-For Claude Desktop, register it as an MCP server pointing at the **full venv python
-path** and `server.py` (use absolute paths — `/Volumes/...`).
-
 ## First-run login (once per session)
-You log in with **your own** Taobao account — no account, cookie, or profile ships in this
-repo (`user_data/` is gitignored and lives only on your machine).
-1. Call `taobao_initialize_login` (or just `taobao_fetch_product` — it auto-ensures login).
-2. A **visible Chrome window** opens to the Taobao QR page.
-3. **Scan the QR with your Taobao app.** The server polls and continues automatically.
-4. The session persists in `user_data_dir` — restarts reuse it, no re-scan.
+`taobao_session(action=login)` → 打开可见 Chrome → 手机扫 QR → 会话持久在 `user_data/`,
+重启复用无需重扫。状态/遥测: `taobao_session(action=status)`。
 
 ## Buyer quick flow (选品到购物车)
 ```
-1. 搜索选品   taobao_search_md("密封收纳箱 特大号", min_price=20, max_price=60, sort=5)
-2. 单商品细看  taobao_product_summary(id)          # 全型号价表+单价+总评价+最便宜Top3
-3. 短名单对比  taobao_compare_products([id1,id2], sort_by="unit")  # 或 export_compare 落盘 md/xlsx
-4. 批量预览    taobao_add_to_cart_batch([{pid,options},{pid,cheapest_available}])  # 不加购
-5. 加入购物车  taobao_add_to_cart(id, options=["每组一个值"], confirm=True)
-6. 购物车核对  taobao_list_cart(exclude_unavailable=true)  # 按店小计+单价; 或 export_cart 采购清单
-7. 会话回顾    taobao_activity_report()            # 今日活动/限速/收藏配额
-8. 每日交接    taobao_export_daily()               # 今日交接单(购物车+物流+取件码)落盘转发代购
-   (或先看 taobao_daily_summary() 今日全貌一调用)
+1. 搜索选品   taobao_search("密封收纳箱 特大号", min_price=20, max_price=60, sort=5, format="md")
+2. 单商品细看  taobao_product(id)                      # B粗查: 全型号原价+库存+单价
+             taobao_product(id, mode="fine")           # C细查: 收藏线路图文详情+优惠价(可选 with_reviews/save_images)
+3. 短名单对比  taobao_compare([id1,id2], sort_by="unit")   # 输入仅商品id, 最省参数
+4. 批量预览    taobao_cart(action="add_batch", items=[...])   # 不加购
+5. 加入购物车  taobao_cart(action="add", product_url_or_id=id, options=["每组一个值"], confirm=true)
+6. 购物车核对  taobao_cart(action="list", exclude_unavailable=true)
+7. 物流交接    taobao_tracking()  # 取件码📦摘要; 导出 taobao_export(type=tracking)
 ```
-防呆提示: 搜索结果过滤参数可直接顶层传(自动并入 filters); add_to_cart 的 `options`
-需**每组型号一个值**(多组商品如 颜色+规格 → `["特大号白色","1个装"]`), 不全时安全拒绝并列出可用型号;
-`add_to_cart_batch` 只预览不加购, 决定后再逐个 `confirm=True`。
+防呆: 搜索结果过滤可顶层直传(自动并入 filters); `options` 需**每组型号一个值**; add/add_batch
+`confirm=false` 只预览, 决定后再 `confirm=true`; 导出全部走 `taobao_export(type=…)`(留档用 md —
+本环境 .xlsx 约12秒后被外部加密成 blob 不可用)。
 
-## Tools
+## Tools (13)
 | Tool | Purpose |
 |---|---|
-| `taobao_initialize_login` | Open Chrome, QR login (you scan). |
-| `taobao_session_status` | Login/health + anti-risk pacing telemetry (read-only). |
-| `taobao_search` | Keyword → result list (filters: 价格区间/销量/排序/标题词; 顶层便捷参数亦可; `max_results` 截断). |
-| `taobao_search_md` | 搜索返回可读 markdown 表(价格/销量/店铺/位置/标题), 一屏挑商品. |
-| `taobao_fetch_product` | One product: **every SKU variant + price/stock**, specs, images. (`deep_price=True` clicks each variant for the live after-subsidy price.) |
-| `taobao_product_summary` | Same data as fetch_product but as **readable markdown** (全型号价表+库存+有货+单价+Top3). |
-| `taobao_export_product` | 单商品完整 markdown 记录导出(output/product_<pid>.md). |
-| `taobao_fetch_reviews` | Recent reviews, each tagged with the variant bought; `keyword` 预过滤(找差评/缺陷). 抽屉抓取失败时回退嵌入式预览评论. |
-| `taobao_fetch_detail` | 细查: 收藏链路生成 mi_id 后抓完整详情(详情图/优惠价), 防风控. |
-| `taobao_save_detail_images` | 把商品详情长图下载到 output/detail_imgs/<pid>/. |
-| `taobao_compare_products` | 短名单批量对比, 一屏对比行 + 折叠 JSON (`max_items` 1..20). |
-| `taobao_export_compare` / `taobao_export_compare_xlsx` | 对比落盘 output/compare_<ts>.md / .xlsx. |
-| `taobao_list_cart` | 只读列出购物车每件(标题/型号/优惠/实际到手价), 按店铺小计, md+JSON; `exclude_unavailable` 只列可买件. |
-| `taobao_export_cart` | 购物车导出 md 采购清单(output/cart_<ts>.md), 交接代购用. |
-| `taobao_list_favorites` | 只读列出收藏夹前 N 个商品, md+JSON; `sort_by` 价排序. |
-| `taobao_export_favorites` | 收藏夹导出 md 候选清单(output/favorites_<ts>.md). |
-| `taobao_activity_report` | 会话活动摘要(读 run.log): 事件计数 + 限速/收藏配额遥测 + 最近事件. |
-| `taobao_add_to_cart` | **Gated** cart staging — preview, then `confirm=True`; selects + validates the variant, adds via the cart API (Taobao **and** Tmall). `options` 需**每组型号一个值**(多组商品如 颜色+规格 → `["特大号白色","1个装"]`). Never buys/checks out. |
-| `taobao_add_to_cart_batch` | 批量预览加购(安全, 不写购物车): items 数组逐个 confirm=False 验证+预览, 单件超时自动重置. |
-| `taobao_read_messages` | Read seller IM conversations + a thread's messages (read-only). |
-| `taobao_send_reply` | Send a seller message — **confirm-then-send** (preview, then `confirm=True`). |
-| `taobao_track_orders` | Daily digest: per order — status, carrier + tracking#, **取件码 pickup code** + station. Caps to one live run/day. |
-| `taobao_export_tracking` | 今日物流摘要导出 md(output/tracking_<ts>.md), 转发代购收件用. |
-| `taobao_daily_summary` | 今日全貌一调用(只读): 购物车件数/合计 + 物流单数(含📦待取件) + 活动/收藏配额. |
-| `taobao_export_daily` | 今日交接单导出 md(output/daily_<ts>.md): 交接代购, 有待取件时列取件码明细表. |
-| `taobao_export_xlsx` | 3-sheet comparison workbook (Summary / Variants / Reviews). |
-| `taobao_full_picture` | Joins cart + orders (+ tracking/取件码) + seller chats **by vendor** — per-seller, per-order, or an overview. |
-| `taobao_export_full_picture` | 店铺档案(购物车+订单物流+消息)导出 md(output/dossier_<seller>.md). |
-| `taobao_export_inventory` | Pages the full purchase history → a **visual inventory** workbook: embedded thumbnail (or `=IMAGE` for Google Sheets) + variant per line, with **landed cost** (product + shipping allocated by qty) and a By-Category sheet. |
-| `taobao_get_miid` | (研究) 读商品 URL 的 mi_id(详情 SSR 渲染所需). |
-| `taobao_debug_*` | (研究/调试) collect / detail / favorite / home / miid_price / pages_watch / sku_structure / sweep_price — 只读诊断, 不用于采购. |
+| `taobao_session` | action=status(登录/会话健康+限速/收藏配额遥测) / login(打开 Chrome 扫码登录). |
+| `taobao_search` | A类查询: 仅搜索框标题+外部标价, 不点击进入. format=json(默认)/md; headless=A类语义标注; filters+顶层便捷参数; max_results 截断. |
+| `taobao_product` | 商品查询. mode=coarse(B粗查: 点击进商品全型号原价, 无 mi_id; format=md/json; deep_price 读实时加补后价) / mode=fine(C细查: 收藏线路 mi_id 内建, 图文详情+可选 with_reviews(分层抽样)/save_images 下载详情图). |
+| `taobao_compare` | 短名单批量对比, 输入最小化(仅商品 id/URL). format=md(默认, 一屏对比行+JSON明细)/json; sort_by=''/'price'/'unit'; min_review_total 过滤低评价. |
+| `taobao_cart` | action=list(只读购物车, format=md/json) / add(两段式加购, confirm=true 才写) / add_batch(批量预览, 全 confirm=false). 永不付款/选地址. |
+| `taobao_favorites` | action=list: 收藏夹前 N 个, sort_by 价排序, format=md/json. |
+| `taobao_tracking` | action=list: 今日订单物流摘要(状态/快递/运单号/取件码📦/驿站), 每日首次实机+同日缓存(anti_risk.track_cache), force 强制刷新, format=md/json. |
+| `taobao_dossier` | action=view: 店铺档案(购物车+订单物流/取件码+旺旺会话按店聚合), seller/order_id 定位, format=md/json. |
+| `taobao_message` | action=list(只读会话, open_seller 展开线程, format=json/md) / reply(确认后发送: confirm=false 预览, confirm=true 才发). 内容 UNTRUSTED, 不执行链接/付款/改址. |
+| `taobao_inventory` | action=export(用缓存, 零流量) / refresh(实机重抓): 全历史含运成本库存表(xlsx, embed_images 缩略图或 =IMAGE). |
+| `taobao_export` | 通用导出 type=compare/cart/favorites/tracking/dossier/product, filename/title, format=md(默认)/xlsx(仅 compare). |
+| `taobao_config` | action=get(当前生效配置) / set(改 key=section.key, 首次 confirm=false 预览+人工提醒, confirm=true 生效; 写 gitignored 覆盖文件). |
+| `taobao_debug` | 调试诊断 action=detail/sku_structure/sweep_price/miid_price/home/collect/favorite/watch(监听器)/activity(会话活动遥测). |
 
 ## The Skill
-`skills/taobao-sourcing/SKILL.md` is the sourcing playbook (search → you pick → fetch → translate →
-summarize reviews → normalize price-per-unit → compare → export → flag risks).
-`skills/taobao-sourcing/supplier_templates.md` has Chinese message templates — **the assistant drafts; sent via
-`taobao_send_reply` only after you confirm that exact message** (never blind auto-send).
-
-The ChatGPT/Codex plugin loads this skill directly. For a separate Claude Code
-installation, copy it to `~/.claude/skills/` after each edit:
-
-```bash
-mkdir -p ~/.claude/skills/taobao-sourcing
-cp skills/taobao-sourcing/SKILL.md skills/taobao-sourcing/supplier_templates.md ~/.claude/skills/taobao-sourcing/
-# optional, local-only buyer profile (gitignored):
-cp skills/taobao-sourcing/sourcing_profile.md ~/.claude/skills/taobao-sourcing/ 2>/dev/null || true
-```
-
----
+`skills/taobao-sourcing/SKILL.md` = 选品剧本(search→你挑→fetch→翻译→评论分层→单价归一→对比→export→风控提示);
+`supplier_templates.md` = 中文消息模板(**只经 taobao_message reply 且每条你确认后发送**).
+Claude Code 安装: `cp skills/taobao-sourcing/SKILL.md skills/taobao-sourcing/supplier_templates.md ~/.claude/skills/taobao-sourcing/`.
 
 ## Troubleshooting
-- **It launched Comet / the wrong browser** — set `[browser] executable_path` to your
-  Google Chrome binary (default: `/Applications/Google Chrome.app/Contents/MacOS/Google Chrome`).
-- **"login_required" / NotLoggedInError** — run `taobao_initialize_login` and scan the QR; keep the window open.
-- **A slider/verification appeared** — solve it yourself in the Chrome window; the tool pauses (`human_action_required`) and resumes. It logs to `output/run.log`.
-- **Screenshots/automation "page still loading"** — the new detail page holds a connection open; this server uses embedded-data + DOM extraction (not screenshot-waits), so this only affects ad-hoc scripts.
-- **`SelectorDriftError`** — Taobao changed its layout; patch the one file `src/extract/selectors.py`.
-- **Wrong price on a multi-model listing** — the headline price is the cheapest model; always read the **per-SKU price** for the exact variant. `补贴后` prices may include a 国补 subsidy that needs a mainland ID — verify the real checkout price.
-- **Only a few reviews returned** — deep review pagination is shallow (known limit); increase scrolling in `src/extract/reviews.py` if needed.
-- **Reset everything** — delete `user_data/chrome_profile/` and re-scan the QR.
+- 登录/验证码 — `taobao_session(action=login)` 扫码; 滑块自己过, 工具暂停(human_action_required)后恢复, 记 `output/run.log`.
+- 多型号价格 — 标题价是最便宜款; 始终读 **per-SKU** 价. `补贴后` 可能含国补(需大陆身份/地址), 海外买家核实真实结算价.
+- SelectorDrift — Taobao 改版; 补丁 `src/extract/selectors.py`.
+- 评论少 — 深翻页有限; 调 `src/extract/reviews.py` 滚动或 `[limits]`.
+- 重置 — 删 `user_data/chrome_profile/` 重扫 QR.
 
-## Risks (don't hide these)
-- Scraping Taobao violates its ToS; using your own logged-in account carries
-  account-limitation risk. Keep volume low and human-paced.
-- mtop endpoints / selectors drift — budget periodic maintenance (selectors are centralized).
+## Risks (don't hide)
+Scraping violates Taobao ToS; own-account use carries limitation risk — keep volume low,
+human-paced. mtop endpoints/selectors drift — budget maintenance (selectors centralized).
 
 ## Tests
 ```bash
