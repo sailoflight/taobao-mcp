@@ -1421,3 +1421,9 @@ Our deliverables: (i) a price for **every** SKU via `skuBase`/`sku2info` join; (
   taobao_cart list / taobao_tracking list(md) / taobao_compare json / taobao_export tracking。
 - 冒烟暴露并修复 1 真 bug: orders.py 模块级 load_config(修复后复测绿)。
 - **重构完成**: 39 → 13 工具(session/search/product/compare/cart/favorites/tracking/dossier/message/inventory/config/debug/export)。
+
+### 搜索解除封锁(人工在线, 2026-08-19)
+- 人工在线, 启动被阻挡的搜索 — 成功! taobao_search("密封收纳箱 特大号", format=md, headless=True) 12s 返回 15 条。
+- 自 round111 起 s.taobao.com/search 的 captcha/punish 已解除(人工清除或站点停止惩罚)。
+- 新版搜索工具(方案A: 工具按 format 渲染 md)端到端验证通过: 价格/销量/店铺/位置/可点商品链接。
+- 首个结果即天鼠(id=862892097837, ¥28/6000销量, 购物车已有)。
