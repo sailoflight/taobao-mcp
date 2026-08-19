@@ -31,6 +31,7 @@ off_center = 0.15             # aim drift from center (fraction of box)
 [limits]
 max_reviews = 60             # per product, paginated
 review_pages = 4
+fav_flow_per_day = 30            # daily cap on the 收藏链路 (favorite flow)
 
 [output]
 dir = "./output"

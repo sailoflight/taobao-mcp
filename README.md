@@ -142,21 +142,56 @@ repo (`user_data/` is gitignored and lives only on your machine).
 3. **Scan the QR with your Taobao app.** The server polls and continues automatically.
 4. The session persists in `user_data_dir` — restarts reuse it, no re-scan.
 
+## Buyer quick flow (选品到购物车)
+```
+1. 搜索选品   taobao_search_md("密封收纳箱 特大号", min_price=20, max_price=60, sort=5)
+2. 单商品细看  taobao_product_summary(id)          # 全型号价表+单价+总评价+最便宜Top3
+3. 短名单对比  taobao_compare_products([id1,id2], sort_by="unit")  # 或 export_compare 落盘 md/xlsx
+4. 批量预览    taobao_add_to_cart_batch([{pid,options},{pid,cheapest_available}])  # 不加购
+5. 加入购物车  taobao_add_to_cart(id, options=["每组一个值"], confirm=True)
+6. 购物车核对  taobao_list_cart(exclude_unavailable=true)  # 按店小计+单价; 或 export_cart 采购清单
+7. 会话回顾    taobao_activity_report()            # 今日活动/限速/收藏配额
+8. 每日交接    taobao_export_daily()               # 今日交接单(购物车+物流+取件码)落盘转发代购
+   (或先看 taobao_daily_summary() 今日全貌一调用)
+```
+防呆提示: 搜索结果过滤参数可直接顶层传(自动并入 filters); add_to_cart 的 `options`
+需**每组型号一个值**(多组商品如 颜色+规格 → `["特大号白色","1个装"]`), 不全时安全拒绝并列出可用型号;
+`add_to_cart_batch` 只预览不加购, 决定后再逐个 `confirm=True`。
+
 ## Tools
 | Tool | Purpose |
 |---|---|
 | `taobao_initialize_login` | Open Chrome, QR login (you scan). |
-| `taobao_session_status` | Login/health (read-only). |
-| `taobao_search` | Keyword → result list for you to pick from. |
+| `taobao_session_status` | Login/health + anti-risk pacing telemetry (read-only). |
+| `taobao_search` | Keyword → result list (filters: 价格区间/销量/排序/标题词; 顶层便捷参数亦可; `max_results` 截断). |
+| `taobao_search_md` | 搜索返回可读 markdown 表(价格/销量/店铺/位置/标题), 一屏挑商品. |
 | `taobao_fetch_product` | One product: **every SKU variant + price/stock**, specs, images. (`deep_price=True` clicks each variant for the live after-subsidy price.) |
-| `taobao_fetch_reviews` | Recent reviews, each tagged with the variant bought. |
-| `taobao_add_to_cart` | **Gated** cart staging — preview, then `confirm=True`; selects + validates the variant, adds via the cart API (Taobao **and** Tmall). Never buys/checks out. |
+| `taobao_product_summary` | Same data as fetch_product but as **readable markdown** (全型号价表+库存+有货+单价+Top3). |
+| `taobao_export_product` | 单商品完整 markdown 记录导出(output/product_<pid>.md). |
+| `taobao_fetch_reviews` | Recent reviews, each tagged with the variant bought; `keyword` 预过滤(找差评/缺陷). 抽屉抓取失败时回退嵌入式预览评论. |
+| `taobao_fetch_detail` | 细查: 收藏链路生成 mi_id 后抓完整详情(详情图/优惠价), 防风控. |
+| `taobao_save_detail_images` | 把商品详情长图下载到 output/detail_imgs/<pid>/. |
+| `taobao_compare_products` | 短名单批量对比, 一屏对比行 + 折叠 JSON (`max_items` 1..20). |
+| `taobao_export_compare` / `taobao_export_compare_xlsx` | 对比落盘 output/compare_<ts>.md / .xlsx. |
+| `taobao_list_cart` | 只读列出购物车每件(标题/型号/优惠/实际到手价), 按店铺小计, md+JSON; `exclude_unavailable` 只列可买件. |
+| `taobao_export_cart` | 购物车导出 md 采购清单(output/cart_<ts>.md), 交接代购用. |
+| `taobao_list_favorites` | 只读列出收藏夹前 N 个商品, md+JSON; `sort_by` 价排序. |
+| `taobao_export_favorites` | 收藏夹导出 md 候选清单(output/favorites_<ts>.md). |
+| `taobao_activity_report` | 会话活动摘要(读 run.log): 事件计数 + 限速/收藏配额遥测 + 最近事件. |
+| `taobao_add_to_cart` | **Gated** cart staging — preview, then `confirm=True`; selects + validates the variant, adds via the cart API (Taobao **and** Tmall). `options` 需**每组型号一个值**(多组商品如 颜色+规格 → `["特大号白色","1个装"]`). Never buys/checks out. |
+| `taobao_add_to_cart_batch` | 批量预览加购(安全, 不写购物车): items 数组逐个 confirm=False 验证+预览, 单件超时自动重置. |
 | `taobao_read_messages` | Read seller IM conversations + a thread's messages (read-only). |
 | `taobao_send_reply` | Send a seller message — **confirm-then-send** (preview, then `confirm=True`). |
 | `taobao_track_orders` | Daily digest: per order — status, carrier + tracking#, **取件码 pickup code** + station. Caps to one live run/day. |
+| `taobao_export_tracking` | 今日物流摘要导出 md(output/tracking_<ts>.md), 转发代购收件用. |
+| `taobao_daily_summary` | 今日全貌一调用(只读): 购物车件数/合计 + 物流单数(含📦待取件) + 活动/收藏配额. |
+| `taobao_export_daily` | 今日交接单导出 md(output/daily_<ts>.md): 交接代购, 有待取件时列取件码明细表. |
 | `taobao_export_xlsx` | 3-sheet comparison workbook (Summary / Variants / Reviews). |
 | `taobao_full_picture` | Joins cart + orders (+ tracking/取件码) + seller chats **by vendor** — per-seller, per-order, or an overview. |
+| `taobao_export_full_picture` | 店铺档案(购物车+订单物流+消息)导出 md(output/dossier_<seller>.md). |
 | `taobao_export_inventory` | Pages the full purchase history → a **visual inventory** workbook: embedded thumbnail (or `=IMAGE` for Google Sheets) + variant per line, with **landed cost** (product + shipping allocated by qty) and a By-Category sheet. |
+| `taobao_get_miid` | (研究) 读商品 URL 的 mi_id(详情 SSR 渲染所需). |
+| `taobao_debug_*` | (研究/调试) collect / detail / favorite / home / miid_price / pages_watch / sku_structure / sweep_price — 只读诊断, 不用于采购. |
 
 ## The Skill
 `skills/taobao-sourcing/SKILL.md` is the sourcing playbook (search → you pick → fetch → translate →

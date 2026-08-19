@@ -85,7 +85,8 @@ async def openai_apps_challenge(_: Request) -> PlainTextResponse:
 async def taobao_initialize_login() -> str:
     """Open the visible Chrome window and ensure login. The human scans the QR by phone.
 
-    Call this first, once per session. Returns 'logged_in', or a 'login_required:
+    Call this first, once per session. Example: {}
+    Returns 'logged_in', or a 'login_required:
     ...' message instructing the human to scan the QR code in the Chrome window.
     """
     return await ensure_logged_in()
@@ -95,7 +96,9 @@ async def taobao_initialize_login() -> str:
     readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
 ))
 async def taobao_session_status() -> str:
-    """Report login/session health. Read-only and idempotent."""
+    """Report login/session health + anti-risk pacing telemetry. Read-only and idempotent.
+    Example: {}
+    """
     s = get_session()
     if s.context is None:
         return "not_started: call taobao_initialize_login first (opens Chrome for QR login)."
@@ -105,19 +108,99 @@ async def taobao_session_status() -> str:
         if s.human_action_required
         else ""
     )
-    return f"status={s.status}; logged_in={logged_in}{note}"
+    try:
+        usage = _rate_limiter.usage()
+        pacing = (
+            f"; pacing=actions_60s={usage['actions_last_60s']}"
+            f"/cap={usage['max_per_minute']}"
+            f"(slots_left={usage['slots_left']}"
+            + (f", next_slot_in={usage['next_slot_in_s']}s" if usage["next_slot_in_s"] else "")
+            + ")"
+        )
+    except Exception:
+        pacing = ""
+    try:
+        from src.extract.fav_quota import quota_status
+
+        q = quota_status()
+        quota = (f"; fav_flow_quota={q['count']}/{q['limit']}今日"
+                 + ("" if q["allowed"] else " — 已达上限, 细查将用 config mi_id"))
+    except Exception:
+        quota = ""
+    return f"status={s.status}; logged_in={logged_in}{note}{pacing}{quota}"
 
 
 @mcp.tool(annotations=ToolAnnotations(
     readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True
 ))
-async def taobao_search(keyword: str, page: int = 1, filters: dict | None = None) -> list[SearchResult]:
+async def taobao_search(
+    keyword: str,
+    page: int = 1,
+    filters: dict | None = None,
+    min_price: float | None = None,
+    max_price: float | None = None,
+    min_sales: int | None = None,
+    max_sales: int | None = None,
+    sort: int | None = None,
+    title_contains: str | None = None,
+    max_results: int = 30,
+) -> list[SearchResult]:
     """Search Taobao for `keyword` and return the result list for the human to pick from.
 
-    Example: {"keyword": "tesla p100 16g", "page": 1}
+    filters (optional, applied to the search URL + client-side):
+      min_price / max_price — price band (e.g. {"min_price": 30, "max_price": 80})
+      sort — 1=综合 2=销量 5=价格从低到高 6=价格从高到低 (e.g. {"sort": 2})
+      min_sales / max_sales — monthly-sales band, applied client-side after parsing
+        (reliable; skips sketchy near-zero-sales listings) (e.g. {"min_sales": 100})
+      title_contains — case-insensitive substring required in the title
+        (e.g. {"title_contains": "加固"})
+    便捷: 也支持顶层 min_price/max_price/min_sales/max_sales/sort/title_contains(自动并入
+    filters, 免去手写 dict 被静默忽略的坑)。max_results 截断结果数(默认 30, 上限 100)。
+    Note: the result list comes back as one text block per item (FastMCP); read them all.
+    Example: {"keyword": "密封收纳箱 特大号", "min_price": 30, "max_price": 80, "min_sales": 100, "sort": 5, "max_results": 20}
     """
+    f = dict(filters or {})
+    for k, v in [("min_price", min_price), ("max_price", max_price),
+                 ("min_sales", min_sales), ("max_sales", max_sales),
+                 ("sort", sort), ("title_contains", title_contains)]:
+        if v is not None:
+            f[k] = v
     await _rate_limiter.acquire()
-    return await parse_search(keyword, page_num=page, filters=filters)
+    results = await parse_search(keyword, page_num=page, filters=f)
+    return results[: max(1, min(int(max_results or 30), 100))]
+
+
+@mcp.tool(annotations=ToolAnnotations(
+    readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True
+))
+async def taobao_search_md(
+    keyword: str,
+    page: int = 1,
+    filters: dict | None = None,
+    min_price: float | None = None,
+    max_price: float | None = None,
+    min_sales: int | None = None,
+    max_sales: int | None = None,
+    sort: int | None = None,
+    title_contains: str | None = None,
+    max_results: int = 30,
+) -> str:
+    """搜索并返回可读 markdown 表(价格/销量/店铺/位置/标题), 一屏挑商品比 JSON 直观。
+
+    参数与 taobao_search 相同(顶层便捷参数自动并入 filters; max_results 截断)。
+    只读 — 不发消息。Example: {"keyword": "密封收纳箱 特大号", "min_price": 20, "max_price": 60, "max_results": 15}
+    """
+    f = dict(filters or {})
+    for k, v in [("min_price", min_price), ("max_price", max_price),
+                 ("min_sales", min_sales), ("max_sales", max_sales),
+                 ("sort", sort), ("title_contains", title_contains)]:
+        if v is not None:
+            f[k] = v
+    await _rate_limiter.acquire()
+    from src.extract.search import _search_markdown, parse_search
+
+    results = await parse_search(keyword, page_num=page, filters=f)
+    return _search_markdown(results, keyword=keyword, max_rows=max_results, page=page)
 
 
 @mcp.tool(annotations=ToolAnnotations(
@@ -141,25 +224,94 @@ async def taobao_fetch_product(product_url_or_id: str, deep_price: bool = False)
 @mcp.tool(annotations=ToolAnnotations(
     readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True
 ))
+async def taobao_product_summary(product_url_or_id: str, deep_price: bool = False) -> str:
+    """抓取一个商品并返回可读 markdown(标题/店铺/价区间 + 全部型号价表+库存/有货).
+
+    买家一屏看全所有型号价格; deep_price=True 时读实时"平台加补后"价并附补贴提示。
+    只读 — 不收藏、不重新生成 mi_id、不发消息。Example: {"product_url_or_id": "862892097837"}
+    """
+    if await ensure_logged_in() != "logged_in":
+        raise NotLoggedInError()
+    await _rate_limiter.acquire()
+    from src.extract.product import _product_markdown, parse_product
+
+    p = await parse_product(product_url_or_id, deep_price=deep_price)
+    return _product_markdown(p)
+
+
+@mcp.tool(annotations=ToolAnnotations(
+    readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True
+))
+async def taobao_compare_products(product_ids: list[str], deep_price: bool = False, max_items: int = 10,
+                                  sort_by: str = "", min_review_total: int = 0) -> str:
+    """粗查批量对比(买家挑选常用): 对短名单商品逐个 fetch, 返回一屏对比行
+    (标题/店铺/价区间/型号数/价格示例/评论/补贴提示). 只读 — 不收藏、不重新生成 mi_id、
+    不发任何消息. 单会话顺序+限速. product_ids 可传商品ID或完整淘宝/天猫URL(自动提取 id).
+    max_items 控制最多对比件数(默认 10, 上限 20). sort_by: ''(输入序)/'price'(有货最低价升)/
+    'unit'(最低单价升), 错误行排最后. min_review_total>0 时过滤掉评价数低于阈值的商品.
+    Example: {"product_ids": ["862892097837", "759429259765"], "sort_by": "unit", "min_review_total": 500}
+    """
+    if await ensure_logged_in() != "logged_in":
+        raise NotLoggedInError()
+    await _rate_limiter.acquire()
+    max_items = max(1, min(int(max_items or 10), 20))  # 1..20 硬上限
+    from src.extract.compare import _to_markdown, compare_products
+
+    data = await compare_products(product_ids, deep_price=deep_price, max_items=max_items,
+                                  sort_by=sort_by, min_review_total=min_review_total)
+    rows = data.get("products") or []
+    md = _to_markdown(rows, data.get("count", 0))
+    return md + "\n\n<details><summary>JSON 明细</summary>\n\n```json\n" + \
+        json.dumps(data, ensure_ascii=False, indent=2) + "\n```\n</details>"
+
+
+@mcp.tool(annotations=ToolAnnotations(
+    readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True
+))
 async def taobao_fetch_reviews(
     product_url_or_id: str,
     only_with_images: bool = False,
     most_recent_first: bool = True,
     max: int = 60,
+    keyword: str = "",
 ) -> list[Review]:
     """Fetch recent reviews (raw Chinese), each tagged with the variant bought (sku_bought).
 
-    Example: {"product_url_or_id": "736546459871", "only_with_images": true, "max": 40}
+    keyword (optional): keep only reviews whose 评论文本 OR 购买型号(sku_bought) 含该子串
+    (e.g. "密封" / "开裂" / "味道" / "尺寸" — 中文直接可用) — 买家快速找差评/缺陷/尺寸抱怨/特定型号评论常用。
+    Example: {"product_url_or_id": "736546459871", "keyword": "开裂", "max": 40}
     """
     if await ensure_logged_in() != "logged_in":
         raise NotLoggedInError()
     await _rate_limiter.acquire()
-    return await parse_reviews(
+    reviews = await parse_reviews(
         product_url_or_id,
         only_with_images=only_with_images,
         most_recent_first=most_recent_first,
         max_reviews=max,
+        keyword=keyword,
     )
+    if not reviews:
+        # 抽屉抓取返回空(当前 Tmall 详情页 innerText 不渲染评价区, 站点漂移) →
+        # 回退到 fetch_product 的嵌入式预览评论(至少给买家一点评论数据)。
+        from src.extract.product import parse_product
+        from src.log import get_logger
+
+        try:
+            p = await parse_product(product_url_or_id)
+        except Exception as exc:
+            get_logger().warning("fetch_reviews fallback to embedded failed: %s", str(exc)[:100])
+            return reviews
+        embedded = list(p.reviews or [])
+        if embedded:
+            get_logger().warning(
+                "fetch_reviews drawer crawl returned 0 — fell back to %d embedded preview "
+                "reviews (site drift); use fetch_product for full variants", len(embedded))
+            kw = keyword.strip() if keyword else ""
+            if kw:
+                embedded = [r for r in embedded if kw in (r.text or "") or kw in (r.sku_bought or "")]
+            return embedded
+    return reviews
 
 
 @mcp.tool(annotations=ToolAnnotations(
@@ -191,7 +343,62 @@ async def taobao_export_xlsx(products: list[Product], filename: str) -> str:
     Example: {"products": [...], "filename": "p100_compare.xlsx"}
     """
     path = await anyio.to_thread.run_sync(write_xlsx, products, filename)  # don't block the loop
-    return f"Wrote {len(products)} product(s) to {path} — sheets: Summary, Variants, Reviews."
+    return (f"Wrote {len(products)} product(s) to {path} — sheets: Summary, Variants, Reviews.\n"
+            "⚠️ 注意: 本部署环境 .xlsx 文件会被外部机制约 12 秒后加密成 %TSD-Header blob, "
+            "无法使用; 如需留档请用 taobao_export_compare(md) 或导出后立即复制.")
+
+
+@mcp.tool(annotations=ToolAnnotations(
+    readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=True
+))
+async def taobao_export_compare(product_ids: list[str], deep_price: bool = False, max_items: int = 10,
+                                 sort_by: str = "", with_variants: bool = False,
+                                 min_review_total: int = 0, title: str = "") -> str:
+    """短名单对比并导出 markdown 文件(output/compare_<ts>.md)留档。
+
+    Reuses taobao_compare_products 的逻辑(只读浏览 + 落盘本地文件)。不收藏、不重新生成
+    mi_id、不发消息。返回文件路径 + markdown 内容。product_ids 可传ID或完整URL。
+    max_items 控制对比件数(1..20); sort_by: ''(输入序)/'price'/'unit';
+    with_variants=True 时追加每个商品全型号价表(完整报告); min_review_total 过滤低评价商品;
+    title 可选(自定义报告标题, 如"收纳箱对比")。
+    Example: {"product_ids": ["862892097837", "759429259765"], "title": "收纳箱对比", "with_variants": true}
+    """
+    if await ensure_logged_in() != "logged_in":
+        raise NotLoggedInError()
+    await _rate_limiter.acquire()
+    max_items = max(1, min(int(max_items or 10), 20))
+    from src.extract.compare import export_compare_markdown
+
+    res = await export_compare_markdown(product_ids, deep_price=deep_price, max_items=max_items,
+                                        sort_by=sort_by, with_variants=with_variants,
+                                        min_review_total=min_review_total, title=title)
+    return f"已导出对比到 {res['path']} ({res['count']} 件)\n\n{res['markdown']}"
+
+
+@mcp.tool(annotations=ToolAnnotations(
+    readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=True
+))
+async def taobao_export_compare_xlsx(product_ids: list[str], deep_price: bool = False, filename: str = "",
+                                      max_items: int = 10, sort_by: str = "", min_review_total: int = 0) -> str:
+    """短名单对比并导出 xlsx 电子表格(output/compare_<ts>.xlsx), 买家保留对比表。
+
+    Reuses taobao_compare_products 的逻辑(只读浏览 + 落盘本地文件)。不收藏、不重新生成
+    mi_id、不发消息。product_ids 可传ID或完整URL。max_items 控制对比件数(1..20);
+    sort_by: ''(输入序)/'price'/'unit'; min_review_total 过滤低评价商品。
+    Example: {"product_ids": ["862892097837", "759429259765"], "sort_by": "unit"}
+    """
+    if await ensure_logged_in() != "logged_in":
+        raise NotLoggedInError()
+    await _rate_limiter.acquire()
+    max_items = max(1, min(int(max_items or 10), 20))
+    from src.extract.compare import export_compare_xlsx
+
+    res = await export_compare_xlsx(product_ids, deep_price=deep_price, filename=filename,
+                                    max_items=max_items, sort_by=sort_by,
+                                    min_review_total=min_review_total)
+    return (f"已导出对比 xlsx 到 {res['path']} ({res['count']} 件)\n"
+            "⚠️ 注意: 本部署环境 .xlsx 文件会被外部机制约 12 秒后加密成 %TSD-Header blob, "
+            "无法使用; 如需留档请用 taobao_export_compare(md) 或导出后立即复制.")
 
 
 @mcp.tool(annotations=ToolAnnotations(
@@ -202,19 +409,22 @@ async def taobao_add_to_cart(
     options: list[str] | None = None,
     qty: int = 1,
     confirm: bool = False,
+    cheapest_available: bool = False,
 ) -> str:
     """Stage one product+variant into the cart — the hand-off to your China agent.
 
     Preview-only unless confirm=True (gated write). `options` = one value per variant
-    group (e.g. ["P100 质保3年 以换代修"]). NEVER buys, checks out, pays, or picks an address —
-    only stages into the cart (validates the variant chip + live skuId, then adds via the
-    mtop.trade.addBag API; the 加入购物车 button click is the fallback).
+    group (e.g. ["P100 质保3年 以换代修"]). cheapest_available=True 且不给 options 时,
+    自动选最便宜有货型号(预览可先确认, 再 confirm=True 加购)。NEVER buys, checks out,
+    pays, or picks an address — only stages into the cart (validates the variant chip +
+    live skuId, then adds via the mtop.trade.addBag API; the 加入购物车 button click is the fallback).
     Example: {"product_url_or_id":"736546459871","options":["P100 质保7天 80个起售"],"qty":1,"confirm":true}
     """
     if await ensure_logged_in() != "logged_in":
         raise NotLoggedInError()
     await _rate_limiter.acquire()
-    return await add_to_cart(product_url_or_id, options=options, qty=qty, confirm=confirm)
+    return await add_to_cart(product_url_or_id, options=options, qty=qty, confirm=confirm,
+                             cheapest_available=cheapest_available)
 
 
 @mcp.tool(annotations=ToolAnnotations(
@@ -275,6 +485,25 @@ async def taobao_full_picture(seller: str | None = None, order_id: str | None = 
 @mcp.tool(annotations=ToolAnnotations(
     readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True
 ))
+async def taobao_export_full_picture(seller: str | None = None, order_id: str | None = None,
+                                     filename: str = "", title: str = "") -> str:
+    """把店铺档案(购物车+订单物流+消息)导出为 md 文件(output/dossier_<seller>.md) — 买家留档.
+
+    只读浏览(复用 full_picture) + 落盘本地 md。seller/order_id 同 full_picture; filename/title 可选。
+    Example: {"seller": "天鼠家居旗舰店", "title": "天鼠档案"}
+    """
+    if await ensure_logged_in() != "logged_in":
+        raise NotLoggedInError()
+    await _rate_limiter.acquire()
+    from src.extract.linker import export_dossier_markdown
+
+    res = await export_dossier_markdown(seller=seller, order_id=order_id, filename=filename, title=title)
+    return f"已导出店铺档案到 {res['path']} ({res['count']} 个档案)\n\n{res['markdown']}"
+
+
+@mcp.tool(annotations=ToolAnnotations(
+    readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True
+))
 async def taobao_debug_detail(product_url_or_id: str) -> str:
     """[DEBUG] Open one product page and dump HOW the 详情 (description strip) loads.
 
@@ -294,16 +523,41 @@ async def taobao_debug_detail(product_url_or_id: str) -> str:
 @mcp.tool(annotations=ToolAnnotations(
     readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True
 ))
-async def taobao_debug_cart_prices() -> str:
-    """[DEBUG] 读购物车每行商品的实际价格(到手价), 确认如天鼠特大号的实际价(如 ¥33.75).
-    Read-only. No writes.
+async def taobao_list_cart(max_items: int = 50, exclude_unavailable: bool = False) -> str:
+    """只读: 结构化列出购物车每件商品(标题/型号/优惠/实际到手价/标价).
+
+    买家下单前常用 — 一眼看清每件实际到手价(店铺优惠后/平台加补后/立减)。只读,
+    不写入、不收藏、不发消息。exclude_unavailable=True 时过滤缺货/下架件(采购清单)。
+    Example: {"max_items": 50, "exclude_unavailable": true}
     """
     if await ensure_logged_in() != "logged_in":
         raise NotLoggedInError()
     await _rate_limiter.acquire()
-    from src.extract.cart_price import read_cart_prices
+    from src.extract.cart_price import _cart_markdown, list_cart
 
-    return json.dumps(await read_cart_prices(), ensure_ascii=False, indent=2)
+    data = await list_cart(max_items=max_items, exclude_unavailable=exclude_unavailable)
+    return _cart_markdown(data) + "\n\n<details><summary>JSON 明细</summary>\n\n```json\n" + \
+        json.dumps(data, ensure_ascii=False, indent=2) + "\n```\n</details>"
+
+
+@mcp.tool(annotations=ToolAnnotations(
+    readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True
+))
+async def taobao_export_cart(max_items: int = 50, exclude_unavailable: bool = False,
+                             filename: str = "", title: str = "") -> str:
+    """把购物车导出为 md 文件(output/cart_<ts>.md) — 采购清单交接代购用.
+
+    只读浏览购物车 + 落盘本地 md(带时间戳头), 不写入、不收藏、不发消息。
+    exclude_unavailable=True 只导可买件。Example: {"exclude_unavailable": true, "filename": "采购清单.md"}
+    """
+    if await ensure_logged_in() != "logged_in":
+        raise NotLoggedInError()
+    await _rate_limiter.acquire()
+    from src.extract.cart_price import export_cart_markdown
+
+    res = await export_cart_markdown(max_items=max_items, exclude_unavailable=exclude_unavailable,
+                                     filename=filename, title=title)
+    return f"已导出采购清单到 {res['path']} ({res['count']} 件)\n\n{res['markdown']}"
 
 
 @mcp.tool(annotations=ToolAnnotations(
@@ -388,6 +642,25 @@ async def taobao_fetch_detail(product_url_or_id: str, miid_source: str = "config
 @mcp.tool(annotations=ToolAnnotations(
     readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True
 ))
+async def taobao_save_detail_images(product_url_or_id: str, output_dir: str = "", max_images: int = 60) -> str:
+    """细查后把详情长图下载到本地文件夹(买家离线查看 — AI 读不了图但人需要).
+
+    复用收藏链路(fetch_detail, miid_source='favorite')拿 .desc-root 详情图, 用浏览器会话
+    上下文下载到 output/detail_imgs/<pid>/ (WebP)。只读浏览 + 落盘; fetch_detail 已 cleanup
+    (无收藏残留); 不发消息。Example: {"product_url_or_id": "862892097837"}
+    """
+    if await ensure_logged_in() != "logged_in":
+        raise NotLoggedInError()
+    await _rate_limiter.acquire()
+    from src.extract.desc import save_detail_images
+
+    return json.dumps(await save_detail_images(product_url_or_id, output_dir=output_dir, max_images=max_images),
+                      ensure_ascii=False, indent=2)
+
+
+@mcp.tool(annotations=ToolAnnotations(
+    readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True
+))
 async def taobao_get_miid(watch_seconds: int = 90, keyword: str = "3D打印机", mode: str = "auto") -> str:
     """Obtain/refresh the mi_id used by taobao_fetch_detail.
 
@@ -414,6 +687,7 @@ async def taobao_get_miid(watch_seconds: int = 90, keyword: str = "3D打印机",
 async def taobao_debug_home() -> str:
     """[DEBUG] Dump the Taobao homepage's ad/product link structure (for building the
     auto mi_id click). Returns product-page anchors + ad-like containers. Read-only.
+    Example: {}
     """
     if await ensure_logged_in() != "logged_in":
         raise NotLoggedInError()
@@ -439,6 +713,46 @@ async def taobao_debug_collect(target_pid: str = "") -> str:
     from src.extract.favorite import recon_collect
 
     return json.dumps(await recon_collect(target_pid or ""), ensure_ascii=False, indent=2)
+
+
+@mcp.tool(annotations=ToolAnnotations(
+    readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True
+))
+async def taobao_list_favorites(limit: int = 30, sort_by: str = "") -> str:
+    """只读: 列出收藏夹前 N 个商品(标题+价), 买家挑选/回顾已收藏时常用.
+
+    sort_by: ""(页面顺序, 默认) / "price_asc"(价格从低到高) / "price_desc"(从高到低),
+    缺价排最后。Read-only — 不写入、不收藏、不发消息.
+    Example: {"limit": 30, "sort_by": "price_asc"}
+    """
+    if await ensure_logged_in() != "logged_in":
+        raise NotLoggedInError()
+    await _rate_limiter.acquire()
+    from src.extract.favorite import _favorites_markdown, list_favorites
+
+    data = await list_favorites(limit=limit, sort_by=sort_by)
+    return _favorites_markdown(data) + "\n\n<details><summary>JSON 明细</summary>\n\n```json\n" + \
+        json.dumps(data, ensure_ascii=False, indent=2) + "\n```\n</details>"
+
+
+@mcp.tool(annotations=ToolAnnotations(
+    readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True
+))
+async def taobao_export_favorites(limit: int = 30, sort_by: str = "", filename: str = "",
+                                   title: str = "") -> str:
+    """把收藏夹导出为 md 文件(output/favorites_<ts>.md) — 候选清单留档.
+
+    只读浏览收藏夹 + 落盘本地 md(带时间戳头), 不写入、不收藏、不发消息。
+    sort_by 同 list_favorites(''/'price_asc'/'price_desc'); title 可选(自定义标题)。
+    Example: {"limit": 30, "sort_by": "price_asc", "title": "收纳箱候选"}
+    """
+    if await ensure_logged_in() != "logged_in":
+        raise NotLoggedInError()
+    await _rate_limiter.acquire()
+    from src.extract.favorite import export_favorites_markdown
+
+    res = await export_favorites_markdown(limit=limit, sort_by=sort_by, filename=filename, title=title)
+    return f"已导出候选清单到 {res['path']} ({res['count']} 个)\n\n{res['markdown']}"
 
 
 @mcp.tool(annotations=ToolAnnotations(
@@ -508,6 +822,257 @@ async def taobao_export_inventory(
     return (f"Wrote {s['lines']} line items ({s['orders']} orders, {s['date_range']}) to {s['path']}. "
             f"Landed total ¥{s['landed_total']:,.2f}; {s['images']} images; "
             f"{s['flagged']} custom-link lines flagged. Sheets: Inventory + By Category.")
+
+
+@mcp.tool(annotations=ToolAnnotations(
+    readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True
+))
+async def taobao_activity_report(limit: int = 12, days: int | None = None) -> str:
+    """会话活动摘要(防风控可观测): 读 output/run.log 统计工具活动
+    (搜索/抓取/收藏/验证码等按类型计数) + 最近事件 + 限速/收藏配额遥测。只读。
+    days>0 时只看最近 N 天的事件(默认全部)。
+    Example: {"limit": 12, "days": 1}
+    """
+    if await ensure_logged_in() != "logged_in":
+        raise NotLoggedInError()
+    await _rate_limiter.acquire()
+    from pathlib import Path
+
+    from src.config import load_config
+    from src.extract.activity import _summarize_log, read_log_lines
+    from src.extract.fav_quota import quota_status
+
+    out_dir = Path(load_config().output.dir)
+    lines = read_log_lines(out_dir / "run.log")
+    data = _summarize_log(lines, max_events=max(1, min(int(limit or 12), 50)), days=days)
+    pace = _rate_limiter.usage()
+    try:
+        quota = quota_status()
+    except Exception as exc:  # pragma: no cover
+        quota = {"error": str(exc)[:80]}
+    by_type = data.get("by_type") or {}
+    head = [f"### 会话活动摘要(共 {data.get('total', 0)} 条日志事件)"]
+    head.append(f"- 级别: " + ", ".join(f"{k}:{v}" for k, v in (data.get('by_level') or {}).items()))
+    head.append(f"- 事件类型: " + (", ".join(f"{k}×{v}" for k, v in by_type.items()) or "—"))
+    head.append(f"- 限速遥测: " + (json.dumps(pace, ensure_ascii=False) if pace else "—"))
+    head.append(f"- 收藏配额: " + json.dumps(quota, ensure_ascii=False))
+    head.append("")
+    head.append("| 时间 | 级别 | 类型 | 事件 |")
+    head.append("|---|---|---|---|")
+    for ev in data.get("recent") or []:
+        head.append(f"| {ev['ts']} | {ev['level']} | {ev['type']} | {ev['msg'][:70]} |")
+    md = "\n".join(head)
+    return md + "\n\n<details><summary>JSON 明细</summary>\n\n```json\n" + \
+        json.dumps(data, ensure_ascii=False, indent=2) + "\n```\n</details>"
+
+
+@mcp.tool(annotations=ToolAnnotations(
+    readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True
+))
+async def taobao_add_to_cart_batch(items: list[dict], qty: int = 1) -> str:
+    """批量预览加购(安全, 不实际加购): 对多个商品逐个验证型号并返回预览.
+
+    items = [{"product_url_or_id": "...", "options": ["每组一个值"], "qty": 1}, ...]
+    每个只走 confirm=False(验证芯片+skuId+预览), 不写购物车 — 买家先看全短名单预览,
+    决定后再逐个 confirm=True 加购。单会话顺序+限速, 不批量开 tab。
+    Example: {"items": [{"product_url_or_id": "862892097837", "options": ["特大号白色","1个装"]},
+                        {"product_url_or_id": "759429259765", "cheapest_available": true}]}
+    """
+    if await ensure_logged_in() != "logged_in":
+        raise NotLoggedInError()
+    await _rate_limiter.acquire()
+    from src.cart import add_to_cart
+
+    import asyncio
+    from src.browser.session import get_session
+
+    session = get_session()
+    lines = [f"### 批量预览({len(items)} 件, 未加购)\n"]
+    for i, it in enumerate(items or [], start=1):
+        pid = it.get("product_url_or_id") or it.get("product_id")
+        opts = it.get("options")
+        q = it.get("qty") or qty
+        cheapest = bool(it.get("cheapest_available"))
+        try:
+            preview = await asyncio.wait_for(
+                add_to_cart(pid, options=opts, qty=int(q), confirm=False,
+                            cheapest_available=cheapest),
+                timeout=40)
+            lines.append(f"{i}. {preview}\n")
+        except asyncio.TimeoutError:
+            # 复用页面卡死(如坏商品在导航/验证时不返回) — 重置会话防拖垮整批
+            try:
+                await session.close()
+            except Exception:
+                pass
+            lines.append(f"{i}. ⏱ 超时跳过: {pid} (单件>40s, 已重置浏览器)\n")
+        except Exception as exc:
+            lines.append(f"{i}. ✗ {pid}: {str(exc)[:120]}\n")
+    return "\n".join(lines)
+
+
+@mcp.tool(annotations=ToolAnnotations(
+    readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True
+))
+async def taobao_export_tracking(only_active: bool = True, max: int = 12,
+                                 filename: str = "", title: str = "") -> str:
+    """把今日订单物流摘要导出为 md 文件(output/tracking_<ts>.md) — 转发代购收件用.
+
+    读今日缓存(零淘宝流量, 若今日已抓过); 否则走 track_orders 每日一次抓取(限速)。
+    只读浏览 + 落盘本地 md(带时间戳头); title 可选(自定义标题)。
+    Example: {"max": 12, "title": "今日物流"}
+    """
+    if await ensure_logged_in() != "logged_in":
+        raise NotLoggedInError()
+    from src.extract.orders import _load_cached_today, _today_cn
+
+    cached = _load_cached_today()
+    if cached is not None:
+        orders = cached
+    else:
+        await _rate_limiter.acquire()  # 会实际抓取
+        from src.extract.orders import track_orders
+
+        orders = await track_orders(only_active=only_active, max_drill=max)
+    from datetime import datetime, timezone
+    from pathlib import Path
+    from src.config import load_config
+    from src.extract.orders import _tracking_markdown
+
+    md = _tracking_markdown(orders)
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    fname = filename or f"tracking_{ts}.md"
+    out_dir = Path(load_config().output.dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / fname
+    head = f"> 导出时间: {ts} (今日 {_today_cn()})"
+    if title:
+        head += f" — {title}"
+    path.write_text(head + "\n\n" + md + "\n", encoding="utf-8")
+    return f"已导出今日物流摘要到 {path} ({len(orders)} 单)\n\n{head}\n\n{md}"
+
+
+@mcp.tool(annotations=ToolAnnotations(
+    readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True
+))
+async def taobao_export_product(product_url_or_id: str, filename: str = "", title: str = "",
+                                 with_reviews: bool = False) -> str:
+    """抓单个商品并导出完整 markdown 记录(output/product_<pid>.md) — 买家留档单商品全貌.
+
+    只读浏览(复用 product_summary 的渲染) + 落盘本地 md。product_url_or_id 可传ID或完整URL。
+    filename 可选(自定义文件名); title 可选(自定义标题); with_reviews=True 时含嵌入式评论。
+    Example: {"product_url_or_id": "862892097837", "title": "天鼠收纳箱", "with_reviews": true}
+    """
+    if await ensure_logged_in() != "logged_in":
+        raise NotLoggedInError()
+    await _rate_limiter.acquire()
+    from src.extract.product import export_product_markdown
+
+    res = await export_product_markdown(product_url_or_id, filename=filename, title=title,
+                                        with_reviews=with_reviews)
+    return f"已导出商品记录到 {res['path']}\n\n{res['markdown']}"
+
+
+@mcp.tool(annotations=ToolAnnotations(
+    readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True
+))
+async def taobao_daily_summary() -> str:
+    """一调用看今日全貌(只读): 购物车件数/合计 + 今日物流摘要 + 活动/限速/收藏配额.
+
+    复用 list_cart(购物车) + track_orders(读今日缓存, 零流量) + activity_report 的统计。
+    全只读, 不发消息。买家每天开工第一件事。
+    """
+    if await ensure_logged_in() != "logged_in":
+        raise NotLoggedInError()
+    await _rate_limiter.acquire()
+    from pathlib import Path
+
+    from src.config import load_config
+    from src.extract.activity import _summarize_log, read_log_lines
+    from src.extract.cart_price import list_cart
+    from src.extract.fav_quota import quota_status
+    from src.extract.orders import _load_cached_today, _today_cn, track_orders
+
+    cart = await list_cart(max_items=50, exclude_unavailable=True)
+    cached = _load_cached_today()
+    if cached is not None:
+        orders = cached
+    else:
+        from src.extract.orders import _tracking_markdown
+        await _rate_limiter.acquire()  # 会实际抓取
+        orders = await track_orders(only_active=True, max_drill=12)
+
+    out_dir = Path(load_config().output.dir)
+    lines = read_log_lines(out_dir / "run.log")
+    act = _summarize_log(lines, max_events=5)
+    qs = quota_status()
+
+    cart_items = cart.get("items") or []
+    total = cart.get("total_est") or cart.get("total") or "-"
+    pickup_n = sum(1 for o in orders if getattr(o, "pickup_code", None))
+    pickup_hint = f" · 📦{pickup_n} 单待取件" if pickup_n else ""
+    lines_out = [f"### 今日概览({_today_cn()})", "",
+                 f"**购物车**: {cart.get('count', 0)} 件 · 合计(到手)¥{total}",
+                 f"**物流**: {len(orders)} 单在跟踪{pickup_hint}",
+                 f"**活动**: {act.get('total', 0)} 条事件 · 收藏配额 {qs.get('count', 0)}/{qs.get('limit', '?')}(余 {qs.get('remaining', '?')})"]
+    return "\n".join(lines_out)
+
+
+@mcp.tool(annotations=ToolAnnotations(
+    readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True
+))
+async def taobao_export_daily(filename: str = "", title: str = "今日交接") -> str:
+    """今日全貌留档导出(output/daily_<ts>.md) — 交接代购的每日交接单.
+
+    复用 list_cart(购物车) + track_orders(今日缓存) + activity 统计; 列出待取件订单明细(取件码/驿站)。
+    全只读, 不发消息。filename 可选; title 可选(默认"今日交接")。
+    """
+    if await ensure_logged_in() != "logged_in":
+        raise NotLoggedInError()
+    await _rate_limiter.acquire()
+    from datetime import datetime, timezone
+    from pathlib import Path
+
+    from src.config import load_config
+    from src.extract.activity import _summarize_log, read_log_lines
+    from src.extract.cart_price import list_cart
+    from src.extract.fav_quota import quota_status
+    from src.extract.orders import _load_cached_today, _today_cn, track_orders
+
+    cart = await list_cart(max_items=50, exclude_unavailable=True)
+    cached = _load_cached_today()
+    if cached is not None:
+        orders = cached
+    else:
+        await _rate_limiter.acquire()  # 会实际抓取
+        orders = await track_orders(only_active=True, max_drill=12)
+
+    out_dir = Path(load_config().output.dir)
+    lines = read_log_lines(out_dir / "run.log")
+    act = _summarize_log(lines, max_events=5)
+    qs = quota_status()
+
+    total = cart.get("total_est") or cart.get("total") or "-"
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    fname = filename or f"daily_{ts}.md"
+    path = out_dir / fname
+    md = [f"# {title} ({_today_cn()})", "",
+          f"**购物车**: {cart.get('count', 0)} 件 · 合计(到手)¥{total}",
+          f"**物流**: {len(orders)} 单在跟踪",
+          f"**活动**: {act.get('total', 0)} 条事件 · 收藏配额 {qs.get('count', 0)}/{qs.get('limit', '?')}",
+          ""]
+    pickups = [o for o in orders if getattr(o, "pickup_code", None)]
+    if pickups:
+        md.append("## 📦 待取件")
+        md.append("| 订单 | 状态 | 快递 | 取件码 | 驿站 |")
+        md.append("|---|---|---|---|---|")
+        for o in pickups:
+            md.append(f"| {o.order_id} | {o.status} | {o.carrier or ''} | {o.pickup_code} | {o.station or ''} |")
+        md.append("")
+    md.append(f"> 导出时间: {ts}")
+    body = "\n".join(md)
+    path.write_text(body + "\n", encoding="utf-8")
+    return f"已导出今日交接单到 {path}\n\n{body}"
 
 
 def main() -> None:

@@ -92,8 +92,19 @@ def apply_filters(
     only_with_images: bool = False,
     most_recent_first: bool = True,
     max_reviews: int | None = None,
+    keyword: str = "",
 ) -> list[Review]:
+    """Pure: image-only filter, optional text-keyword filter, recency sort, cap.
+
+    keyword is a case-insensitive substring on the review text (Chinese works);
+    applied BEFORE the max cap so the buyer sees the matching reviews, not a
+    truncated-then-filtered slice.
+    """
     out = [r for r in reviews if r.has_images] if only_with_images else list(reviews)
+    kw = (keyword or "").strip()
+    if kw:
+        # keyword 匹配评论文本 OR 购买型号(sku_bought) — 找特定型号/密封款评论更有效
+        out = [r for r in out if kw in (r.text or "") or kw in (r.sku_bought or "")]
     if most_recent_first:
         out.sort(key=lambda r: r.date or "", reverse=True)
     if max_reviews is not None:
@@ -117,6 +128,7 @@ async def parse_reviews(
     most_recent_first: bool = True,
     max_reviews: int | None = None,
     include_default: bool = False,
+    keyword: str = "",
 ) -> list[Review]:
     """Live: open the product, open the "查看全部评价" drawer, paginate it, extract.
 
@@ -178,4 +190,4 @@ async def parse_reviews(
     reviews = dedupe(dicts_to_reviews(raw))
     if not include_default:
         reviews = [r for r in reviews if not is_default_review(r.text)]
-    return apply_filters(reviews, only_with_images, most_recent_first, cap)
+    return apply_filters(reviews, only_with_images, most_recent_first, cap, keyword)

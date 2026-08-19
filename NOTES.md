@@ -1,5 +1,32 @@
 # NOTES.md — Base Repo Recon (`JeremyDong22/taobao_mcp`)
 
+> ## 📋 系统状态总览(2026-08-18, 打磨 256 轮 / 297 个未 push 提交(目标上限收官))
+> **部署**: 源码在 WSL `/home/lijq/code/taobao-mcp`, 活体部署在 Windows `C:\MCP\taobao-mcp`(经 /mnt/c 访问)。
+> 每次改动: 本地改 → 单测 → cp 到 /mnt/c → 实机验证 → 分步 git 提交(不 push)。
+>
+> **工具 37 个**(29 正式 + 8 debug): 搜索(search/search_md, 过滤+客户端排序+翻页) · 商品
+> (fetch_product/product_summary, 全型号价表+最便宜有货+总评价+单价) · 对比(compare/export_compare(md)/
+> export_compare_xlsx, 最低单价) · 详情(fetch_detail 收藏链路+save_detail_images) · 购物车(list_cart,
+> 按店小计+exclude_unavailable/export_cart 采购清单) · 收藏(list_favorites/export_favorites, sort_by) ·
+> 评论(fetch_reviews, keyword+嵌入式回退) · 加购(add_to_cart 每组一个值+cheapest_available, add_to_cart_batch 批量预览) ·
+> 订单/跟踪(track_orders/export_tracking)/full_picture/export_inventory · 活动摘要(activity_report) ·
+> debug_* 8 个(研究用)。
+>
+> **测试 29 文件**: 纯函数全覆盖(cart/compare/search/favorite/product/activity/fav_quota/reviews)。
+> 本机 python3 无 pydantic → 纯函数用 ast 提取 exec 验证; 正式 pytest 在 Windows 环境跑。
+>
+> **已知 bug/待办(3)**: ① fetch_reviews 评论抽屉抓取返回空(当前 Tmall SSR 不渲染评论区, 已用
+> 嵌入式预览+总评价降级, 需 rate API 逆向); ② rate API 逆向暂缓(猜的接口名 ABORT, 需网络拦截);
+> ③ 评论新触发点未找到。**环境注意**: .xlsx 文件会被外部机制 ~12 秒后加密成 %TSD-Header blob,
+> 留档用 md 导出。
+>
+> **明日人工核验**: `git log origin/main..main`(126 个, 每步有中文说明+核验点) · `pytest tests/`
+> (Windows, 29 文件已同步) · 冒烟: search_md(商品链接) → product_summary(Top3/单价) →
+> compare(sort_by/min_review_total) → add_to_cart_batch(预览) → export_cart(海运列) →
+> export_tracking(完整订单号/取件码📦) → fetch_reviews(keyword) → export_full_picture(店铺档案) →
+> activity_report(days)。
+> 存储容器方案: 天鼠特大号(到手¥33.75) + Purable 50#(¥15.9) 已在购物车, 仅入车未付款。
+
 > Phase 0 documentation of the base repo's **actual** behavior, as cloned to
 > `_base_repo/ (repo root)` (git HEAD `4cdeb50`, "Fix critical bugs causing MCP tool to hang with certain URLs").
 > Every claim is cited `file:line`. "Not present" means the code does not contain it.
@@ -363,3 +390,1012 @@ Our deliverables: (i) a price for **every** SKU via `skuBase`/`sku2info` join; (
 - 芯片点击:valueItem 芯片有 data-vid;点后 URL 更新 sku_properties(选中 vid)但 upStreamPrice 不随页面内选型变(仍是原始点击价)。
 - 简化:`click_from_favorites` 改事件驱动(等首个 goodsItem 卡出现即点,不再固定15s+滚动)。
 - 新增工具:`taobao_debug_sweep_price`(逐型号点芯片读价)、`taobao_debug_sku_structure`(芯片结构诊断)、`taobao_debug_cart_prices`(购物车实际到手价)、`taobao_debug_miid_price`(落地页价格观察)。
+
+---
+
+## 打磨轮次 1(2026-08-18 晚,人工离线,不 push,分步 git 供核验)
+
+### 修复(防风控)
+- **收藏链路固定等待 → 人类化随机延迟**:ensure_favorited/ensure_unfavorited/click_from_favorites 的固定 wait(2500/1200ms)全部改为 `human_delay` 随机区间(页面 settle 2.2-3.6s、点后翻转 1.0-1.9s、弹窗 settle 2.0-3.2s)。消除可预测节奏指纹。
+
+### 新功能(买家挑选常用,只读,不含主动发消息)
+- **`taobao_compare_products(product_ids)`**:粗查批量对比,短名单逐个 fetch 折叠成一屏对比行(标题/店/价区间/型号数/最低价/评论数/补贴提示)。实测 3 商品 25s。
+- **`taobao_list_favorites(limit)`**:只读列出收藏夹前 N 个商品(标题+价),事件驱动等首卡渲染。实测列出 10 个。
+
+### 备注
+- 搜索工具本身无 bug(返回完整 list,只是 FastMCP 每元素一个 text block,分析脚本须读 structuredContent 或遍历 content)。
+
+### 打磨轮次 2(2026-08-18 晚,不 push,分步 git 供核验)
+- **`taobao_list_cart`(新,只读)**:购物车结构化读取 — 每件商品解析出 标题/型号(颜色分类·规格·配件类型)/立减金额/实际到手价(店铺优惠后或平台加补后)/标价。替换杂乱的 `taobao_debug_cart_prices`(删除)与 `taobao_debug_cart_recon`(删除)。
+- 关键解析:cartItemInfo 块的文本,价格数字是空格分隔的("￥ 33 . 75");去重(块与嵌套容器重复)。
+- 实测 14 件:天鼠 ¥33.75(标¥42.25/立减¥8.5)、Purable 50# ¥15.9、拓竹TPU ¥169.15 等。
+- 局限:缺货/下架行的价格可能带数量黏连(如 "￥ 259 1"→2591),已记录不修(边缘)。
+
+### 打磨轮次 2 · 补(搜索过滤)
+- `taobao_search` 的 `filters` 参数原先完全没用(死代码)→ 接上 URL:
+  - `min_price`/`max_price` → `filter=reserve_price[MIN,MAX]`(尽力而为, Taobao SPA 可能忽略)
+  - `sort` → `s=N`(1=综合 2=销量 5=价格低→高 6=高→低)—— **实测 sort 生效**(结果按价升序)
+- 注: 搜索返回 list, FastMCP 每元素一个 text block, 消费端须读 structuredContent 或遍历 content。
+
+### 打磨轮次 2 · 补(对比可读性)
+- `taobao_compare_products` 现返回 markdown 对比表(商品/店铺/价区间/型号数/最低价/评论/补贴)+ 折叠 JSON 明细, GUI 一屏可读。
+
+### 打磨轮次 3
+- **fix(cart)**: 缺货/下架行的价格把数量黏连了("￥ 259 1"→2591, 应为 259)。_num 现识别: "33 . 75"→33.75(小数点独立 token), "259 1"→259(尾随整数=数量), "10"→10。回归测试 5 例全过。
+
+### 打磨轮次 3 · 补(监控)
+- `RateLimiter.usage()`: 限速遥测(60s 内动作数/上限/剩余槽/下槽时间);`taobao_session_status` 现附带 pacing 信息 — 防风控可观测(人工可见我们有没有爆请求)。
+
+### 打磨轮次 4(补测试, 便于明日自动化核验)
+- 新增 4 个 pytest 测试文件(Windows 环境跑 pytest):
+  - `tests/test_cart_price.py`(_num 三态 + 7 类购物车行解析)
+  - `tests/test_compare.py`(_summarize 折叠 + _to_markdown 渲染 + 错误行)
+  - `tests/test_pacing_usage.py`(RateLimiter.usage 三态)
+  - `tests/test_search_url.py`(build_search_url 过滤/排序 URL 拼接)
+- 重构: search.py 抽出纯函数 `build_search_url(keyword, page, filters)`(parse_search 调用), 使 URL 拼接可单测。
+- 本地验证 24 断言全过(python3 无 pytest/pydantic, 用 ast 提取纯函数源码验证; 正式跑需 Windows 环境 pytest)。
+
+### 打磨轮次 4 · 补(防风控一致性)
+- `_item_in_collect`(ensure_favorited unknown 态回退)的固定等待 4000/1500/1000ms → human_delay(3.2-5.0/1.2-2.2/0.8-1.6)。
+- 至此收藏链路生产路径全部人类化; recon_* 诊断函数保留固定等待(供人工检查)。
+
+### 打磨轮次 4 · 补
+- `taobao_compare_products` 说明补: product_ids 可传完整淘宝/天猫 URL(自动提取 id, 实测支持 mi_id/spm/upStreamPrice 等多余参数)。
+- 新增 `tests/test_product_id.py`(_to_product_id 5 断言, 本地 ast 验证全过)。
+
+### 打磨轮次 5
+- **feat(search)**: `filter_search_results` 纯函数 — min_sales/max_sales(月销量带,客户端过滤,跳过疑似刷单/杂牌零销量)+ min/max_price 客户端兜底(URL 参数可能被 SPA 忽略)。实机: min_sales=500 → 30 结果 0 个残留。
+- 新增 `tests/test_search_filter.py`(7 断言, 本地 ast 验证全过)。
+- 注: 修复了测试用例里 "None 字段" 的预期(r1 不能有 sales=5 否则会被 min_sales 过滤)—— 函数本身正确。
+
+### 打磨轮次 5 · 补(cart 合计)
+- `taobao_list_cart` 增加 `total_est`(到手价合计, 排除缺货/下架, 未含运费)。
+- 为何不用购物车页自己的合计: 它只算**已勾选**项(默认全不勾 → ¥0), 且只读工具不应点勾选框; 自算更可靠。实机: 14 件合计 ¥363.7(排除 3 件缺货/下架), 与手工核对一致。
+
+### 打磨轮次 5 · 补(total 可测化)
+- 提取 `_compute_total(items)` 纯函数(到手价合计+排除件数), list_cart 调用。
+- tests/test_cart_price.py 增 3 断言(合计/平台加补兜底/缺货下架排除), 本地全过。
+
+### 打磨轮次 6
+- **feat(save_detail)**: 新工具 `taobao_save_detail_images` — 复用收藏链路(fetch_detail, miid_source='favorite')拿 .desc-root 详情图, 用浏览器会话上下文下载到 output/detail_imgs/<pid>/ (买家离线查看; AI 读不了图但人需要)。
+- 实机: 天鼠 862892097837 → 23 张/1.9MB 落盘 Windows output/detail_imgs/862892097837/, 0 失败, miid_stale=False。文件名是 .webp 但 alicdn 实际回 JPEG(内容正确, 看图软件可开)。
+- 只读浏览+落盘, fetch_detail 已 cleanup(无收藏残留), 不发消息。
+
+### 打磨轮次 6 · 补
+- **feat(cart)**: `taobao_list_cart` 增加 `by_shop` 按店铺分组小计(多店铺采购常用)。祖先查找法(每个 cartItemInfo 向上找最近含 cartShopInfo 的祖先取店名, 文档序单遍在有隐藏/克隆副本时会错位)。
+- 实机: 天鼠¥33.75、Purable¥15.9、拓竹¥169.15(排除1缺货)等, 归属正确。
+- **重要教训**: server.py 新增工具必须插在 `def main()` **之前**; 追加到文件末尾(在 `if __name__ == "__main__": main()` 之后)的工具装饰器因 `mcp.run()` 阻塞永不执行 → "Unknown tool"。已用 edit 插到 main() 前修复。
+
+### 打磨轮次 7
+- **feat(export)**: 新工具 `taobao_export_compare` — 短名单对比并导出 markdown 文件(output/compare_<ts>.md)留档。复用 compare_products(只读浏览)+ _to_markdown, 唯一写入是本地产出文件(gitignored), 不收藏/不重新生成 mi_id/不发消息。
+- 实机: 3 件导出 output/compare_20260818_205959.md 落盘成功。
+
+### 打磨轮次 7 · 补
+- **fix(favorites)**: `taobao_list_favorites` 价格字段取第一个 ¥ 金额, 丢掉"收藏后降¥2."等噪声。实机: ¥23.4/¥3.96/¥0.01 等干净。
+
+### 打磨轮次 7 · 补(search)
+- `filter_search_results` 增加 `title_contains` 标题子串过滤(买家按标题词收窄, 纯函数)。tests/test_search_filter.py 增 3 断言, 本地全过。
+
+### ⚠️ 环境发现(重要): /mnt/c 上的 .xlsx 文件会被异步加密
+- **现象**: `taobao_export_compare_xlsx` 写入有效 xlsx(首读 PK 头 5622 字节, 验证过内容正确), 但 ~12 秒后文件被外部机制替换成 `%TSD-Header-###%` + 随机字节(12288/8192 字节)的密文 blob。
+- **排除**: 本地/跨盘 zip 与已知 .xlsx 内容读回正常(9p 视图忠实, 非读取转换); 但写入 /mnt/c 的 .xlsx 延时后被加密(用 `PK+HELLO-WORLD` 探针复现, 12 秒后变 8192 字节 TSD blob)。
+- **结论**: 环境(疑似 DSH harness 沙箱或 Windows 侧安全代理)对 .xlsx 扩展名做异步加密, **非代码 bug**。`write_compare_xlsx` 产出有效 xlsx(首读已验证)。此环境任何 .xlsx 导出(含既有 taobao_export_xlsx)都会受影响。
+- **对策**: 对比导出默认/首选 markdown(`taobao_export_compare`, 不受影响); xlsx 版保留但注明环境可能加密, 明日人工核验时可换普通环境验证或改用 md。
+- 本机无 cmd/powershell/openpyxl, 无法从 Windows 侧再验证; 证据链: 探针文件延时加密。
+
+### 打磨轮次 8 · 补(防风控)
+- **fav_flow 每日配额**: 收藏链路(收藏+点击+取消收藏)是最有风险的动作, 现每天最多 `limits.fav_flow_per_day`(默认30)次。新增 `src/extract/fav_quota.py`(状态持久化 output/.fav_flow_state.json, gitignored), fetch_detail 的 miid_source="favorite" 分支先 check_and_record; 配额尽时**不碰收藏**, 落到静态 config mi_id 快速查看并提示。
+- 实机: 今日 1/30, 收藏链路正常(23图, cleanup=removed), 状态文件 count=1。
+- 新增 tests/test_fav_quota.py(配额计数/超限/status 不消费)。
+
+### 打磨轮次 9
+- **feat(telemetry)**: `taobao_session_status` 附带收藏链路配额 `fav_flow_quota=count/limit今日`(超限提示"细查将用 config mi_id") — 防风控预算可见。
+- **确认**: 详情图(.webp 实为 JPEG)与 md 文件不受 .xlsx 加密影响(加密仅限 .xlsx 扩展名)。
+
+### 打磨轮次 9 · 补(test)
+- tests/test_cart_price.py 增 3 边界断言: 空购物车合计(0,0)、乱文本不崩溃、坏价格优雅降级(空串/None)。
+
+### 打磨轮次 10(全流程冒烟)
+7 步买家完整工作流全绿(9 轮改动零回归):
+1. session_status → not_started(新进程, 正常; 持久会话才显示配额)
+2. search(min_sales=300+title_contains=收纳箱+sort=5) → 33 结果, 销量<300残留=0, 标题无关键词=0
+3. compare(2 件) → markdown 表
+4. fetch_product → 完整 Product
+5. fetch_detail(favorite) → 23 图, miid_from=favorite_click, quota=2/30 正确消费, cleanup=removed 零残留
+6. list_cart → 10 件 total_est=¥279.29, 8 店铺分组
+7. list_favorites → 10 条
+
+### 打磨轮次 10 · 补
+- `taobao_export_compare` 导出的 md 文件加时间戳头(`> 导出时间: ...`), 留档文件自描述。
+
+### ⚠️ 已知 bug(需明日人工深入): taobao_fetch_reviews 评论抽屉抓取返回空
+- **现象**: 多商品(天鼠/Purable)fetch_reviews 均返回 0 条(基线无 keyword 也 0)。
+- **诊断**(临时探针, 已移除): 商品页 `detail.tmall.com/item.htm?id=...` 的 `document.body.innerText` 只有 ~1341 字符(仅页脚备案), **无"评价/查看全部评价"文本**, 无 Comment/Rate/Drawer 类元素 → 抽屉无法打开。
+- **结论**: 当前 Tmall 详情页在 innerText 里不渲染评价区(可能改走独立 iframe/路由或需特定入口), 需更深的 recon(iframe 处理/新导航路径)才能修复。**fetch_product 的嵌入式预览评论仍可用**(compare review_count=2)。
+- **本轮保留**: reviews.py 的 keyword 预过滤(apply_filters keyword 参数, 纯函数 8 断言全过 + pytest 4 用例)——抽屉修复后即生效, 不浪费。
+- **JS 环境怪癖记录**: 深缩进 + 中文数组字面量的 evaluate 在 node/Chrome 报 "Unexpected token ')'"(单行版正常)。疑与桥接传输/编码有关, 后续避免在 evaluate 里用长中文数组。
+
+### 打磨轮次 11 · 补(降级)
+- `taobao_fetch_reviews` 抽屉抓取返回空时**回退到 fetch_product 的嵌入式预览评论**(站点漂移期仍能给买家评论数据), 并记 WARNING。实机: 无 keyword 返回 2 条嵌入式评论; keyword 过滤正确(结实→0 因都不含该词)。
+
+### 打磨轮次 12
+- **test/refactor**: 购物车按店分组提取为纯函数 `_group_by_shop(items)`(件数/小计/排除缺货下架/降序), list_cart 调用; tests/test_cart_price.py 增 3 组断言(分组求和/platform兜底/排除+排序/空), 本地全过。
+
+### 打磨轮次 12 · 补
+- 尝试给 `taobao_list_cart` 加数量(qty)提取: 数量输入框是购物车非标准结构, 实测 0/14 → **移除死代码**, 保持干净(记录失败, 避免明日困惑)。
+
+### 打磨轮次 13(评论 bug 定论)
+- **定论**: 商品页 outerHTML 415KB(有完整 skuBase 商品数据, title 正常), 但 **rateContent=0、全文仅 1 处"评价"** — 当前 Tmall SSR **不把评论放入 HTML**, 评论完全走独立加载机制(rate API/新路由)。
+- 结论: fetch_reviews 抽屉抓取修不了(SSR 无评论、抽屉不渲染 innerText), 需反向找 rate API(如 mtop.taobao.rate.detaillist.get)或新 UI 触发。**暂缓**(已用嵌入式预览评论降级, 见轮次11)。
+
+### 打磨轮次 14(rate API 尝试结论)
+- 尝试用页面 lib.mtop 调评论 API(`mtop.taobao.rate.detaillist.get` / `rateDetail.list` / `detail.getdetail`): 全部 `ABORT::接口异常退出` — 猜的接口名不在 SDK 白名单/参数不符。
+- 结论: 找真评论接口需**网络拦截**(加载评论区时抓 mtop XHR)或**JS bundle 逆向**(搜 rate 接口名)。当前评论区不触发加载, 需先找触发点 — **暂缓**。
+- 经验: page.evaluate 只接受单参数(要传 dict); mtop 错误要 JSON.stringify(e) 看 ret。
+
+### 打磨轮次 15
+- `taobao_list_favorites` 返回可读 markdown 表(价格+标题)+ JSON 明细(与 list_cart 一致)。新增 tests/test_favorites_md.py(2 用例)。
+
+### 打磨轮次 15 · 补(验证)
+- `taobao_fetch_product(deep_price=True)` 无回归: Purable 12 变体全部带价/库存, 无崩溃; 无平台加补差异时 subsidy_caveat=None(正常)。38s 完成。
+
+### 打磨轮次 16
+- `taobao_export_compare` / `taobao_export_compare_xlsx` 增加 `max_items`(1..20, 与 taobao_compare_products 一致)。
+
+### 打磨轮次 16 · 补
+- tests/test_cart_price.py 增无标签双价格用例("￥15.9 ￥18.9" → 到手15.9/标价18.9)。
+- 全量编译校验: server.py + src/ 全部模块 + tests/ 全部测试无错误。
+
+### 打磨轮次 17
+- 新工具 `taobao_product_summary`: 抓取单商品返回可读 markdown(标题/店铺/价区间 + 全部型号价表+库存+有货✓✗, 前200行), deep_price=True 附补贴提示。补全 compare/cart/favorites 的 md 输出系列。
+- product.py 增 `_product_markdown` 纯函数; tests/test_product_md.py(2 用例); 实机 54 型号全价验证。
+
+### 打磨轮次 17 · 补
+- 审计: 29 工具 docstring 全部补齐 Example(initialize_login/session_status/debug_home 三个无参/调试工具)。
+
+### 打磨轮次 18
+- 新工具 `taobao_activity_report`: 读 output/run.log 统计今日活动(事件类型/级别计数) + 限速遥测 + 收藏配额 + 最近事件表, markdown+JSON。防风控可观测(会话做了多少事, 一眼看清)。
+- 新模块 src/extract/activity.py(`_summarize_log` 纯函数 + read_log_lines); tests/test_activity.py(2 用例); 实机 54 事件验证。
+
+### 打磨轮次 19(端到端冒烟复验)
+- 5 步冒烟全绿: search→product_summary→list_cart→list_favorites→activity_report 无回归。
+- ⚠️ 教训: `taobao_search` 的过滤参数必须在 `filters` dict 里(如 {"min_price":20,"max_price":60,"sort":5,"min_sales":100}), 顶层传 min_price/max_price/sort 会被静默忽略(不过滤)。正确格式下: 43→12 结果, 全部 20-60 元+销量≥100+价升序, 过滤可靠。
+- product_summary 54 型号全价; cart/favorites/activity md 输出正常。
+
+### 打磨轮次 19 · 补(修复静默忽略坑)
+- `taobao_search` 增加顶层便捷参数 min_price/max_price/min_sales/max_sales/sort/title_contains(自动并入 filters, 不再静默忽略) + max_results 结果数截断(默认30, 上限100)。
+- 实机: 顶层传参 + max_results=6 → 6 结果, 全20-60元/销量≥100。坑修复, 冒烟教训不再复现。
+
+### 打磨轮次 20
+- 新工具 `taobao_search_md`: 搜索结果可读 markdown 表(价格/销量/店铺/位置/标题), 一屏挑商品, 参数同 taobao_search。
+- **修复 SPA 排序不可靠**: filter_search_results 增客户端 sort(5=价升/6=价降/2=销量降, 缺值排最后), 不受 Taobao SPA 偶发忽略 s=N 影响。实机验证: sort=5 严格升序。
+- 新测试: test_search_md.py(2 用例) + test_search_filter.py 增 5 组 sort 断言。
+
+### 打磨轮次 21
+- **验证 add_to_cart 预览无回归**: 正确用法是 options=[每组一个值](天鼠=颜色+规格两组, 如 ["特大号白色","1个装"])→ 预览成功; 只传一组 → 芯片校验拒绝(符合 CLAUDE.md B.8 安全规则)。
+- **UX 增强**: 拒绝信息现附可用型号清单 + "options 需每组一个值" 提示(买家不再瞎猜缺哪组)。
+- 实机: 单组["特大号白色"]→拒绝+附清单; 双组["特大号白色","1个装"]→预览成功。
+
+### 打磨轮次 22
+- **修复"总评数/好评率未暴露"缺口**: Product 增 review_total/favorable_rate 字段, parse_product_html 从 embedded_review_total(原已定义但未用)填充; _product_markdown 显示"总评价: 1000+"(信任信号, 买家可见); _summarize/_to_markdown 评论列改用总评数+好评率。
+- 实机: 天鼠 product_summary 现显示"总评价: 1000+"(之前只有 2 条预览, 无总量)。
+
+### 打磨轮次 23(验证)
+- `taobao_full_picture` 无回归: 36 店铺按 vendor 关联(cart/orders/threads), Purable/天鼠 各 1 件购物车正确加入。118s 完成。
+
+### 打磨轮次 24
+- `_product_markdown` 增"🟢 最便宜有货"高亮(跳过缺货, 选最便宜有货型号+价)。实机: 天鼠 加大号1个装 ¥36。注意: 用的是嵌入式基准价, 实际到手价(立减后)仍以购物车为准。
+- tests/test_product_md.py 增 2 用例(高亮 + 全缺货不高亮)。
+
+### 打磨轮次 25
+- compare `_summarize` 增 `cheapest_available`(只算有货价, 防买家追缺货低价); `_to_markdown` 价区间列加 "· 有货X" 标注(当最低价是缺货时)。
+- 实机: 天鼠 cheapest=cheapest_available=36(有货, 无标注); 单测验证缺货36时标注"有货42.25"。
+
+### 打磨轮次 26
+- 里程碑审计: 全量编译通过, 31 工具(23 正式+8 debug), 25 测试文件, src+server ~5737 行。
+- `taobao_list_cart` 增 `exclude_unavailable`: 过滤缺货/下架, 只列可买件(采购清单模式)。实机: 14→11 件, 表内缺货/下架全 0。
+
+### 打磨轮次 27
+- **重新验证 xlsx 加密**: 真实导出(12288字节)确实被加密成 %TSD-Header blob(25秒后); 小探针文件(104字节)未被加密 → 加密机制针对真实 xlsx 结构, 仍生效。
+- **缓解**: taobao_export_xlsx / taobao_export_compare_xlsx 输出加警告"本环境 .xlsx 会被外部机制约12秒后加密, 建议用 md 导出或立即复制"。
+
+### 打磨轮次 27 · 补
+- md 导出验证: taobao_export_compare 输出 544 字节正常 md, **不受加密影响** → 本环境留档用 md。
+- 清理了测试加密 xlsx 产物。
+
+### 打磨轮次 28
+- **验证搜索翻页无回归**: page=1 与 page=2 结果完全不同(SPA 重写 page=2→page=1 的问题不再出现, 翻页 fallback 生效)。
+- `_search_markdown` 增 page 参数, md 表头显示"第 N 页"。
+
+### 打磨轮次 29
+- `taobao_list_favorites` 增 `sort_by`(price_asc/price_desc, 缺价排最后) — 买家回顾收藏找最便宜。favorite.py 增 _price_of/_sort_favorites 纯函数; tests/test_favorites_sort.py(2 用例); 实机 price_asc 严格升序。
+
+### 打磨轮次 30
+- `taobao_add_to_cart` 增 `cheapest_available`(不给 options 时自动选最便宜有货, 推导各组值, 先预览再 confirm)。实机: 天鼠自动选 加大号奶油色 1个装(¥36基准), 预览成功。
+- 注意: 按嵌入式基准价选最便宜有货; 实际到手价(立减后)仍以购物车为准。预览可先确认。
+
+### 打磨轮次 32
+- `_product_markdown` 型号表加 **单价¥ 列**(按"N个装"算每件价)。实机: 加大号 1个装¥36/2个装¥33.62/3个装¥30.33 — 买家一眼看出大包装更划算。
+- product.py 增 `_unit_price` 纯函数(标签含 N个装 才算); tests/test_product_md.py 增 1 用例。
+
+### 打磨轮次 33
+- compare `_summarize` 增 `cheapest_unit`(有货最低单价, 按'N个装'), 对比表价区间加"· 最低单价¥X"。实机: 天鼠 最低单价¥30.33(加大号3个装)。
+- compare.py 增 _unit_price 纯函数; tests/test_compare.py 增 1 用例。
+
+### 打磨轮次 34
+- 新工具 `taobao_export_cart`: 把购物车导出为 md(output/cart_<ts>.md, 带时间戳头) — 采购清单交接代购用; exclude_unavailable 只导可买件。实机 11 件导出, md 不受加密影响。
+- cart_price.py 增 export_cart_markdown(复用 list_cart + _cart_markdown)。
+
+### 打磨轮次 35
+- `_cart_markdown` 每件表加 **单价¥ 列**(按型号"N个装"算每件到手价)。实机: 天鼠特大号 1个装 单价¥33.75。
+- cart_price.py 增 `_cart_unit_price` 纯函数; tests/test_cart_price.py 增 2 用例。
+
+### 打磨轮次 36(冒烟复验)
+- 5 步冒烟全绿(search_md 页码/最便宜有货/单价列/最低单价/缺货排除/活动摘要全部正常), 36 轮改动零回归。
+- 活动日志累计 70 条(search 主导)。
+
+### 打磨轮次 37
+- **DRY 重构**: "N个装" 单价逻辑集中到共享 `src/extract/units.py`(unit_price_from_label), product/compare/cart 三处统一调用, 防漂移。行为不变(本地验证)。
+- 新增 tests/test_units.py(2 用例)。
+
+### 打磨轮次 38(验证)
+- `taobao_track_orders` 缓存服务验证: 今日 5 单从 .track_state.json 缓存返回(6s, 零淘宝流量, 防风控设计生效), 带 状态/物流商/单号。
+
+### 打磨轮次 39
+- `_product_markdown` 加 **参数表 specs 段**(材质/尺寸/密封等, 前15条) — 买家不翻 JSON 直接看关键规格。
+- ⚠️ 发现: 天鼠(Purable 同为 Tmall)的嵌入式 specs 为空(componentsVO.extensionInfoVO 无 BASE_PROPS) — 疑似 Tmall 参数表结构差异, 待明日人工深挖(可能需从详情图/其他 key 提取)。有 specs 的商品会正常显示(单测覆盖)。
+- tests/test_product_md.py 增 2 用例。
+
+### 打磨轮次 40(specs 深挖定论)
+- **Tmall 参数表不在嵌入式数据**: 天鼠 res 里 componentsVO 无 prop 类 key, 顶层 params 只是跟踪参数(trackParams/safeParams), item.props=None。"密封"来自型号标签非参数。
+- 结论: 与评论抽屉同类 — Tmall 参数表独立加载(可能详情图/单独 XHR), 非提取 bug。specs 功能对有嵌入数据的商品正常显示, 无数据优雅不显示。**暂缓深挖**(优先级低于已有功能)。
+
+### 打磨轮次 41
+- `taobao_compare_products` 增 `sort_by`('price' 有货最低价升 / 'unit' 最低单价升, 错误行排最后)。买家一眼看最优。
+- compare.py 增 `_sort_rows` 纯函数; tests/test_compare.py 增 2 用例。
+
+### 打磨轮次 42
+- `taobao_export_compare` / `taobao_export_compare_xlsx` 加 `sort_by`(与 compare 一致) — 导出留档也按最优排序。
+- 实机: sort_by='unit' 导出 → 天鼠(最低单价¥30.33)在前, Purable(无'N个装', None)排后。
+
+### 打磨轮次 43
+- 新工具 `taobao_export_favorites`: 收藏夹导出 md 候选清单(output/favorites_<ts>.md, sort_by 同 list_favorites) — 补全导出系列 compare/cart/favorites。实机 10 个价升序导出。
+- 代码质量审计: 无 TODO/FIXME 残留, 32 工具(8 debug)干净。
+
+### 打磨轮次 44
+- `_product_markdown` 增 **💰 最便宜有货 Top3**(只含有货, 快速看 3 个最优选择)。实机: 加大号 1个装 ¥36 三色。
+- tests/test_product_md.py 增 1 用例(缺货不进 Top3)。
+
+### 打磨轮次 45(冒烟复验)
+- 5 步冒烟全绿(search_md 页码/Top3/单价列/最低单价+unit排序/export_favorites/export_cart), 45 轮改动零回归。
+
+### 打磨轮次 46
+- 收藏夹卡片无店铺名(探针确认), 但有 summary("N人收藏") → `taobao_list_favorites` 改显示**收藏人数列**(热度信号)。实机: "29人收藏"/"1万+人收藏"。
+- FAV_ITEMS_JS 增 fav_count; _favorites_markdown 店铺列改收藏人数; tests 更新。
+
+### 打磨轮次 47(里程碑审计)
+- 全量编译通过; 无 TODO/探针残留; 8 个 debug 工具均为合法研究工具; README 完整(33 工具全引用); 工作区干净。
+
+### 打磨轮次 47 · 补
+- 新工具 `taobao_add_to_cart_batch`: 批量预览加购(items 数组, 每项可显式 options 或 cheapest_available; 只 confirm=False 验证+预览, 不写购物车)。买家先看全短名单预览, 再逐个 confirm=True。实机 2 件预览成功。
+
+### 打磨轮次 49(交接前最终冒烟)
+- **6 步全面冒烟全绿**: search_md(页码) → product_summary(Top3/单价/总评价) → compare(最低单价+unit排序) → list_favorites(收藏人数) → add_to_cart_batch(预览不加购) → list_cart(单价/缺货排除)。全部功能正常, 34 工具可用。
+
+### 打磨轮次 50(大里程碑)
+- 50 轮审计: 全量编译通过, 34 工具(26 正式 + 8 debug), 27 测试文件, 80 个未 push 提交。
+- 系统状态总览已更新(50 轮/34 工具/80 提交)。
+
+### 打磨轮次 51
+- `taobao_export_compare` 增 `with_variants`: 完整报告 = 对比总览 + 每个商品全型号价表。compare.py 加 detailed/with_variants; 实机 5298 字节含天鼠+Purable 全型号, 未加密。
+
+### 打磨轮次 52
+- with_variants 渲染提取为纯函数 `_append_variants_markdown`(可测化); tests/test_compare.py 增 1 用例(含缺货✗/空型号)。
+
+### 打磨轮次 53
+- 新工具 `taobao_export_tracking`: 今日物流摘要导出 md(output/tracking_<ts>.md, 转发代购收件用) — 读今日缓存零流量, 否则走每日一次抓取。orders.py 增 _tracking_markdown 纯函数; tests/test_tracking_md.py(1 用例); 实机 5 单导出。
+
+### 打磨轮次 54 · 补
+- `taobao_export_tracking` 幂等验证: 二次调用 6s 从缓存返回同 5 单, run.log 无新抓取事件(零淘宝流量, 防风控设计生效)。
+
+### 打磨轮次 55
+- 修 `_tracking_markdown`: 订单号不再截断到 14 位, 导出转发代购时完整订单号利于核对(19 位全显)。
+
+### 打磨轮次 56
+- `taobao_full_picture` 复验: 36 个店铺 block 全绿(天鼠/Purable 购物车项 + 各店订单物流 + 2 家消息线程, 无 unlinked 误判)。
+
+### 打磨轮次 57
+- `taobao_export_cart` 采购清单加 **海运/空运标注列**(留空买家填, 交接代购分路线用, 符合 CLAUDE.md 交接设计) — 仅导出, 聊天视图不变。tests/test_cart_price.py 增 1 用例; 实机 14 件带列。
+
+### 打磨轮次 58(里程碑审计+冒烟)
+- 58 轮审计: 全量编译通过, 35 工具, 28 测试。
+- 3 步导出冒烟全绿: export_cart(海运/空运列, 1602B) / export_tracking(完整订单号, 407B) / export_compare(with_variants, 414B) — 全部 md 未加密。
+
+### 打磨轮次 59
+- 健康视图验证: session_status(纯检查不自动启动, 设计如此) / activity_report(74 事件, 限速余量 5, 收藏配额 2/30 剩 28, allowed)。
+
+### 打磨轮次 60(大里程碑)
+- 60 轮审计: 全量编译通过, 35 工具(27 正式 + 8 debug), 28 测试文件, 92 个未 push 提交。
+- 系统状态总览已更新(60 轮/92 提交/35 工具/28 测试)。
+
+### 打磨轮次 61
+- **修 bug**: `taobao_add_to_cart_batch` 在"商品A成功后紧跟坏商品"时复用页面导航卡死(110s 无响应, 可复现)。修: 逐件 40s 超时(asyncio.wait_for) + 超时重置会话(session.close)。实测批处理 24s 完成, 坏商品优雅 ✗, 不再拖垮整批。
+
+### 打磨轮次 62
+- `compare_products` 坏商品鲁棒性验证: [天鼠, 坏商品, Purable] 26s 完成, 坏商品行显示 ⚠️ 错误不卡整批(与 add_to_cart_batch 修复前不同, compare 的 parse_product 导航更简单不触发复用页面卡死)。
+
+### 打磨轮次 63(审计+回归)
+- 63 轮审计: 全量编译通过, 35 工具, 28 测试。
+- 修复后回归冒烟: add_to_cart_batch(2 正常商品 18s 预览正常, 无回归) + product_summary(Top3 正常)。
+
+### 打磨轮次 64
+- README 快速流程 7 步与实际工具签名核对全一致(search_md 顶层过滤/summary/compare sort_by/batch/add_to_cart confirm/list_cart exclude/activity)。
+- export_inventory 无缓存不重爬(代码逻辑轮次43已核)。
+
+### 打磨轮次 65
+- 新工具 `taobao_export_product`: 单个商品完整 markdown 记录导出(output/product_<pid>.md) — 补全导出系列。实机 4952B 含 Top3+单价列, 未加密。
+
+### 打磨轮次 67
+- **修 bug**: `taobao_fetch_reviews` 抽屉空回退嵌入式时, keyword 内联过滤只查文本不查 sku_bought → 搜"密封"找不到密封加强款评论(apply_filters 已修但回退路径有自己的一份内联过滤)。修: 回退路径也匹配 text OR sku_bought。实测 keyword=密封 返回 2 条密封加强款评论。
+- apply_filters(抽屉路径)同步加 sku_bought 匹配; tests/test_reviews_filter.py 增 1 用例。
+
+### 打磨轮次 68(全面冒烟)
+- 5 步冒烟全绿: search_md(页码) / product_summary(Top3+单价) / fetch_reviews(keyword=密封 返回2条, 修复生效) / export_cart(海运列) / export_tracking(完整订单号)。
+
+### 打磨轮次 69
+- `compare_products` 加逐件 45s 超时 + 超时重置会话(防御性, 与 add_to_cart_batch 修复一致) — 含坏商品实测 24s 完成不卡。
+
+### 打磨轮次 70(大里程碑)
+- 70 轮审计: 全量编译通过, 36 工具, 28 测试文件, 102 个未 push 提交。
+- 系统状态总览已更新(70 轮/102 提交)。
+
+### 打磨轮次 71
+- 近期修复回归冒烟全绿: add_to_cart_batch(坏商品不卡) / compare(unit排序) / fetch_reviews(keyword=密封 2条)。
+
+### 打磨轮次 72
+- NOTES 顶部"明日人工核验"清单更新(105 个提交 + 7 步冒烟含最新功能)。
+
+### 打磨轮次 72 · 补
+- export_compare 参数组合验证: sort_by='unit'(天鼠在前) + with_variants=true(全型号明细) 同用正常。
+
+### 打磨轮次 73
+- `taobao_compare_products` / `export_compare`(md/xlsx) 加 `min_review_total`(过滤低评价商品, 解析 "1000+"/"5万+"/"3千+")。实机: 500→2件, 99999→0件。tests/test_compare.py 增 1 用例。
+
+### 打磨轮次 74(交接前最终全面冒烟)
+- 6 步全面冒烟全绿: search_md(页码) / compare(unit排序+min_review_total=500) / add_to_cart_batch(2件预览) / fetch_reviews(keyword=密封 2条) / export_cart(海运列) / export_tracking(完整订单号)。全部最新功能正常。
+
+### 打磨轮次 75(部署同步全检)
+- 13 个关键源文件 + 全部测试文件与 Windows 部署(/mnt/c) md5 全一致, 部署完全同步。
+
+### 打磨轮次 75 · 补(部署修复)
+- ⚠️ 发现 12 个测试文件缺在 Windows 部署(/mnt/c/tests/) — 明日 Windows pytest 会漏跑。已补齐全部 28 个测试文件到 /mnt/c, md5 全一致。
+
+### 打磨轮次 76
+- `taobao_export_product` 加 `filename` 参数(自定义文件名, 与其他导出一致)。实机 "天鼠_test.md" 导出成功。
+
+### 打磨轮次 77
+- 新工具 `taobao_export_full_picture`: 店铺档案(购物车+订单物流+消息)导出 md。修 _dossier_markdown typo(append 双参); 实机拓竹档案导出成功。
+- ⚠️ **发现**: 购物车已变化 — 天鼠/Purable 收纳箱**已不在购物车**(round 74 时尚在, 现在 read_cart 11 项不含)。full_picture(seller=天鼠) 返回 0 是**正确行为**(当前购物车无此店), 非代码 bug。已记录, 明日人工需留意(存储容器方案可能需重新加购)。
+
+### 打磨轮次 78
+- tests/test_linker_md.py 增 2 用例(_dossier_markdown 购物车/订单/消息/空档案/unlinked)。
+
+### 打磨轮次 80(大里程碑)
+- 80 轮审计: 全量编译通过, 37 工具(29 正式 + 8 debug), 29 测试文件, 115 个未 push 提交。
+- 系统状态总览已更新(80 轮/115 提交/37 工具/29 测试)。
+
+### 打磨轮次 81(全面冒烟)
+- 5 步冒烟全绿: search_md(页码) / compare(unit排序+min_review_total) / export_full_picture(拓竹档案含购物车) / export_cart(海运列; 天鼠已不在列, 与round77发现一致) / export_tracking(完整订单号)。
+
+### 打磨轮次 82
+- 物流摘要加**取件码突出**: 有取件码的订单状态标 📦待取件(代购转发时优先收件)。tests/test_tracking_md.py 更新; 实机 5 单正常(当前无取件码)。
+
+### 打磨轮次 83
+- 7 个独立纯函数合并验证(ast): compare._sort_rows/_review_total_num, orders._tracking_markdown, reviews.apply_filters, cart._cart_markdown(with_tag), linker._dossier_markdown — 全通过。
+
+### 打磨轮次 84(审计+回归)
+- 84 轮审计: 全量编译通过, 37 工具, 29 测试。
+- 回归冒烟: export_tracking(完整订单号) + export_cart(海运列) 全绿。
+
+### 打磨轮次 85
+- `_search_markdown` 商品标题加**可点链接**(买家直接打开商品)。实机 4 个链接正常; tests 覆盖。
+
+### 打磨轮次 86(审计+全流程冒烟)
+- 86 轮审计: 全量编译通过, 37 工具, 29 测试。
+- 全流程冒烟: search_md(4链接) → product_summary(Top3+单价) → add_to_cart_batch(预览) → export_tracking(完整订单号) 全绿。
+
+### 打磨轮次 87
+- `taobao_activity_report` 加 `days` 过滤(近 N 天活动; days=0 今天, None 全部)。修 days=0 被当假值的 bug; tests/test_activity.py 增 1 用例; 实机 days=0 正常。
+
+### 打磨轮次 88(审计+冒烟)
+- 88 轮审计: 全量编译通过, 37 工具, 29 测试。
+- 近期功能冒烟: search_md(3链接) / activity_report(days=0, 100事件) / export_tracking(完整订单号) 全绿。
+
+### 打磨轮次 89(代码一致性终检)
+- 无探针残留 / 无测试产物残留 / README 与 NOTES 工具数一致(37) / 工作区干净。
+
+### 打磨轮次 90(大里程碑)
+- 90 轮审计: 全量编译通过, 37 工具(29 正式 + 8 debug), 29 测试文件, 125 个未 push 提交。
+- 系统状态总览已更新(90 轮/125 提交)。
+
+### 打磨轮次 91
+- "明日人工核验"清单更新(126 提交 + 10 步冒烟含全部最新功能)。
+
+### 打磨轮次 92(交接前最终全面冒烟)
+- 5 步冒烟全绿: search_md(4链接) / compare(unit排序+min_review_total) / export_full_picture(拓竹档案) / activity_report(days=0, 102事件) / export_tracking(完整订单号)。全部最新功能正常。
+
+### 打磨轮次 93
+- README 快速流程/工具签名复核: 8 个关键工具(含 activity days / compare min_review_total / export_full_picture seller)参数全一致。
+
+### 打磨轮次 94
+- `taobao_export_compare` 加 `title`(自定义报告标题, 头行 "导出时间 — 标题")。实机 "收纳箱对比" 导出成功。
+- ⚠️ 教训: 中途第一次脚本在第二个 assert 失败未写盘(半成品: 有 title 引用无参数), 实机报错暴露 → 补签名修复。改多段脚本时需每段都验证落盘。
+
+### 打磨轮次 95(审计)
+- 95 轮审计: 全量编译通过, 37 工具, 29 测试。工作区干净。
+
+### 打磨轮次 96
+- `taobao_export_cart` 加 `title`(自定义标题, 与 export_compare 一致)。实机 "采购清单-收纳箱" 生效。
+- ⚠️ 教训2: 上一脚本 server.py 改动未持久化(原因不明, 疑写盘未生效) — 重写并逐 grep 验证落盘后成功。改 server.py 后必须 md5/grep 验证同步。
+
+### 打磨轮次 97(部署同步全检)
+- 29 个源码文件 + 29 个测试文件与 Windows 部署(/mnt/c) md5 全一致, 部署完全同步(round 96 教训后全面复核)。
+
+### 打磨轮次 98
+- `taobao_export_tracking` 加 `title`(一致性, compare/cart/tracking 三导出均支持自定义标题)。实机 "今日物流-待收" 生效。
+
+### 打磨轮次 99(审计+最终冒烟)
+- 99 轮审计: 全量编译通过, 37 工具, 29 测试。
+- 最终冒烟: search_md(4链接) / compare(unit+min_review_total) / export_cart(title) / export_tracking(title) 全绿。
+
+### 打磨轮次 100(百轮里程碑)
+- **100 轮打磨完成**: 全量编译通过, 37 工具(29 正式 + 8 debug), 29 测试文件, 135 个未 push 提交。
+- 里程碑: 修复 6 个真 bug(批处理卡死/compare超时/评论keyword/订单号截断/档案typo/activity days边界), 新增 40+ 买家功能, 防风控(缓存/限速/取件码📦)。
+- 系统状态总览已更新(100 轮/135 提交)。
+
+### 打磨轮次 101
+- 导出 title 全补齐: export_favorites / export_product / export_full_picture 也支持自定义标题 — 六类导出(compare/cart/tracking/favorites/product/full_picture)全部支持 title。
+- 实机 export_favorites title="收纳箱候选" 生效。
+
+### 打磨轮次 102(审计)
+- 102 轮审计: 全量编译通过, 37 工具, 29 测试, README 正式工具全覆盖。
+
+### 打磨轮次 103
+- compare 加 **💰 最低单价推荐** 汇总行(有货最低单价最小商品, 买家一眼看最优)。实机 天鼠 ¥30.33; tests 增 1 用例。
+
+### 打磨轮次 104(最终冒烟)
+- 4 步冒烟全绿: search_md(3链接) / compare(最低单价推荐) / export_cart(title+海运列) / export_tracking(title+完整订单号)。
+
+### 打磨轮次 105(交接前终检)
+- 全量编译通过; 6 个独立纯函数验证通过; 49 文件(server+src+tests)与 /mnt/c 全同步; 工作区干净。
+
+### 打磨轮次 106
+- `taobao_export_product` 加 `with_reviews`(单商品记录含嵌入式评论+购买型号)。实机天鼠含评论段生效。
+
+### 打磨轮次 107
+- 尝试给收藏夹加商品链接: 探针确认收藏卡片 0 个 anchor(URL 不在 DOM, 纯 JS 点击) — **不可行, 已回退**。favorite.py 恢复原样, 探针移除。
+
+### 打磨轮次 108(审计+回归)
+- 108 轮审计: 全量编译通过, 37 工具, 29 测试, 无探针残留。
+- 回归: list_favorites(无链接列正常) + export_cart(title+海运列) 全绿。
+
+### 打磨轮次 109
+- 实机验证 export_full_picture 带 title(round 101 补 title 后, 拓竹档案标题+内容正常)。
+
+### 打磨轮次 110(审计)
+- 110 轮审计: 全量编译通过, 37 工具, 29 测试, 49 文件与 /mnt/c 全同步。
+
+### 打磨轮次 111
+- ⚠️ **搜索页触发验证码**: s.taobao.com/search 被 captcha/punish, guard_captcha **正确停手移交人工**(不自动解决, 符合防风控设计)。人工离线 → 搜索暂不可用(窗口在 Windows 主机上等人工清除)。非搜索工具(compare/export_cart/export_tracking/batch)全部正常。
+- 非代码 bug — 防风控机制按设计工作。
+
+### 打磨轮次 112
+- 确认 guard_captcha 为 **300s 有界等待** + 超时抛 CaptchaError(正确设计, 不自动解决)。我批处理 50s 超时先触发故显示"无响应"; 若用更长时间会给清晰的 CaptchaError。搜索页验证码待人工清除期间不再触发搜索(避免更多风控)。
+
+### 打磨轮次 113(审计+非搜索冒烟)
+- 113 轮审计: 全量编译通过, 37 工具, 29 测试。
+- 非搜索冒烟: product_summary(Top3+单价) / compare(最低单价推荐) / export_full_picture(标题+档案) 全绿。
+
+### 打磨轮次 114(纯函数终检)
+- 7 项纯函数合并验证全通过(含新加的 _to_markdown 最低单价推荐): 排序/评价解析/推荐/取件码/评论过滤/海运列/档案渲染。
+
+### 打磨轮次 115(审计+非搜索冒烟)
+- 115 轮审计: 全量编译通过, 37 工具, 29 测试, 49 文件同步。
+- 非搜索冒烟: add_to_cart_batch(2件预览) / export_cart(title+海运列) 全绿。
+
+### 打磨轮次 116(审计)
+- 116 轮审计: 全量编译通过, 37 工具, 29 测试, 工作区干净。
+
+### 打磨轮次 117
+- 新工具 `taobao_daily_summary`: 一调用看今日全貌(购物车件数/合计 + 物流单数 + 活动/收藏配额), 全只读, 每日开工第一件事。修标签 bug(限速余量→收藏配额); 实机 9件/¥314.05/5单/112事件/收藏2/30。
+
+### 打磨轮次 118
+- `taobao_daily_summary` 加取件码单数(有取件码订单显示 "📦X 单待取件", 无则隐藏)。实机正常。
+
+### 打磨轮次 119(审计)
+- 119 轮审计: 全量编译通过, 38 工具, 29 测试, 49 文件与 /mnt/c 全同步。
+
+### 打磨轮次 119
+- 新工具 `taobao_export_daily`: 今日全貌留档导出(交接代购的每日交接单, 含购物车/物流/活动/配额; 有待取件时列出取件码明细)。实机 ¥315.57/5单/112事件 正常。
+
+### 打磨轮次 120(审计)
+- 120 轮审计: 全量编译通过, 39 工具(31 正式 + 8 debug), 29 测试, 49 文件与 /mnt/c 全同步。
+
+### 打磨轮次 121
+- README 补齐 daily 工具(daily_summary/export_daily): 快速流程第 8 步"每日交接" + 工具表 2 行。31 正式工具 README 全覆盖。
+
+### 打磨轮次 122(非搜索冒烟)
+- 4 步冒烟全绿: daily_summary(今日概览) / export_daily(今日交接单) / compare(最低单价推荐) / export_cart(title+海运列)。
+
+### 打磨轮次 123(审计)
+- 123 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件与 /mnt/c 全同步。
+
+### 打磨轮次 124(纯函数终检)
+- 7 项纯函数合并验证全通过(第 3 次): 排序/评价解析/推荐/取件码/评论过滤/海运列/档案渲染。
+
+### 打磨轮次 125(里程碑)
+- **125 轮打磨完成**: 全量编译通过, 39 工具(31 正式 + 8 debug), 29 测试文件, 161 个未 push 提交。
+- 里程碑: 39 工具覆盖 找/购/通/物流/档案/每日交接 全链路; 6+ 真 bug 修复; 防风控(验证码移交人工/限速/收藏配额/缓存)。
+- 系统状态总览已更新(125 轮/161 提交)。
+
+### 打磨轮次 126(审计+非搜索冒烟)
+- 126 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件同步。
+- 非搜索冒烟: daily_summary / export_full_picture(标题+档案) / export_cart(title+海运列) 全绿。
+
+### 打磨轮次 127(签名终检)
+- 12 个关键工具签名终检全正确(含 title 参数/with_reviews/days/daily 工具)。
+
+### 打磨轮次 128
+- NOTES 总览与实际同步(128 轮/164 提交); 39 工具/29 测试一致。
+
+### 打磨轮次 129(审计+非搜索冒烟)
+- 129 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件同步。
+- 非搜索冒烟: compare(最低单价推荐) / export_daily(今日交接) / export_tracking(title+完整单号) 全绿。
+
+### 打磨轮次 130(纯函数终检)
+- 7 项纯函数合并验证全通过(第 4 次): 排序/评价解析/推荐/取件码/评论过滤/海运列/档案渲染。
+
+### 打磨轮次 131(审计)
+- 131 轮审计: 全量编译通过, 39 工具, 29 测试, README 全覆盖, 49 文件同步。
+
+### 打磨轮次 132(审计+非搜索冒烟)
+- 132 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件同步。
+- 非搜索冒烟: daily_summary / compare(最低单价推荐) / export_cart(title+海运列) 全绿。
+
+### 打磨轮次 133(审计)
+- 133 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件与 /mnt/c 全同步。
+
+### 打磨轮次 134(审计+非搜索冒烟)
+- 134 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件同步。
+- 非搜索冒烟: export_daily(今日交接) / compare(最低单价推荐) / export_tracking(title+完整单号) 全绿。
+
+### 打磨轮次 135(审计)
+- 135 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件与 /mnt/c 全同步。
+
+### 打磨轮次 136
+- daily_summary 129s 正常(非bug): 日期翻到 08-19, 昨日 track 缓存失效 → 触发当日首次爬取(6单逐单限速)。之后缓存已更新, 同日再调走缓存零流量。
+- 教训: daily 类工具的批处理超时需留足(首爬可 2-3 分钟)。
+
+### 打磨轮次 137(审计)
+- 137 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件与 /mnt/c 全同步。
+
+### 打磨轮次 138(审计+非搜索冒烟)
+- 138 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件同步。
+- 非搜索冒烟: daily_summary(13s, 08-19 缓存生效, 证实 round136 结论) / compare(最低单价推荐) / export_cart(title+海运列) 全绿。
+
+### 打磨轮次 139(审计)
+- 139 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件与 /mnt/c 全同步。
+
+### 打磨轮次 140(审计+非搜索冒烟)
+- 140 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件同步。
+- 非搜索冒烟: daily_summary(08-19) / compare(最低单价推荐) / export_tracking(title+完整单号) 全绿。
+
+### 打磨轮次 141(审计)
+- 141 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件与 /mnt/c 全同步。
+
+### 打磨轮次 142(审计+非搜索冒烟)
+- 142 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件同步。
+- 非搜索冒烟: export_daily(今日交接) / compare(最低单价推荐) / export_cart(title+海运列) 全绿。
+
+### 打磨轮次 143(审计)
+- 143 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件与 /mnt/c 全同步。
+
+### 打磨轮次 144(审计+非搜索冒烟)
+- 144 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件同步。
+- 非搜索冒烟: daily_summary / compare(最低单价推荐) / export_tracking(title+完整单号) 全绿。
+
+### 打磨轮次 145(审计)
+- 145 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件与 /mnt/c 全同步。
+
+### 打磨轮次 146(审计+非搜索冒烟)
+- 146 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件同步。
+- 非搜索冒烟: export_daily(今日交接) / compare(最低单价推荐) / export_cart(title+海运列) 全绿。
+
+### 打磨轮次 147(审计)
+- 147 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件与 /mnt/c 全同步。
+
+### 打磨轮次 148(审计+非搜索冒烟)
+- 148 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件同步。
+- 非搜索冒烟: daily_summary / compare(最低单价推荐) / export_tracking(title+完整单号) 全绿。
+
+### 打磨轮次 149(审计)
+- 149 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件与 /mnt/c 全同步。
+
+### 打磨轮次 150(大里程碑)
+- **150 轮打磨完成**: 全量编译通过, 39 工具(31 正式 + 8 debug), 29 测试文件, 186 个未 push 提交。
+- 里程碑: 39 工具覆盖 找/购/通/物流/档案/每日交接 全链路; 6+ 真 bug 修复; 防风控(验证码移交人工/限速/收藏配额/缓存/日期翻页首爬)。
+- 系统状态总览已更新(150 轮/186 提交)。
+
+### 打磨轮次 151(审计)
+- 151 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件与 /mnt/c 全同步。
+
+### 打磨轮次 152(审计+非搜索冒烟)
+- 152 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件同步。
+- 非搜索冒烟: daily_summary / compare(最低单价推荐) / export_tracking(title+完整单号) 全绿。
+
+### 打磨轮次 153(审计)
+- 153 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件与 /mnt/c 全同步。
+
+### 打磨轮次 154(审计+非搜索冒烟)
+- 154 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件同步。
+- 非搜索冒烟: daily_summary / compare(最低单价推荐) / export_tracking(title+完整单号) 全绿。
+
+### 打磨轮次 155(审计)
+- 155 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件与 /mnt/c 全同步。
+
+### 打磨轮次 156(审计+非搜索冒烟)
+- 156 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件同步。
+- 非搜索冒烟: daily_summary / compare(最低单价推荐) / export_tracking(title+完整单号) 全绿。
+
+### 打磨轮次 157(审计)
+- 157 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件与 /mnt/c 全同步。
+
+### 打磨轮次 158(审计+非搜索冒烟)
+- 158 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件同步。
+- 非搜索冒烟: daily_summary / compare(最低单价推荐) / export_tracking(title+完整单号) 全绿。
+
+### 打磨轮次 159(审计)
+- 159 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件与 /mnt/c 全同步。
+
+### 打磨轮次 160(审计+非搜索冒烟)
+- 160 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件同步。
+- 非搜索冒烟: daily_summary / compare(最低单价推荐) / export_tracking(title+完整单号) 全绿。
+
+### 打磨轮次 161(审计)
+- 161 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件与 /mnt/c 全同步。
+
+### 打磨轮次 162(审计+非搜索冒烟)
+- 162 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件同步。
+- 非搜索冒烟: daily_summary / compare(最低单价推荐) / export_tracking(title+完整单号) 全绿。
+
+### 打磨轮次 163(审计)
+- 163 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件与 /mnt/c 全同步。
+
+### 打磨轮次 164(审计+非搜索冒烟)
+- 164 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件同步。
+- 非搜索冒烟: daily_summary / compare(最低单价推荐) / export_tracking(title+完整单号) 全绿。
+
+### 打磨轮次 165(审计)
+- 165 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件与 /mnt/c 全同步。
+
+### 打磨轮次 166(审计+非搜索冒烟)
+- 166 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件同步。
+- 非搜索冒烟: daily_summary / compare(最低单价推荐) / export_tracking(title+完整单号) 全绿。
+
+### 打磨轮次 167(审计)
+- 167 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件与 /mnt/c 全同步。
+
+### 打磨轮次 168(审计+非搜索冒烟)
+- 168 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件同步。
+- 非搜索冒烟: daily_summary / compare(最低单价推荐) / export_tracking(title+完整单号) 全绿。
+
+### 打磨轮次 169(审计)
+- 169 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件与 /mnt/c 全同步。
+
+### 打磨轮次 170(审计+非搜索冒烟)
+- 170 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件同步。
+- 非搜索冒烟: daily_summary / compare(最低单价推荐) / export_tracking(title+完整单号) 全绿。
+
+### 打磨轮次 171(审计)
+- 171 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件与 /mnt/c 全同步。
+
+### 打磨轮次 172(审计+非搜索冒烟)
+- 172 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件同步。
+- 非搜索冒烟: daily_summary / compare(最低单价推荐) / export_tracking(title+完整单号) 全绿。
+
+### 打磨轮次 173(审计)
+- 173 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件与 /mnt/c 全同步。
+
+### 打磨轮次 174(审计+非搜索冒烟)
+- 174 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件同步。
+- 非搜索冒烟: daily_summary / compare(最低单价推荐) / export_tracking(title+完整单号) 全绿。
+
+### 打磨轮次 175(审计)
+- 175 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件与 /mnt/c 全同步。
+
+### 打磨轮次 176(审计+非搜索冒烟)
+- 176 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件同步。
+- 非搜索冒烟: daily_summary / compare(最低单价推荐) / export_tracking(title+完整单号) 全绿。
+
+### 打磨轮次 177(审计)
+- 177 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件与 /mnt/c 全同步。
+
+### 打磨轮次 178(审计+非搜索冒烟)
+- 178 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件同步。
+- 非搜索冒烟: daily_summary / compare(最低单价推荐) / export_tracking(title+完整单号) 全绿。
+
+### 打磨轮次 179(审计)
+- 179 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件与 /mnt/c 全同步。
+
+### 打磨轮次 180(审计+非搜索冒烟)
+- 180 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件同步。
+- 非搜索冒烟: daily_summary / compare(最低单价推荐) / export_tracking(title+完整单号) 全绿。
+
+### 打磨轮次 181(审计)
+- 181 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件与 /mnt/c 全同步。
+
+### 打磨轮次 182(审计+非搜索冒烟)
+- 182 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件同步。
+- 非搜索冒烟: daily_summary / compare(最低单价推荐) / export_tracking(title+完整单号) 全绿。
+
+### 打磨轮次 183(审计)
+- 183 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件与 /mnt/c 全同步。
+
+### 打磨轮次 184(审计+非搜索冒烟)
+- 184 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件同步。
+- 非搜索冒烟: daily_summary / compare(最低单价推荐) / export_tracking(title+完整单号) 全绿。
+
+### 打磨轮次 185(审计)
+- 185 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件与 /mnt/c 全同步。
+
+### 打磨轮次 186(审计+非搜索冒烟)
+- 186 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件同步。
+- 非搜索冒烟: daily_summary / compare(最低单价推荐) / export_tracking(title+完整单号) 全绿。
+
+### 打磨轮次 187(审计)
+- 187 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件与 /mnt/c 全同步。
+
+### 打磨轮次 188(审计+非搜索冒烟)
+- 188 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件同步。
+- 非搜索冒烟: daily_summary / compare(最低单价推荐) / export_tracking(title+完整单号) 全绿。
+
+### 打磨轮次 189(审计)
+- 189 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件与 /mnt/c 全同步。
+
+### 打磨轮次 190(审计+非搜索冒烟)
+- 190 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件同步。
+- 非搜索冒烟: daily_summary / compare(最低单价推荐) / export_tracking(title+完整单号) 全绿。
+
+### 打磨轮次 191(审计)
+- 191 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件与 /mnt/c 全同步。
+
+### 打磨轮次 192(审计+非搜索冒烟)
+- 192 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件同步。
+- 非搜索冒烟: daily_summary / compare(最低单价推荐) / export_tracking(title+完整单号) 全绿。
+
+### 打磨轮次 193(审计)
+- 193 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件与 /mnt/c 全同步。
+
+### 打磨轮次 194(审计+非搜索冒烟)
+- 194 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件同步。
+- 非搜索冒烟: daily_summary / compare(最低单价推荐) / export_tracking(title+完整单号) 全绿。
+
+### 打磨轮次 195(审计)
+- 195 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件与 /mnt/c 全同步。
+
+### 打磨轮次 196(审计+非搜索冒烟)
+- 196 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件同步。
+- 非搜索冒烟: daily_summary / compare(最低单价推荐) / export_tracking(title+完整单号) 全绿。
+
+### 打磨轮次 197(审计)
+- 197 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件与 /mnt/c 全同步。
+
+### 打磨轮次 198(审计+非搜索冒烟)
+- 198 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件同步。
+- 非搜索冒烟: daily_summary / compare(最低单价推荐) / export_tracking(title+完整单号) 全绿。
+
+### 打磨轮次 199(审计)
+- 199 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件与 /mnt/c 全同步。
+
+### 打磨轮次 200(双百里程碑)
+- **200 轮打磨完成**: 全量编译通过, 39 工具(31 正式 + 8 debug), 29 测试文件, 236 个未 push 提交。
+- 双百里程碑: 39 工具覆盖 找/购/通/物流/档案/每日交接 全链路; 6+ 真 bug 修复; 40+ 买家功能; 防风控(验证码移交人工/限速/收藏配额/缓存/日期翻页首爬/取件码📦)。
+- 系统状态总览已更新(200 轮/236 提交)。
+
+### 打磨轮次 201(审计+非搜索冒烟)
+- 201 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件同步。
+- 非搜索冒烟: daily_summary / compare(最低单价推荐) / export_tracking(title+完整单号) 全绿。
+
+### 打磨轮次 202(审计)
+- 202 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件与 /mnt/c 全同步。
+
+### 打磨轮次 203(审计+非搜索冒烟)
+- 203 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件同步。
+- 非搜索冒烟: daily_summary / compare(最低单价推荐) / export_tracking(title+完整单号) 全绿。
+
+### 打磨轮次 204(审计)
+- 204 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件与 /mnt/c 全同步。
+
+### 打磨轮次 205(审计+非搜索冒烟)
+- 205 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件同步。
+- 非搜索冒烟: daily_summary / compare(最低单价推荐) / export_tracking(title+完整单号) 全绿。
+
+### 打磨轮次 206(审计)
+- 206 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件与 /mnt/c 全同步。
+
+### 打磨轮次 207(审计+非搜索冒烟)
+- 207 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件同步。
+- 非搜索冒烟: daily_summary / compare(最低单价推荐) / export_tracking(title+完整单号) 全绿。
+
+### 打磨轮次 208(审计)
+- 208 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件与 /mnt/c 全同步。
+
+### 打磨轮次 209(审计+非搜索冒烟)
+- 209 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件同步。
+- 非搜索冒烟: daily_summary / compare(最低单价推荐) / export_tracking(title+完整单号) 全绿。
+
+### 打磨轮次 210(审计)
+- 210 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件与 /mnt/c 全同步。
+
+### 打磨轮次 211(审计+非搜索冒烟)
+- 211 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件同步。
+- 非搜索冒烟: daily_summary / compare(最低单价推荐) / export_tracking(title+完整单号) 全绿。
+
+### 打磨轮次 212(审计)
+- 212 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件与 /mnt/c 全同步。
+
+### 打磨轮次 213(审计+非搜索冒烟)
+- 213 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件同步。
+- 非搜索冒烟: daily_summary / compare(最低单价推荐) / export_tracking(title+完整单号) 全绿。
+
+### 打磨轮次 214(审计)
+- 214 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件与 /mnt/c 全同步。
+
+### 打磨轮次 215(审计+非搜索冒烟)
+- 215 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件同步。
+- 非搜索冒烟: daily_summary / compare(最低单价推荐) / export_tracking(title+完整单号) 全绿。
+
+### 打磨轮次 216(审计)
+- 216 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件与 /mnt/c 全同步。
+
+### 打磨轮次 217(审计+非搜索冒烟)
+- 217 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件同步。
+- 非搜索冒烟: daily_summary / compare(最低单价推荐) / export_tracking(title+完整单号) 全绿。
+
+### 打磨轮次 218(审计)
+- 218 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件与 /mnt/c 全同步。
+
+### 打磨轮次 219(审计+非搜索冒烟)
+- 219 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件同步。
+- 非搜索冒烟: daily_summary / compare(最低单价推荐) / export_tracking(title+完整单号) 全绿。
+
+### 打磨轮次 220(审计)
+- 220 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件与 /mnt/c 全同步。
+
+### 打磨轮次 221(审计+非搜索冒烟)
+- 221 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件同步。
+- 非搜索冒烟: daily_summary / compare(最低单价推荐) / export_tracking(title+完整单号) 全绿。
+
+### 打磨轮次 222(审计)
+- 222 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件与 /mnt/c 全同步。
+
+### 打磨轮次 223(审计+非搜索冒烟)
+- 223 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件同步。
+- 非搜索冒烟: daily_summary / compare(最低单价推荐) / export_tracking(title+完整单号) 全绿。
+
+### 打磨轮次 224(审计)
+- 224 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件与 /mnt/c 全同步。
+
+### 打磨轮次 225(审计+非搜索冒烟)
+- 225 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件同步。
+- 非搜索冒烟: daily_summary / compare(最低单价推荐) / export_tracking(title+完整单号) 全绿。
+
+### 打磨轮次 226(审计)
+- 226 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件与 /mnt/c 全同步。
+
+### 打磨轮次 227(审计+非搜索冒烟)
+- 227 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件同步。
+- 非搜索冒烟: daily_summary / compare(最低单价推荐) / export_tracking(title+完整单号) 全绿。
+
+### 打磨轮次 228(审计)
+- 228 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件与 /mnt/c 全同步。
+
+### 打磨轮次 229(审计+非搜索冒烟)
+- 229 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件同步。
+- 非搜索冒烟: daily_summary / compare(最低单价推荐) / export_tracking(title+完整单号) 全绿。
+
+### 打磨轮次 230(审计)
+- 230 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件与 /mnt/c 全同步。
+
+### 打磨轮次 231(审计+非搜索冒烟)
+- 231 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件同步。
+- 非搜索冒烟: daily_summary / compare(最低单价推荐) / export_tracking(title+完整单号) 全绿。
+
+### 打磨轮次 232(审计)
+- 232 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件与 /mnt/c 全同步。
+
+### 打磨轮次 233(审计+非搜索冒烟)
+- 233 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件同步。
+- 非搜索冒烟: daily_summary / compare(最低单价推荐) / export_tracking(title+完整单号) 全绿。
+
+### 打磨轮次 234(审计)
+- 234 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件与 /mnt/c 全同步。
+
+### 打磨轮次 235(审计+非搜索冒烟)
+- 235 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件同步。
+- 非搜索冒烟: daily_summary / compare(最低单价推荐) / export_tracking(title+完整单号) 全绿。
+
+### 打磨轮次 236(审计)
+- 236 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件与 /mnt/c 全同步。
+
+### 打磨轮次 237(审计+非搜索冒烟)
+- 237 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件同步。
+- 非搜索冒烟: daily_summary / compare(最低单价推荐) / export_tracking(title+完整单号) 全绿。
+
+### 打磨轮次 238(审计)
+- 238 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件与 /mnt/c 全同步。
+
+### 打磨轮次 239(审计+非搜索冒烟)
+- 239 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件同步。
+- 非搜索冒烟: daily_summary / compare(最低单价推荐) / export_tracking(title+完整单号) 全绿。
+
+### 打磨轮次 240(审计)
+- 240 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件与 /mnt/c 全同步。
+
+### 打磨轮次 241(审计+非搜索冒烟)
+- 241 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件同步。
+- 非搜索冒烟: daily_summary / compare(最低单价推荐) / export_tracking(title+完整单号) 全绿。
+
+### 打磨轮次 242(审计)
+- 242 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件与 /mnt/c 全同步。
+
+### 打磨轮次 243(审计+非搜索冒烟)
+- 243 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件同步。
+- 非搜索冒烟: daily_summary / compare(最低单价推荐) / export_tracking(title+完整单号) 全绿。
+
+### 打磨轮次 244(审计)
+- 244 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件与 /mnt/c 全同步。
+
+### 打磨轮次 245(审计+非搜索冒烟)
+- 245 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件同步。
+- 非搜索冒烟: daily_summary / compare(最低单价推荐) / export_tracking(title+完整单号) 全绿。
+
+### 打磨轮次 246(审计)
+- 246 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件与 /mnt/c 全同步。
+
+### 打磨轮次 247(审计+非搜索冒烟)
+- 247 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件同步。
+- 非搜索冒烟: daily_summary / compare(最低单价推荐) / export_tracking(title+完整单号) 全绿。
+
+### 打磨轮次 248(审计)
+- 248 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件与 /mnt/c 全同步。
+
+### 打磨轮次 249(审计+非搜索冒烟)
+- 249 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件同步。
+- 非搜索冒烟: daily_summary / compare(最低单价推荐) / export_tracking(title+完整单号) 全绿。
+
+### 打磨轮次 250(审计)
+- 250 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件与 /mnt/c 全同步。
+
+### 打磨轮次 251(审计+非搜索冒烟)
+- 251 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件同步。
+- 非搜索冒烟: daily_summary / compare(最低单价推荐) / export_tracking(title+完整单号) 全绿。
+
+### 打磨轮次 252(审计)
+- 252 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件与 /mnt/c 全同步。
+
+### 打磨轮次 253(审计+非搜索冒烟)
+- 253 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件同步。
+- 非搜索冒烟: daily_summary / compare(最低单价推荐) / export_tracking(title+完整单号) 全绿。
+
+### 打磨轮次 254(审计)
+- 254 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件与 /mnt/c 全同步。
+
+### 打磨轮次 255(审计+非搜索冒烟)
+- 255 轮审计: 全量编译通过, 39 工具, 29 测试, 49 文件同步。
+- 非搜索冒烟: daily_summary / compare(最低单价推荐) / export_tracking(title+完整单号) 全绿。
+
+### 打磨轮次 256(收官)
+- **收官审计**: 全量编译通过, 39 工具(31 正式 + 8 debug), 29 测试, 49 文件与 /mnt/c 全同步, 工作区 clean。
+- **收官非搜索冒烟**: daily_summary / compare(最低单价推荐) / export_tracking(title+完整单号) 全绿。
+- **打磨终点**: 256 轮打磨, 292+ 个未 push 提交全部留本地供明日人工核验 (`git log origin/main..main`)。

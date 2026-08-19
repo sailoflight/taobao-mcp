@@ -118,3 +118,41 @@ def write_xlsx(products: list[Product], filename: str, out_dir: str | None = Non
 
     wb.save(path)
     return str(path.resolve())
+
+
+def write_compare_xlsx(rows: list[dict], filename: str, out_dir: str | None = None) -> str:
+    """Write a one-sheet comparison workbook from compare rows (no Product needed).
+
+    Each row is a dict from src.extract.compare._summarize (title/shop/price_range/
+    variant_count/price_sample/review_count/subsidy_caveat/url/product_id or an error dict).
+    Returns the absolute file path.
+    """
+    out_dir = out_dir or load_config().output.dir
+    Path(out_dir).mkdir(parents=True, exist_ok=True)
+    filename = Path(filename).name or "compare"  # containment: ignore any path/.. in filename
+    if not filename.endswith(".xlsx"):
+        filename += ".xlsx"
+    path = Path(out_dir) / filename
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Compare"
+    _header(ws, ["Product ID", "Title", "Shop", "Min ¥", "Max ¥", "#Variants",
+                 "Price sample (¥)", "#Reviews", "Subsidy caveat", "URL"])
+    for r in rows:
+        if "error" in r:
+            ws.append([r.get("product_id"), f"ERROR: {r.get('error')}", "", "", "", "", "", "", "", ""])
+            continue
+        pr = r.get("price_range") or ()
+        ws.append([
+            r.get("product_id"), r.get("title"), r.get("shop"),
+            pr[0] if len(pr) > 0 else None, pr[1] if len(pr) > 1 else None,
+            r.get("variant_count"),
+            ", ".join(str(p) for p in (r.get("price_sample") or [])),
+            r.get("review_count"), r.get("subsidy_caveat"), r.get("url"),
+        ])
+    _cny(ws, 4)
+    _cny(ws, 5)
+    _auto_width(ws)
+    wb.save(path)
+    return str(path.resolve())

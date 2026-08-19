@@ -194,3 +194,21 @@ async def track_orders(
             pass
     _save_cache(orders)   # stamp today's run so same-day re-calls serve the cache
     return orders
+
+
+def _tracking_markdown(orders: list) -> str:
+    """Pure: 把今日订单物流摘要渲染成可读 markdown 表(代购转发用).
+
+    有取件码的订单状态标 "📦待取件"(醒目, 代购优先收件).
+    """
+    lines = [f"### 今日物流摘要({len(orders)} 单)", "",
+             "| 订单号 | 状态 | 物流 | 单号 | 取件码 | 驿站 |", "|---|---|---|---|---|---|"]
+    for o in orders:
+        oid = str(getattr(o, "order_id", "") or "")
+        status = getattr(o, "status", "") or "-"
+        if getattr(o, "pickup_code", None):
+            status = "📦待取件" if status == "-" else f"📦{status}"
+        lines.append(f"| {oid} | {status} | {getattr(o, 'carrier', '') or '-'} "
+                     f"| {getattr(o, 'tracking_no', '') or '-'} | {getattr(o, 'pickup_code', '') or '-'} "
+                     f"| {getattr(o, 'station', '') or '-'} |")
+    return "\n".join(lines)

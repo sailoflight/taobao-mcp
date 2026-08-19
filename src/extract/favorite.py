@@ -11,6 +11,8 @@
 
 from __future__ import annotations
 
+from src.browser.pacing import human_click, human_delay
+
 
 # 商品页"收藏/已收藏"按钮定位(限 button/span/div/i/a,非全 DOM)
 FAV_BUTTON_JS = r"""() => {
@@ -62,14 +64,14 @@ COLLECT_URL = "https://i.taobao.com/my_itaobao/itao-tool/collect"
 async def _item_in_collect(page, pid: str) -> bool:
     """Is the product present in the 收藏夹? Broad matching (href / data attrs) + scroll."""
     await page.goto(COLLECT_URL, wait_until="domcontentloaded")
-    await page.wait_for_timeout(4000)
+    await human_delay(3.2, 5.0)  # collect page is JS-rendered (~12s worst case); human-paced
     try:
         await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-        await page.wait_for_timeout(1500)
+        await human_delay(1.2, 2.2)
         await page.evaluate("window.scrollTo(0, 0)")
     except Exception:
         pass
-    await page.wait_for_timeout(1000)
+    await human_delay(0.8, 1.6)
     try:
         if (await page.locator(f'a[href*="{pid}"]').count()) > 0:
             return True
@@ -110,7 +112,7 @@ async def ensure_favorited(page, pid: str) -> dict:
     (the caller must un-favorite it afterwards — cleanup).
     """
     await page.goto(f"https://item.taobao.com/item.htm?id={pid}", wait_until="domcontentloaded")
-    await page.wait_for_timeout(2500)
+    await human_delay(2.2, 3.6)  # human-paced page settle (anti-risk: no fixed rhythm)
     btn = page.locator("#collectBtn").first
     if await btn.count() == 0:
         return {"already": None, "state": "no_collect_btn", "added_by_us": False, "clicked": 0}
@@ -126,13 +128,11 @@ async def ensure_favorited(page, pid: str) -> dict:
             return {"already": True, "state": "already_via_list", "added_by_us": False, "clicked": 0}
     # clearly not favorited → add (can only add)
     try:
-        from src.browser.pacing import human_click
-
         await human_click(page, btn)
     except Exception as exc:
         return {"already": False, "state": "click_failed", "added_by_us": False, "clicked": 0,
                 "error": str(exc)}
-    await page.wait_for_timeout(1200)
+    await human_delay(1.0, 1.9)  # let the button state flip (varied, not fixed)
     state1 = _btn_state(await _btn_outer(page))
     added = state1 == "favorited"
     return {
@@ -151,19 +151,17 @@ async def ensure_unfavorited(page, pid: str) -> dict:
     button color signal; only clicks when the item is currently favorited.
     """
     await page.goto(f"https://item.taobao.com/item.htm?id={pid}", wait_until="domcontentloaded")
-    await page.wait_for_timeout(2500)
+    await human_delay(2.2, 3.6)
     btn = page.locator("#collectBtn").first
     if await btn.count() == 0:
         return {"state": "no_btn", "clicked": False}
     if _btn_state(await _btn_outer(page)) != "favorited":
         return {"state": "not_favorited", "clicked": False}
     try:
-        from src.browser.pacing import human_click
-
         await human_click(page, btn)
     except Exception as exc:
         return {"state": "click_failed", "clicked": False, "error": str(exc)}
-    await page.wait_for_timeout(1200)
+    await human_delay(1.0, 1.9)
     after = _btn_state(await _btn_outer(page))
     return {"state": "removed" if after != "favorited" else "remove_failed", "clicked": True}
 
@@ -191,7 +189,7 @@ async def click_from_favorites(page, pid: str, added_by_us: bool = True) -> dict
     except Exception:
         try:  # a light scroll may be what triggers the JS list render
             await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-            await page.wait_for_timeout(2500)
+            await human_delay(1.8, 3.0)
             await first.wait_for(state="visible", timeout=10000)
         except Exception:
             return {"url": None, "reason": "no goodsItem cards rendered"}
@@ -207,8 +205,6 @@ async def click_from_favorites(page, pid: str, added_by_us: bool = True) -> dict
     # a random point over the whole card can hit the hover overlay buttons (进入店铺/按图找
     # 相似) or the delete button, which don't navigate to the item.
     try:
-        from src.browser.pacing import human_click
-
         title = card.locator('[class*="title"]').first
         target = title if await title.count() > 0 else card
         async with page.expect_popup(timeout=20000) as pi:
@@ -218,7 +214,7 @@ async def click_from_favorites(page, pid: str, added_by_us: bool = True) -> dict
             await popup.wait_for_load_state("domcontentloaded", timeout=20000)
         except Exception:
             pass
-        await popup.wait_for_timeout(2500)
+        await human_delay(2.0, 3.2)  # let the new-tab item page settle (varied)
         url = (popup.url or "") if not popup.is_closed() else ""
     except Exception as exc:
         return {"url": None, "reason": f"click/popup: {str(exc)[:100]}"}
@@ -264,6 +260,81 @@ async def _read_fav_popup(page) -> dict:
         return await page.evaluate(FAV_POPUP_JS)
     except Exception:
         return {}
+
+
+# 只读: 收藏夹列表卡片 → 标题 + 价(每卡一行)
+FAV_ITEMS_JS = r"""() => {
+  const out = [];
+  document.querySelectorAll('[class*="goodsItem"]').forEach(e => {
+    const titleEl = e.querySelector('[class*="title"]');
+    const priceEl = e.querySelector('[class*="price"]');
+    const raw = (priceEl ? priceEl.innerText : '') || '';
+    // 取第一个 ¥ 金额, 丢掉 "收藏后降¥2." 之类的噪声
+    const m = raw.replace(/\s+/g, '').match(/[¥￥]([\d.]+)/);
+    // 收藏人数(summary, 如 "5万+人收藏") — 卡片无店铺名, 用收藏热度作信号
+    const summaryEl = e.querySelector('[class*="summary"]');
+    out.push({
+      title: (titleEl ? titleEl.innerText : '').trim().slice(0, 70),
+      price: m ? m[1] : raw.trim().slice(0, 12),
+      fav_count: (summaryEl ? summaryEl.innerText.trim().slice(0, 12) : ''),
+    });
+  });
+  return out.slice(0, 40);
+}"""
+
+
+def _favorites_markdown(data: dict) -> str:
+    """Pure: 把 list_favorites 的 data 渲染成可读 markdown 表."""
+    favs = data.get("favorites") or []
+    lines = [f"### 收藏夹({data.get('count', 0)} 个)\n", "| 价格¥ | 收藏人数 | 商品 |\n|---|---|---|"]
+    for f in favs:
+        lines.append(f"| {f.get('price') or '-'} | {f.get('fav_count') or '-'} | {f.get('title') or ''} |")
+    if not favs:
+        lines.append("| — | — | (空) |")
+    return "\n".join(lines)
+
+
+def _price_of(item: dict) -> float | None:
+    """Pure: 解析收藏项的 price 字段为 float, 缺/非法返回 None."""
+    p = item.get("price")
+    try:
+        return float(p)
+    except (TypeError, ValueError):
+        return None
+
+
+def _sort_favorites(items: list[dict], sort_by: str = "") -> list[dict]:
+    """Pure: 收藏项排序(price_asc 升序 / price_desc 降序, 缺价排最后; 其他保持原序)."""
+    if sort_by not in ("price_asc", "price_desc"):
+        return list(items)
+    if sort_by == "price_asc":
+        return sorted(items, key=lambda it: _price_of(it) if _price_of(it) is not None else float("inf"))
+    return sorted(items, key=lambda it: _price_of(it) if _price_of(it) is not None else float("-inf"), reverse=True)
+
+
+async def list_favorites(limit: int = 30, sort_by: str = "") -> dict:
+    """只读: 列出收藏夹前 N 个商品(标题+价). 事件驱动等首卡渲染, 无任何写入."""
+    from src.browser.session import get_session
+
+    session = get_session()
+    page = await session.start()
+    await page.goto(COLLECT_URL, wait_until="domcontentloaded")
+    first = page.locator('[class*="goodsItem"]').first
+    try:
+        await first.wait_for(state="visible", timeout=18000)
+    except Exception:
+        try:
+            await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            await human_delay(1.8, 3.0)
+            await first.wait_for(state="visible", timeout=10000)
+        except Exception:
+            return {"count": 0, "favorites": [], "error": "收藏夹列表未渲染"}
+    try:
+        items = await page.evaluate(FAV_ITEMS_JS)
+    except Exception as exc:
+        return {"count": 0, "favorites": [], "error": str(exc)[:120]}
+    items = _sort_favorites(items, sort_by)
+    return {"count": len(items), "favorites": items[:limit]}
 
 
 async def recon_collect(target_pid: str = "") -> dict:
@@ -429,3 +500,28 @@ async def recon_favorite(product_url_or_id: str) -> dict:
         out["collect_detail_error"] = str(exc)
 
     return out
+
+
+async def export_favorites_markdown(limit: int = 30, sort_by: str = "",
+                                    filename: str = "", title: str = "") -> dict:
+    """只读: 把收藏夹渲染成 markdown 并落盘 output/favorites_<ts>.md(候选清单留档).
+
+    复用 list_favorites(只读浏览) + _favorites_markdown。返回 {path, count, markdown}。
+    """
+    from datetime import datetime, timezone
+    from pathlib import Path
+
+    from src.config import load_config
+
+    data = await list_favorites(limit=limit, sort_by=sort_by)
+    md = _favorites_markdown(data)
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    fname = filename or f"favorites_{ts}.md"
+    out_dir = Path(load_config().output.dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / fname
+    head = f"> 导出时间: {ts}"
+    if title:
+        head += f" — {title}"
+    path.write_text(head + "\n\n" + md + "\n", encoding="utf-8")
+    return {"path": str(path), "count": data.get("count", 0), "markdown": head + "\n\n" + md}

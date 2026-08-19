@@ -103,10 +103,71 @@ def parse_cards(raw: list[dict]) -> list[SearchResult]:
     return [parse_card_text(r["id"], r.get("text", "")) for r in raw if r.get("id")]
 
 
-async def parse_search(keyword: str, page_num: int = 1, filters: dict | None = None) -> list[SearchResult]:
-    """Live: search Taobao for `keyword` and return the result rows (paced, captcha-guarded)."""
+def build_search_url(keyword: str, page_num: int = 1, filters: dict | None = None) -> str:
+    """Pure: build the s.taobao.com search URL with optional filters.
+
+    filters: min_price/max_price -> filter=reserve_price[MIN,MAX] (Taobao may ignore,
+    best-effort); sort -> s=N (1=综合 2=销量 5=价格低→高 6=高→低). Pure (no session),
+    unit-tested.
+    """
     from urllib.parse import quote
 
+    url = f"https://s.taobao.com/search?q={quote(keyword)}&tab=all&page={page_num}"
+    if filters:
+        if filters.get("min_price") is not None or filters.get("max_price") is not None:
+            lo = filters.get("min_price", "")
+            hi = filters.get("max_price", "")
+            url += f"&filter=reserve_price[{lo},{hi}]"
+        if filters.get("sort"):
+            url += f"&s={filters['sort']}"
+    return url
+
+
+def filter_search_results(results: list[SearchResult], filters: dict | None) -> list[SearchResult]:
+    """Pure: client-side filter of parsed results (Taobao's URL filters are best-effort).
+
+    Applies, when present in `filters`:
+      min_sales / max_sales — monthly_sales band (skips near-zero-sales sketchy listings)
+      min_price / max_price — price band (falls back to client-side when the URL param is ignored)
+      title_contains — case-insensitive substring required in the title (e.g. "加固")
+      sort — client-side re-sort for reliability (SPA 的 s=N 排序偶发不生效):
+        5 = 价格从低到高, 6 = 价格从高到低, 2 = 销量从高到低 (缺价/缺销量排最后)
+    Items missing the compared field pass through (None is not filtered out).
+    """
+    if not filters:
+        return results
+    lo_s = filters.get("min_sales")
+    hi_s = filters.get("max_sales")
+    lo_p = filters.get("min_price")
+    hi_p = filters.get("max_price")
+    tc = filters.get("title_contains")
+    sort = filters.get("sort")
+    if not any(x is not None for x in (lo_s, hi_s, lo_p, hi_p, tc, sort)):
+        return results
+    out = []
+    for r in results:
+        if lo_s is not None and r.monthly_sales is not None and r.monthly_sales < lo_s:
+            continue
+        if hi_s is not None and r.monthly_sales is not None and r.monthly_sales > hi_s:
+            continue
+        if lo_p is not None and r.price is not None and r.price < lo_p:
+            continue
+        if hi_p is not None and r.price is not None and r.price > hi_p:
+            continue
+        if tc is not None and tc and (tc not in (r.title or "")):
+            continue
+        out.append(r)
+    if sort == 5:
+        out.sort(key=lambda r: r.price if r.price is not None else float("inf"))
+    elif sort == 6:
+        out.sort(key=lambda r: r.price if r.price is not None else float("-inf"), reverse=True)
+    elif sort == 2:
+        out.sort(key=lambda r: r.monthly_sales if r.monthly_sales is not None else -1, reverse=True)
+    return out
+
+
+async def parse_search(keyword: str, page_num: int = 1, filters: dict | None = None) -> list[SearchResult]:
+    """Live: search Taobao for `keyword` and return the result rows (paced, captcha-guarded)."""
     from src.browser.pacing import human_delay, human_scroll
     from src.browser.session import get_session
     from src.log import get_logger
@@ -117,7 +178,7 @@ async def parse_search(keyword: str, page_num: int = 1, filters: dict | None = N
     # front and fall back to clicking the pagination 下一页 button when the
     # SPA still lands on page 1 (observed 2026-08-18: requested page=2 was
     # rewritten by the page to page=1).
-    url = f"https://s.taobao.com/search?q={quote(keyword)}&tab=all&page={page_num}"
+    url = build_search_url(keyword, page_num, filters)
     get_logger().info("search: requested page=%s url=%s", page_num, url)
     await page.goto(url, wait_until="domcontentloaded")
     await session.guard_captcha(page)
@@ -163,4 +224,24 @@ async def parse_search(keyword: str, page_num: int = 1, filters: dict | None = N
         get_logger().info("search: loaded page=%s url=%s", page_num, page.url)
 
     raw = await page.evaluate(EXTRACT_JS)
-    return parse_cards(raw)
+    return filter_search_results(parse_cards(raw), filters)
+
+
+def _search_markdown(results, keyword: str = "", max_rows: int = 30, page: int | None = None) -> str:
+    """Pure: 把搜索结果渲染成可读 markdown 表(价格/销量/店铺/位置/标题)."""
+    rows = list(results)[:max(1, min(int(max_rows or 30), 100))]
+    title = f"### 搜索结果({len(rows)} 个)"
+    if keyword:
+        title += f" — {keyword}"
+    if page:
+        title += f" (第 {page} 页)"
+    head = [title, "",
+            "| 价格¥ | 销量 | 店铺 | 位置 | 商品 |", "|---|---|---|---|---|"]
+    for r in rows:
+        p = f"{r.price:g}" if r.price is not None else "-"
+        s = str(r.monthly_sales) if r.monthly_sales is not None else "-"
+        title = (r.title or "").replace("|", "/")[:38]
+        if r.url:
+            title = f"[{title}]({r.url})"  # 买家可直接点开商品
+        head.append(f"| {p} | {s} | {(r.shop_name or '')[:14]} | {(r.location or '')[:8]} | {title} |")
+    return "\n".join(head)

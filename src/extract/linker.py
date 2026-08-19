@@ -217,3 +217,60 @@ async def full_picture(seller: str | None = None, order_id: str | None = None) -
 
     convos = await read_messages(max_conversations=20)
     return build_dossiers(cart, purchases, tracking, convos, aliases)
+
+
+def _dossier_markdown(d: VendorDossier) -> str:
+    """Pure: 把单个店铺档案(VendorDossier)渲染成可读 markdown."""
+    lines = [f"### {d.seller} 店铺档案", ""]
+    if d.unlinked:
+        lines.append("⚠️ 消息线程未能确证归属(unlinked)")
+    if d.cart_items:
+        lines.append("**购物车**:")
+        lines.append("| 商品 | 数量 |")
+        for it in d.cart_items:
+            lines.append(f"| {(it.title or '')[:40]} | {it.quantity} |")
+    if d.orders:
+        lines.append("")
+        lines.append("**订单**:")
+        lines.append("| 订单号 | 状态 | 物流 | 单号 | 取件码 |")
+        for o in d.orders:
+            lines.append(f"| {o.order_id} | {o.status or '-'} | {o.carrier or '-'} | "
+                         f"{o.tracking_no or '-'} | {o.pickup_code or '-'} |")
+    if d.thread:
+        lines.append("")
+        lines.append("**消息**:")
+        for m in d.thread:
+            who = "我" if getattr(m, "is_self", False) else d.seller
+            lines.append(f"- [{who}] {(m.text or '')[:60]}")
+    if not (d.cart_items or d.orders or d.thread):
+        lines.append("(无购物车/订单/消息)")
+    return "\n".join(lines)
+
+
+async def export_dossier_markdown(seller: str | None = None, order_id: str | None = None,
+                                  filename: str = "", title: str = "") -> dict:
+    """只读: 抓取店铺档案并渲染成 md 落盘 output/dossier_<seller>.md(买家留档).
+
+    复用 full_picture(只读浏览); 返回 {path, count, markdown}。
+    """
+    from datetime import datetime, timezone
+    from pathlib import Path
+
+    from src.config import load_config
+
+    dossiers = await full_picture(seller=seller, order_id=order_id)
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    out_dir = Path(load_config().output.dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    fname = filename or ("dossier_" + (seller or order_id or "all") + f"_{ts}.md")
+    parts = [f"> 导出时间: {ts}", ""]
+    for d in dossiers:
+        parts.append(_dossier_markdown(d))
+    md = "\n\n---\n\n".join(parts)
+    head = f"> 导出时间: {ts}"
+    if title:
+        head += f" — {title}"
+    md = head + "\n\n" + md
+    path = out_dir / fname
+    path.write_text(md + "\n", encoding="utf-8")
+    return {"path": str(path), "count": len(dossiers), "markdown": md}

@@ -34,10 +34,12 @@ async def add_to_cart(
     options: list[str] | None = None,
     qty: int = 1,
     confirm: bool = False,
+    cheapest_available: bool = False,
 ) -> str:
     """Stage one product+variant+qty into the cart. Preview unless confirm=True.
 
     options = one option VALUE per group (e.g. ["P100 质保3年 以换代修"] or ["黑色","L"]).
+    cheapest_available=True 且不给 options 时, 自动选最便宜有货型号(预览可先确认)。
     Reversible (cart only); never buys, never picks an address.
     """
     from src.browser.pacing import human_delay, human_scroll
@@ -55,6 +57,12 @@ async def add_to_cart(
     await human_delay(1.5, 2.5)
 
     product = parse_product_html(await page.content(), pid, url)
+    # 自动选最便宜有货: options 为空且 cheapest_available=True 时, 从解析的变体推导各组值
+    if cheapest_available and not options:
+        avail = [v for v in product.variants if v.available and v.price is not None]
+        if avail:
+            best = min(avail, key=lambda v: v.price)
+            options = list((best.properties or {}).values())
     group_names = {k for v in product.variants for k in v.properties}
     if product.variants and group_names and not options:
         choices = sorted({" / ".join(v.properties.values()) for v in product.variants})
@@ -95,9 +103,16 @@ async def add_to_cart(
                 pass
         sku_id = _live_sku()
     if options and not sku_id:
+        hint = ""
+        if product.variants:
+            choices = sorted({" / ".join(v.properties.values()) for v in product.variants})
+            if choices:
+                hint = (" Available variants (options 需每组一个值, 如 [颜色, 规格]): "
+                        + "; ".join(choices[:8]))
         raise ProductNotFoundError(
             f"variant {options} did not register on product {pid} (no skuId after clicking — "
             f"the chip selection was not validated). Refusing to add the wrong item; retry."
+            + hint
         )
 
     if qty and int(qty) != 1:

@@ -56,6 +56,10 @@ class ClickCfg:
 class LimitsCfg:
     max_reviews: int = 60
     review_pages: int = 4
+    # Daily cap on the 收藏链路 (favorite + click + unfavorite) — the riskiest flow
+    # (repeated favorite/unfavorite actions are a flag risk). fetch_detail with
+    # miid_source="favorite" checks this before touching favorites.
+    fav_flow_per_day: int = 30
 
 
 @dataclass(frozen=True)

@@ -120,3 +120,18 @@ class RateLimiter:
             if sleep_for > 0:
                 await asyncio.sleep(sleep_for)
         self._timestamps.append(time.monotonic())
+
+    def usage(self) -> dict:
+        """Anti-risk pacing telemetry: actions in the last 60s vs the per-minute cap."""
+        now = time.monotonic()
+        recent = [t for t in self._timestamps if now - t < 60.0]
+        n = len(recent)
+        next_in = None
+        if n >= self.max_per_minute > 0:
+            next_in = round(max(0.0, 60.0 - (now - recent[0])), 1)
+        return {
+            "actions_last_60s": n,
+            "max_per_minute": self.max_per_minute,
+            "slots_left": max(0, self.max_per_minute - n) if self.max_per_minute > 0 else None,
+            "next_slot_in_s": next_in,
+        }

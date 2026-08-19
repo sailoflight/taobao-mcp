@@ -423,7 +423,6 @@ async def sweep_variant_prices(product_url_or_id: str, max_chips: int = 12) -> d
     读每个型号的显示价格(店铺优惠后/券后/到手价/价格行) — 确认能分清每个 SKU 型号的价格。
     Read-only navigation + per-chip clicks; un-favorites if we added it this round.
     """
-    from src.browser.pacing import human_click
     from src.browser.session import get_session
     from src.extract.favorite import click_from_favorites, ensure_favorited, ensure_unfavorited
     from src.extract.product import _to_product_id
@@ -530,20 +529,31 @@ async def fetch_detail(product_url_or_id: str, miid_source: str = "config") -> d
     popup = None
     if miid_source == "favorite":
         from src.extract.favorite import click_from_favorites, ensure_favorited, ensure_unfavorited
+        from src.extract.fav_quota import check_and_record
 
-        fav = await ensure_favorited(page, pid)
-        entry["favorite"] = fav
-        entry["added_by_us"] = bool(fav.get("added_by_us"))
-        res = await click_from_favorites(page, pid, added_by_us=entry["added_by_us"])
-        popup = res.get("popup")
-        if res.get("mi_id") and res.get("matches_target"):
-            entry["clicked_url"] = res["url"]
-            entry["miid_from"] = "favorite_click"
-            harvest_page = popup or page
+        quota = check_and_record()  # anti-risk: daily cap on the favorite flow
+        entry["quota"] = quota
+        if not quota.get("allowed"):
+            # 今日收藏链路配额已尽 — 不碰收藏, 落到静态 config mi_id 快速查看
+            entry["favorite"] = {"state": "quota_exceeded", "quota": quota}
+            entry["favorite_fallback"] = True
+            entry["click_fail_reason"] = (f"今日收藏链路已达上限({quota.get('limit')}次), "
+                                          "已用 config mi_id 快速查看; 明日或调大 "
+                                          "limits.fav_flow_per_day 后再细查")
         else:
-            entry["favorite_fallback"] = True  # click missed/not found → static config below
-            entry["click_fail_reason"] = res.get("reason")
-            entry["clicked_opened_id"] = res.get("opened_id")
+            fav = await ensure_favorited(page, pid)
+            entry["favorite"] = fav
+            entry["added_by_us"] = bool(fav.get("added_by_us"))
+            res = await click_from_favorites(page, pid, added_by_us=entry["added_by_us"])
+            popup = res.get("popup")
+            if res.get("mi_id") and res.get("matches_target"):
+                entry["clicked_url"] = res["url"]
+                entry["miid_from"] = "favorite_click"
+                harvest_page = popup or page
+            else:
+                entry["favorite_fallback"] = True  # click missed/not found → static config below
+                entry["click_fail_reason"] = res.get("reason")
+                entry["clicked_opened_id"] = res.get("opened_id")
     else:
         entry["favorite"] = None
 
@@ -697,3 +707,49 @@ async def recon_detail(product_url_or_id: str) -> dict:
     evidence["pc_detail_with_search_referer"] = await _probe_pc_detail(page, url, referer=search_ref)
 
     return evidence
+
+
+async def save_detail_images(product_url_or_id: str, output_dir: str = "", max_images: int = 60) -> dict:
+    """细查后把详情长图下载到本地文件夹(买家离线查看; AI 模型读不了图, 人需要).
+
+    复用收藏链路(fetch_detail, miid_source='favorite')拿到带 mi_id 页的 .desc-root 详情图
+    URL, 再用浏览器会话上下文下载到 output/detail_imgs/<pid>/。只读浏览 + 落盘, 不收藏残留
+    (fetch_detail 已 cleanup)、不发消息。WebP 图片, 浏览器/看图软件可直接打开。
+    """
+    from pathlib import Path
+
+    from src.browser.session import get_session
+    from src.extract.product import _to_product_id
+
+    pid = _to_product_id(product_url_or_id)
+    result = await fetch_detail(pid, miid_source="favorite")
+    urls = result.get("detail_images") or []
+    out_dir = Path(output_dir or f"output/detail_imgs/{pid}")
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    session = get_session()
+    page = await session.start()
+    referer = (result.get("url") or "")
+    saved: list[str] = []
+    failures: list[str] = []
+    for i, u in enumerate(urls[:max_images]):
+        fname = f"{i + 1:02d}.webp"
+        try:
+            resp = await page.request.get(u, headers={"Referer": referer}, timeout=30000)
+            if resp.ok:
+                (out_dir / fname).write_bytes(await resp.body())
+                saved.append(fname)
+            else:
+                failures.append(f"{fname}:http{resp.status}")
+        except Exception as exc:
+            failures.append(f"{fname}:{str(exc)[:40]}")
+    return {
+        "product_id": pid,
+        "count": len(urls),
+        "saved": len(saved),
+        "failed": len(failures),
+        "dir": str(out_dir),
+        "images": [str(out_dir / f) for f in saved],
+        "failures": failures[:8],
+        "miid_stale": result.get("miid_stale"),
+    }

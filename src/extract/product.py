@@ -304,6 +304,7 @@ def parse_product_res(res: dict, product_id: str, url: str = "") -> Product:
     priced = [v.price for v in variants if v.price is not None]
     price_range = (min(priced), max(priced)) if priced else None
     reviews = extract_embedded_reviews(res)
+    rt, fr = embedded_review_total(res)
 
     return Product(
         product_id=str(product_id),
@@ -317,6 +318,8 @@ def parse_product_res(res: dict, product_id: str, url: str = "") -> Product:
         reviews=reviews,
         reviews_by_variant=group_by_variant(reviews),
         qa=[],
+        review_total=str(rt) if rt else None,
+        favorable_rate=str(fr) if fr else None,
         scraped_at=datetime.now(timezone.utc).isoformat(),
         subsidy_caveat=extract_subsidy_caveat(res),
     )
@@ -465,3 +468,103 @@ async def parse_product(
             product.reviews_by_variant = group_by_variant(reviews)
 
     return product
+
+
+def _unit_price(v) -> float | None:
+    """Pure: 型号标签含 'N个装' 时算每件单价(共享 helper, 防漂移)."""
+    from src.extract.units import unit_price_from_label
+
+    return unit_price_from_label("; ".join((v.properties or {}).values()), v.price)
+
+
+def _product_markdown(p) -> str:
+    """Pure: 把 Product 渲染成可读 markdown(标题/店铺/价区间 + 全部型号价表).
+
+    买家一屏看全所有型号价格/库存, 比 JSON 直观。只读数据渲染, 不发消息。
+    """
+    lines = [f"### {p.title or ''}", ""]
+    meta = []
+    if p.shop_name:
+        meta.append(f"店铺: {p.shop_name}")
+    if p.price_range:
+        lo, hi = p.price_range
+        meta.append(f"价区间: ¥{lo:g}–¥{hi:g}" if hi != lo else f"价: ¥{lo:g}")
+    meta.append(f"型号数: {len(p.variants)}")
+    rt = getattr(p, "review_total", None)
+    fr = getattr(p, "favorable_rate", None)
+    if rt:
+        meta.append(f"总评价: {rt}" + (f" ({fr})" if fr else ""))
+    elif p.reviews:
+        meta.append(f"评论: {len(p.reviews)} 条")
+    lines.append(" | ".join(meta))
+    if p.subsidy_caveat:
+        lines.append(f"⚠️ 补贴提示: {p.subsidy_caveat}")
+    # 参数表(材质/尺寸/密封等) — 买家不翻 JSON 直接看关键规格
+    specs = getattr(p, "specs", None) or {}
+    if specs:
+        lines.append("")
+        lines.append("| 参数 | 值 |\n|---|---|")
+        for k, v in list(specs.items())[:15]:
+            lines.append(f"| {k} | {str(v)[:40]} |")
+    # 最便宜有货型号高亮 + Top3(买家一屏看到最优选择)
+    avail = [v for v in p.variants if v.available and v.price is not None]
+    if avail:
+        best = min(avail, key=lambda v: v.price)
+        bl = "; ".join(f"{k}:{val}" for k, val in (best.properties or {}).items())
+        lines.append(f"🟢 最便宜有货: {bl or '-'} → ¥{best.price:g}")
+        top = sorted(avail, key=lambda v: v.price)[:3]
+        lines.append("💰 最便宜有货 Top3:")
+        for v in top:
+            tl = "; ".join(f"{k}:{val}" for k, val in (v.properties or {}).items())
+            lines.append(f"- {tl or '-'} → ¥{v.price:g}")
+    lines.append("")
+    if p.variants:
+        lines.append("| 型号 | 价格¥ | 单价¥ | 库存 | 有货 |\n|---|---|---|---|---|")
+        for v in p.variants[:200]:
+            props = "; ".join(f"{k}:{val}" for k, val in (v.properties or {}).items())
+            price = f"{v.price:g}" if v.price is not None else "-"
+            unit = _unit_price(v)
+            unit_cell = f"{unit:.2f}" if unit is not None else "-"
+            stock = v.stock if v.stock is not None else "-"
+            ok = "✓" if v.available else "✗"
+            lines.append(f"| {props or '-'} | {price} | {unit_cell} | {stock} | {ok} |")
+        if len(p.variants) > 200:
+            lines.append(f"| … 共 {len(p.variants)} 个型号(前 200 显示) |")
+    return "\n".join(lines)
+
+
+async def export_product_markdown(product_url_or_id: str, filename: str = "", title: str = "",
+                                   with_reviews: bool = False,
+                                   out_dir: str | None = None) -> dict:
+    """只读: 抓单个商品并渲染成 markdown 落盘 output/product_<pid>.md(买家留档单商品全貌).
+
+    复用 parse_product(只读浏览) + _product_markdown; 返回 {path, product_id, markdown}。
+    filename 可选(自定义文件名, 默认 product_<pid>_<ts>.md); title 可选(自定义标题);
+    with_reviews=True 时追加嵌入式评论(如有)。
+    """
+    from datetime import datetime, timezone
+    from pathlib import Path
+
+    from src.config import load_config
+
+    pid = _to_product_id(product_url_or_id)
+    p = await parse_product(pid)
+    md = _product_markdown(p)
+    if with_reviews:
+        revs = list(getattr(p, "reviews", None) or [])
+        if revs:
+            md += "\n\n## 评论(嵌入式, 有限)\n\n"
+            for r in revs:
+                sku = getattr(r, "sku_bought", "") or ""
+                md += f"- {getattr(r, 'date', '') or ''} · {(r.text or '')[:80]}\n"
+                if sku:
+                    md += f"  (购 {sku[:40]})\n"
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    out_dir = Path(out_dir) if out_dir else Path(load_config().output.dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / (filename or f"product_{pid}_{ts}.md")
+    head = f"> 导出时间: {ts}"
+    if title:
+        head += f" — {title}"
+    path.write_text(head + "\n\n" + md + "\n", encoding="utf-8")
+    return {"path": str(path), "product_id": pid, "markdown": head + "\n\n" + md}

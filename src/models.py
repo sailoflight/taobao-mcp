@@ -57,6 +57,8 @@ class Product(BaseModel):
     qa: list[QAPair] = Field(default_factory=list)
     scraped_at: str
     subsidy_caveat: str | None = None   # set when the live "平台加补后" price differs from 优惠前
+    review_total: str | None = None     # 页面声明的总评价数(如 "2000+"), 非实际抓取条数
+    favorable_rate: str | None = None   # 好评率文本(如 "98%"), 信任信号
 
 
 class SearchResult(BaseModel):
