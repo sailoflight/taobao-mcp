@@ -374,37 +374,30 @@ async def taobao_send_reply(seller: str, message: str, confirm: bool = False) ->
 @mcp.tool(annotations=ToolAnnotations(
     readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True
 ))
-async def taobao_full_picture(seller: str | None = None, order_id: str | None = None) -> list[VendorDossier]:
-    """The 'full picture' — joins your cart + orders (+ tracking/取件码) + seller chats by vendor.
+async def taobao_dossier(
+    action: str = "view",        # view
+    seller: str | None = None,
+    order_id: str | None = None,
+    format: str = "md",          # view 时: md | json
+) -> list[VendorDossier] | str:
+    """店铺档案(一个工具 + action 参数)。view 按店铺聚合 购物车+订单(物流/取件码)+旺旺会话.
 
-    Three modes from one tool: `seller` → that vendor's dossier (cart + orders + thread);
-    `order_id` → that order joined to its tracking + the vendor's thread; neither → an overview
-    of every linked vendor. Read-only; IM threads that can't be confidently matched are flagged
-    `unlinked`, never guessed. Example: {"seller": "好管家旗舰店"} or {"order_id": "3309..."}
+    seller → 该店档案; order_id → 该订单关联跟踪+会话; 都不给 → 全部已关联店铺概览。
+    只读; 无法置信匹配的会话标记 unlinked, 绝不猜测。
+    format=md(默认)可读档案; format=json 结构化。导出 md 文件请用 taobao_export(type=dossier)。
+    Example: {"seller": "好管家旗舰店"} / {"order_id": "3309..."}
     """
     if await ensure_logged_in() != "logged_in":
         raise NotLoggedInError()
     await _rate_limiter.acquire()
-    return await full_picture(seller=seller, order_id=order_id)
+    dossiers = await full_picture(seller=seller, order_id=order_id)
+    if str(format).strip().lower() == "json":
+        return dossiers
+    from src.extract.linker import render_dossier
 
-
-@mcp.tool(annotations=ToolAnnotations(
-    readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True
-))
-async def taobao_export_full_picture(seller: str | None = None, order_id: str | None = None,
-                                     filename: str = "", title: str = "") -> str:
-    """把店铺档案(购物车+订单物流+消息)导出为 md 文件(output/dossier_<seller>.md) — 买家留档.
-
-    只读浏览(复用 full_picture) + 落盘本地 md。seller/order_id 同 full_picture; filename/title 可选。
-    Example: {"seller": "天鼠家居旗舰店", "title": "天鼠档案"}
-    """
-    if await ensure_logged_in() != "logged_in":
-        raise NotLoggedInError()
-    await _rate_limiter.acquire()
-    from src.extract.linker import export_dossier_markdown
-
-    res = await export_dossier_markdown(seller=seller, order_id=order_id, filename=filename, title=title)
-    return f"已导出店铺档案到 {res['path']} ({res['count']} 个档案)\n\n{res['markdown']}"
+    body = "\n\n".join(render_dossier(d) for d in dossiers) if dossiers else "(无档案)"
+    return body + "\n\n<details><summary>JSON 明细</summary>\n\n```json\n" + \
+        json.dumps([d.model_dump() for d in dossiers], ensure_ascii=False, indent=2) + "\n```\n</details>"
 
 
 @mcp.tool(annotations=ToolAnnotations(
