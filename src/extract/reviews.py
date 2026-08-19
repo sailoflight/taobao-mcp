@@ -174,6 +174,7 @@ async def parse_reviews(
     max_reviews: int | None = None,
     include_default: bool = False,
     keyword: str = "",
+    page=None,
 ) -> list[Review]:
     """Live: open the product, open the "查看全部评价" drawer, paginate it, extract.
 
@@ -181,6 +182,10 @@ async def parse_reviews(
     container to lazily load the written reviews, dedupes across the page's two date
     formats, and (by default) drops auto-generated "default good review" boilerplate
     so only genuine written reviews remain.
+
+    page: 传入已在正确页面的 Page 时就地抽取(不新开页)。实证: Tmall 评论只在本收藏链路
+    (mi_id 个性化详情页)渲染 — 普通 SSR 页 rateContent=0、无评论卡; 细查(fine)把 miid
+    弹窗页传给本函数即可。miid 每次经收藏→点击收藏卡 新建, 用完即关, 不存在可复用 URL。
     """
     from src.browser.pacing import human_delay, human_scroll
     from src.browser.session import get_session
@@ -191,10 +196,11 @@ async def parse_reviews(
     cap = max_reviews if max_reviews is not None else cfg.limits.max_reviews
     pid = _to_product_id(product_url_or_id)
 
-    session = get_session()
-    page = await session.start()
-    await page.goto(f"https://item.taobao.com/item.htm?id={pid}", wait_until="domcontentloaded")
-    await session.guard_captcha(page)
+    if page is None:
+        session = get_session()
+        page = await session.start()
+        await page.goto(f"https://item.taobao.com/item.htm?id={pid}", wait_until="domcontentloaded")
+        await session.guard_captcha(page)
 
     # Scroll to the reviews and open the "view all" drawer.
     for _ in range(5):
@@ -244,18 +250,21 @@ async def parse_reviews_stratified(
     keyword: str = "",
     only_with_images: bool = False,
     most_recent_first: bool = True,
+    page=None,
 ) -> list[Review]:
     """Live: 抓评论后做 好/中/差评 分层抽样(防注入好评), 供 taobao_product with_reviews.
 
     先按 max_reviews*3 抓原始池(保证每层有足够样本), 再 stratified_reviews 摊开到 max_reviews。
-    抽屉抓取返回空(Tmall 站点漂移)时回退到 fetch_product 嵌入式预览评论 + keyword 过滤。
+    page 传已在正确页面(mi_id 详情页)的 Page 时就地抽取 — Tmall 评论只在该页渲染;
+    None 则开普通页(SSR 无评论, 会落到嵌入式回退)。抽屉抓取为空时回退嵌入式预览评论。
     """
     from src.extract.reviews import parse_reviews as _pr
 
     cap = max(3, int(max_reviews or 12) * 3)
     try:
         raw = await _pr(product_url_or_id, only_with_images=only_with_images,
-                        most_recent_first=most_recent_first, max_reviews=cap, keyword=keyword)
+                        most_recent_first=most_recent_first, max_reviews=cap, keyword=keyword,
+                        page=page)
     except Exception:
         raw = []
     if raw:
@@ -273,3 +282,100 @@ async def parse_reviews_stratified(
         return stratified_reviews(embedded, max_total=max_reviews)
     except Exception:
         return []
+
+
+async def probe_reviews_rendering(product_url_or_id: str) -> dict:
+    """[DEBUG] 实证 Tmall 评论是否渲染: 分别探测 普通页 与 收藏链路(mi_id 弹窗页).
+
+    回答"评论抽屉/评论卡在哪类页面出现", 以决定 with_reviews 的正确抓取路径。
+    收藏链路每次经 收藏→点击收藏卡 新建弹窗页(新鲜 mi_id), 用完即关 — 不存在可复用 miid。
+    """
+    from src.browser.pacing import human_delay, human_scroll
+    from src.browser.session import get_session
+    from src.extract.favorite import click_from_favorites, ensure_favorited, ensure_unfavorited
+    from src.extract.fav_quota import check_and_record
+    from src.extract.product import _to_product_id
+    from src.extract.selectors import DRAWER_SELECTOR
+
+    pid = _to_product_id(product_url_or_id)
+    session = get_session()
+    page = await session.start()
+
+    def evidence(url_label: str, html: str) -> dict:
+        return {
+            "url_label": url_label,
+            "html_len": len(html),
+            "n_评价": html.count("评价"),
+            "n_rateContent": html.count("rateContent"),
+            "n_查看全部评价": html.count("查看全部评价"),
+            "n_Comment_class": html.count('class*="Comment'),
+        }
+
+    out: dict = {"product_id": pid, "pages": {}}
+
+    # --- 普通页(非 miid) ---
+    await page.goto(f"https://item.taobao.com/item.htm?id={pid}", wait_until="domcontentloaded")
+    await session.guard_captcha(page)
+    for _ in range(3):
+        await human_scroll(page, 3)
+        await human_delay(0.8, 1.5)
+    out["pages"]["plain"] = evidence("plain", await page.content())
+
+    # --- 收藏链路 mi_id 弹窗页 ---
+    entry = {"added_by_us": False}
+    try:
+        quota = check_and_record()
+        out["fav_quota"] = quota
+        if quota.get("allowed"):
+            fav = await ensure_favorited(page, pid)
+            entry["added_by_us"] = bool(fav.get("added_by_us"))
+            res = await click_from_favorites(page, pid, added_by_us=entry["added_by_us"])
+            popup = res.get("popup")
+            if popup and res.get("mi_id"):
+                out["mi_id"] = res["mi_id"]
+                out["clicked_url"] = res["url"]
+                await human_delay(2.0, 3.2)
+                out["pages"]["miid"] = evidence("miid_popup", await popup.content())
+                drawer_info: dict = {"clicked": False, "comment_cards": 0, "extracted": 0}
+                try:
+                    for _ in range(5):
+                        await human_scroll(popup, 2)
+                        await human_delay(0.8, 1.2)
+                    for label in VIEW_ALL_LABELS:
+                        loc = popup.get_by_text(label, exact=False).first
+                        if await loc.count() > 0:
+                            await loc.scroll_into_view_if_needed(timeout=3000)
+                            await loc.click(timeout=3000)
+                            drawer_info["clicked"] = True
+                            break
+                    await human_delay(2.0, 3.0)
+                    drawer_info["comment_cards"] = await popup.locator('[class*="Comment--"]').count()
+                    drawer_info["drawer_present"] = await popup.locator(DRAWER_SELECTOR).count() > 0
+                    extracted = await popup.evaluate(_EXTRACT_JS)
+                    drawer_info["extracted"] = len(extracted or [])
+                    drawer_info["sample"] = [(r.get("text") or "")[:40] for r in (extracted or [])[:3]]
+                    try:
+                        first = popup.locator('[class*="Comment--"]').first
+                        drawer_info["first_card_html"] = (await first.evaluate("el => el.outerHTML") or "")[:2000]
+                    except Exception:
+                        drawer_info["first_card_html"] = None
+                except Exception as exc:
+                    drawer_info["error"] = str(exc)[:120]
+                out["drawer_on_miid"] = drawer_info
+                try:
+                    await popup.close()
+                except Exception:
+                    pass
+            else:
+                out["click_fail_reason"] = res.get("reason")
+        else:
+            out["fav_quota_blocked"] = True
+    except Exception as exc:
+        out["fav_flow_error"] = str(exc)[:200]
+    finally:
+        if entry.get("added_by_us"):
+            try:
+                await ensure_unfavorited(page, pid)
+            except Exception:
+                pass
+    return out

@@ -208,9 +208,11 @@ async def taobao_product(
     if str(mode).strip().lower() == "fine":
         # C 细查: 收藏线路(mi_id 内建) — 由本工具自行使用, 不暴露独立取 mi_id 工具
         from src.extract.desc import fetch_detail, save_detail_images
-        from src.extract.reviews import parse_reviews_stratified
 
-        detail = await fetch_detail(product_url_or_id, miid_source="favorite")
+        # with_reviews 在 mi_id 详情页就地抽取(评论+问答只在该页渲染); 关闭弹窗前一次完成
+        detail = await fetch_detail(product_url_or_id, miid_source="favorite",
+                                    with_reviews=with_reviews, reviews_max=reviews_max,
+                                    reviews_keyword=reviews_keyword)
         out = {
             "mode": "fine",
             "product_id": p.product_id,
@@ -223,8 +225,8 @@ async def taobao_product(
             "detail": detail,
         }
         if with_reviews:
-            out["reviews"] = [r.model_dump() for r in await parse_reviews_stratified(
-                product_url_or_id, max_reviews=reviews_max, keyword=reviews_keyword)]
+            out["reviews"] = list((detail or {}).get("reviews") or [])
+            out["qa"] = list((detail or {}).get("qa") or [])
         if save_images:
             out["saved_images"] = await save_detail_images(product_url_or_id)
         elif with_images:
@@ -524,11 +526,12 @@ async def taobao_debug(
 ) -> str:
     """调试诊断(一个工具 + action 参数, [DEBUG] 只读/观测用, 不改变账号状态).
 
-    参数: action(必填)=detail|sku_structure|sweep_price|miid_price|home|collect|favorite|watch|activity ·
-      product_url_or_id(detail/sku_structure/sweep_price/miid_price/favorite 时) · target(sku_structure 目标芯片) ·
+    参数: action(必填)=detail|sku_structure|sweep_price|miid_price|home|collect|favorite|watch|activity|probe_reviews ·
+      product_url_or_id(detail/sku_structure/sweep_price/miid_price/favorite/probe_reviews 时) · target(sku_structure 目标芯片) ·
       target_chip(miid_price 目标变体) · max_chips(sweep_price 扫描上限) · target_pid(collect 可选) ·
       watch_seconds/start_url(watch 监听器: 人工操作时记录多页/tab URL+mi_id) · limit/days(activity: 事件数/范围 None全部 0今天 1近2天)。
-    [DEBUG] 仅诊断/观测; 收藏链路调试会收藏再取消(无残留)。Example: {"action": "activity"} / {"action": "watch", "watch_seconds": 60} / {"action": "miid_price", "product_url_or_id": "862892097837"}
+    probe_reviews: 实证评论渲染 — 分别探测 普通页 vs 收藏链路 mi_id 弹窗页 是否渲染评论区(诊断评论抓取路径)。
+    [DEBUG] 仅诊断/观测; 收藏链路调试会收藏再取消(无残留)。Example: {"action": "activity"} / {"action": "probe_reviews", "product_url_or_id": "862892097837"} / {"action": "miid_price", "product_url_or_id": "862892097837"}
     """
     if await ensure_logged_in() != "logged_in":
         raise NotLoggedInError()
@@ -601,8 +604,14 @@ async def taobao_debug(
         return md + "\n\n<details><summary>JSON 明细</summary>\n\n```json\n" + \
             json.dumps(data, ensure_ascii=False, indent=2) + "\n```\n</details>"
 
+    if act == "probe_reviews":
+        from src.extract.reviews import probe_reviews_rendering
+
+        return json.dumps(await probe_reviews_rendering(product_url_or_id),
+                          ensure_ascii=False, indent=2)
+
     return (f"未知 action={action}; 支持 detail/sku_structure/sweep_price/miid_price/"
-            "home/collect/favorite/watch/activity")
+            "home/collect/favorite/watch/activity/probe_reviews")
 
 
 @mcp.tool(annotations=ToolAnnotations(

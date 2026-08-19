@@ -494,13 +494,18 @@ async def sweep_variant_prices(product_url_or_id: str, max_chips: int = 12) -> d
     return out
 
 
-async def fetch_detail(product_url_or_id: str, miid_source: str = "config") -> dict:
+async def fetch_detail(product_url_or_id: str, miid_source: str = "config",
+                       with_reviews: bool = False, reviews_max: int = 12,
+                       reviews_keyword: str = "") -> dict:
     """Fetch the full 详情 (图文详情) image strip for one product.
 
     TWO-PHASE WORKFLOW (query separation, user-designed): 粗查定位 uses
     taobao_search + taobao_fetch_product (NEVER favorites, never regenerates mi_id);
     细查对比 uses this tool with miid_source="favorite" ONLY on shortlisted products.
 
+    with_reviews: 在 mi_id 详情页就地抽取评论(好/中/差分层抽样) — Tmall 评论只在
+    该页渲染(普通 SSR 页无评论卡); mi_id 每次经收藏点击新建、用完即关(无复用 URL),
+    故评论/问答必须在关闭弹窗前一次抽取。QA(问大家)在 true mi_id 上下文下总是顺带抽取。
     miid_source="config" (DEFAULT — safe, no favorite): uses the static mi_id. Use it
     for a quick look during 粗查 without touching favorites.
     miid_source="favorite" (LOW-RISK, fine-compare, CLAUDE.md §7 paced):
@@ -614,6 +619,28 @@ async def fetch_detail(product_url_or_id: str, miid_source: str = "config") -> d
         except Exception:
             pass
 
+    # On-page 评论/问答 (Tmall 只在 mi_id 详情页渲染): 关闭弹窗前就地一次抽取。
+    # mi_id 每次经收藏点击新建、用完即关, 不存在可复用 URL — 所以必须在这里取。
+    reviews_extra: list = []
+    qa_extra: list = []
+    if harvest_page is not None and harvest_page.url and "item.htm" in harvest_page.url:
+        try:
+            if with_reviews:
+                from src.extract.reviews import parse_reviews_stratified
+
+                revs = await parse_reviews_stratified(pid, max_reviews=reviews_max,
+                                                      keyword=reviews_keyword, page=harvest_page)
+                reviews_extra = [r.model_dump() for r in revs]
+        except Exception as exc:
+            reviews_extra = [{"error": str(exc)[:120]}]
+        if miid_source == "favorite" and not entry.get("favorite_fallback"):
+            try:
+                from src.extract.qa import parse_qa
+
+                qa_extra = [q.model_dump() for q in await parse_qa(pid, page=harvest_page)]
+            except Exception as exc:
+                qa_extra = [{"error": str(exc)[:120]}]
+
     # Cleanup (user rule): if WE favorited it this round, un-favorite — no residue.
     if miid_source == "favorite" and entry.get("added_by_us"):
         try:
@@ -640,6 +667,8 @@ async def fetch_detail(product_url_or_id: str, miid_source: str = "config") -> d
         "panel_found": harvest.get("panelFound"),
         "count": len(normalized),
         "detail_images": normalized,
+        "reviews": reviews_extra if with_reviews else None,
+        "qa": qa_extra,
         # Signal to the caller: mi_id is stale/expired → the favorite flow regenerates one.
         "miid_stale": stale,
         "caveat": (None if not stale else
