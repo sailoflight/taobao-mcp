@@ -1498,3 +1498,8 @@ Our deliverables: (i) a price for **every** SKU via `skuBase`/`sku2info` join; (
   标准滑块(.nc-container/.nc_iconfont/.baxia-dialog)。
 - 有界重试(2次×滚动+加载态轮询+1次重载, ~15-30s)减少无谓 fallback。
 - 提交: 83b4f64(guard_captcha+有界重试) / c6d0c37(qa标签收紧)。
+
+### guard_captcha 交接逻辑(2026-08-19, 用户指正+要求提醒)
+- 顺序: 软'访问太频繁'弹窗先自动点X → 仍阻塞(滑块/惩罚)先试点对话框X(用户确认可点X关闭, 仅关闭不自动滑) → 仍阻塞才 human_action_required 交接。
+- 提醒: _alert_human = page.bring_to_front 前置 + Windows PowerShell FlashWindow/SetForegroundWindow 任务栏闪烁 msedge/chrome(尽力而为, 每轮询重复直到清除)。
+- 绝不自动滑滑块(§7.4)。有界等待 captcha_timeout_s(默认300s), 超时 CaptchaError。
