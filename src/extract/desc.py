@@ -652,9 +652,17 @@ async def fetch_detail(product_url_or_id: str, miid_source: str = "config",
 
     # On-page 评论/问答 (Tmall 只在 mi_id 详情页渲染): 关闭弹窗前就地一次抽取。
     # mi_id 每次经 足迹/收藏 点击新建、用完即关, 不存在可复用 URL — 所以必须在这里取。
+    # 先问答后评论: 问答抽屉("查看全部问答")需页面无其它抽屉遮挡; 评论抽屉最后开。
     reviews_extra: list = []
     qa_extra: list = []
     if harvest_page is not None and harvest_page.url and "item.htm" in harvest_page.url:
+        if entry.get("miid_from") in ("footmark_click", "favorite_click"):
+            try:
+                from src.extract.qa import parse_qa
+
+                qa_extra = [q.model_dump() for q in await parse_qa(pid, page=harvest_page)]
+            except Exception as exc:
+                qa_extra = [{"error": str(exc)[:120]}]
         try:
             if with_reviews:
                 from src.extract.reviews import parse_reviews_stratified
@@ -664,13 +672,6 @@ async def fetch_detail(product_url_or_id: str, miid_source: str = "config",
                 reviews_extra = [r.model_dump() for r in revs]
         except Exception as exc:
             reviews_extra = [{"error": str(exc)[:120]}]
-        if entry.get("miid_from") in ("footmark_click", "favorite_click"):
-            try:
-                from src.extract.qa import parse_qa
-
-                qa_extra = [q.model_dump() for q in await parse_qa(pid, page=harvest_page)]
-            except Exception as exc:
-                qa_extra = [{"error": str(exc)[:120]}]
 
     # Cleanup (user rule): if WE favorited it this round, un-favorite — no residue.
     if entry.get("added_by_us"):
