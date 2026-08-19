@@ -21,9 +21,33 @@ speed.
 
 **Companion files (same directory as this playbook):** if `sourcing_profile.md`
 exists, read it before ranking deals (it is local-only and may intentionally be
-absent). Read `supplier_templates.md` when drafting seller messages (§8). Never
-upload, publish, attach, or otherwise transmit anything under the plugin's
-`user_data/` directory; it contains the buyer's local browser profile and session.
+absent). Read `supplier_templates.md` when drafting seller messages (§8). Read
+`experience.md` (field-experience library) whenever the situation matches one of
+the keyword entries below — it encodes hard-won patterns (size-in-image, label
+premium, reusable-vs-disposable, SKU-image extraction, ad-hoc OCR) so you don't
+re-derive them. Never upload, publish, attach, or otherwise transmit anything under
+the plugin's `user_data/` directory; it contains the buyer's local browser profile
+and session.
+
+## Experience library (search these first — see `experience.md`)
+When a deal shows one of these signs, stop and consult the matching entry before
+acting; the entries give the通用套路 to apply:
+- **尺寸藏在图里** / `size-in-image` — SKU only has 档位名 (小/中/大/特大号), no cm in text;
+  the size chart lives in the **SKU option thumbnail**, not the desc long-strip → E1.
+- **专用标签溢价** / `label-premium` — "XX专用/3D打印" tagged item is pricier than an identical
+  generic/food-grade one; search the generic keyword as a control → E2.
+- **可复用还是消耗品** / `reusable-vs-disposable` — listing claims 可重复使用; verify via
+  buyer Q&A (never the listing copy) → E3.
+- **套装 vs 单买 / 口径匹配** / `bundle-vs-alacarte` — bag+pump set vs separate purchase;
+  valve-port matching risk on standalone pumps → E4.
+- **提取 SKU 选项图** / `valueItemImg` / `gw.alicdn.com` / `_.webp` — how to get each
+  variant's option image (debug sku_structure → strip `_.webp`) → E5.
+- **临时 OCR 读图内文字** / `tesseract` — read size text out of an image with the installed
+  Tesseract when a formal OCR plan is deferred → E6.
+- **尺寸写进 SKU 优先** / `explicit-size-priority` — prefer listings whose SKU text states cm
+  directly (zero OCR, zero guess) → E7.
+- **同款跨店比价** / same spec, same price across shops — compare QA reputation + 赠品, not just
+  price → E8.
 
 ## Hard rules (never break)
 - **Never log in for the human.** Login is a QR scan they do on their phone. If a
@@ -64,6 +88,9 @@ upload, publish, attach, or otherwise transmit anything under the plugin's
 - **Stop and wait for the human to choose** which to dig into. Never auto-fetch the
   whole page — that's both noisy (flag risk) and not their pick. Offer your read
   (best value / most trustworthy) but let them decide.
+- **If the buyer wants to avoid markup or needs a specific hidden spec** (尺寸/口径/材质),
+  search the generic/food-grade keyword as a control and consult `experience.md`
+  (`label-premium`, `size-in-image`, `explicit-size-priority`) — see the index above.
 
 ### 3. Deep-dive each chosen product
 - Call `taobao_product(url_or_id, mode="coarse")` (B粗查) → title, shop, **every SKU
