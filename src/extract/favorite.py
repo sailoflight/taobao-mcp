@@ -179,9 +179,11 @@ async def click_from_favorites(page, pid: str, added_by_us: bool = True) -> dict
     """
     from urllib.parse import parse_qs, urlparse
 
+    from src.browser.session import guard_captcha
     from src.extract.miid import miid_from_url
 
     await page.goto(COLLECT_URL, wait_until="domcontentloaded")
+    await guard_captcha(page)  # 收藏页同样人工交接滑块/访问频繁
     # Event-driven: wait for the first goodsItem card instead of a fixed long sleep.
     first = page.locator('[class*="goodsItem"]').first
     try:
@@ -254,19 +256,48 @@ async def open_via_footmark(page, pid: str, title: str = "") -> dict:
     from urllib.parse import parse_qs, urlparse
 
     from src.browser.pacing import human_scroll
+    from src.browser.session import guard_captcha
     from src.extract.miid import miid_from_url
 
     await page.goto(FOOTMARK_URL, wait_until="domcontentloaded")
-    for _ in range(5):  # 商品足迹区懒加载 — 分段滚动触发
-        try:
-            await human_scroll(page, 2)
-        except Exception:
+    await guard_captcha(page)  # 足迹页也走滑块/访问频繁人工交接(用户可点X或滑动)
+    # 足迹商品卡懒加载不稳(今天偶发 "奋力加载中" 卡住, 用户手动浏览并发也扰动) —
+    # 有界重试: 分段滚动 + 加载态轮询 + 重载, 之后仍无卡才退收藏兜底。
+    # 开销有界(卡死时 ~2×15s), 避免拖慢 fallback; 非加载态无卡(空足迹)则不重试。
+    cards = None
+    n = 0
+    for attempt in range(2):
+        for _ in range(4):  # 分段滚动触发懒加载
+            try:
+                await human_scroll(page, 2)
+            except Exception:
+                break
+            await human_delay(0.8, 1.5)
+        # 加载态("奋力加载中")轮询等待卡片出现; 非加载态但仍无卡则不再等
+        for _ in range(4):
+            loc = page.locator('[class*="footerCard"]')
+            n = await loc.count()
+            if n > 0:
+                cards = loc
+                break
+            try:
+                loading = await page.evaluate("() => (document.body.innerText || '').includes('奋力加载中')")
+            except Exception:
+                loading = False
+            if not loading:
+                break
+            await human_delay(1.8, 2.5)
+        if cards is not None:
             break
-        await human_delay(0.8, 1.5)
-    cards = page.locator('[class*="footerCard"]')
-    n = await cards.count()
-    if n == 0:
-        return {"url": None, "reason": "no footmark product cards rendered",
+        if attempt == 0:  # 仅一次重载再试
+            try:
+                await page.reload(wait_until="domcontentloaded")
+                await guard_captcha(page)  # 重载后仍可能触发滑块, 继续人工交接
+                await human_delay(1.5, 2.5)
+            except Exception:
+                break
+    if cards is None or n == 0:
+        return {"url": None, "reason": "no footmark product cards rendered (after bounded retries)",
                 "channel": "footmark", "cards": 0}
     # 只认"真商品卡": 含 titleWrap + priceWrap 文本
     product_idx = -1
