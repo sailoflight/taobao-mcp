@@ -114,11 +114,15 @@ QA 是未过滤的真话来源,常直接回答耐用性、是否值得买。
 **触发场景**: 尺寸/规格只在图里,需要马上读出,但不值得为单次任务建正式 OCR 方案。
 
 **认知**: 项目明确"OCR 方案暂不构建"时,可用**系统现成工具**做一次性临时读取 —
-这不是新建能力,只是调用已有软件。Windows 部署侧常已装 Tesseract。
+这不是新建能力,只是调用已有软件。
+
+**当前 Windows 部署侧已装可用(已验证 2026-08-19)**:
+- 路径 `C:\Program Files\Tesseract-OCR\tesseract.exe`(WSL 侧可经 `/mnt/c/Program Files/Tesseract-OCR/tesseract.exe` 调用);
+- 含**中文语言包** `-l chi_sim`(已实测可读中文商品图);
+- 无需安装任何东西、无需联网,直接命令行调用即可 — 这就是"当前环境自带的现成工具"。
 
 **怎么做**:
-- Windows 有 Tesseract 时(如 `C:\Program Files\Tesseract-OCR\tesseract.exe`):
-  `tesseract 图.jpg stdout -l chi_sim --psm 11`(psm 11 = sparse text,适合海报式排版;psm 6 也行);
+- `tesseract 图.jpg stdout -l chi_sim --psm 11`(psm 11 = sparse text,适合海报式排版;psm 6 也行);
 - 中文用 `-l chi_sim`;数字/尺寸行用 `grep -E "[0-9]{2,3}\s*cm|[0-9]{2,3}[xX×]"` 过滤;
 - 图太大/字太小 → 放大 2-3x 再 OCR(注意:放大后有时反而更差,原图 + psm 11 优先);
 - OCR 噪声大是常态,读出数字后与常识交叉验证(如"中号 22cm > 小号 16cm"的递增关系)。
