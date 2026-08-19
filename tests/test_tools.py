@@ -82,6 +82,8 @@ def test_export_containment_write_xlsx():
     if target.exists():
         target.unlink()
     path = write_xlsx([product], "../audit_export_test.xlsx", out_dir=str(out_dir))
-    assert Path(path) == target, "export tool did not write the workbook into the output dir"
+    # write_xlsx returns the ABSOLUTE resolved path; compare resolved forms so the
+    # containment assertion holds on both native Windows and WSL-interop mounts.
+    assert Path(path).resolve() == target.resolve(), "export tool did not write the workbook into the output dir"
     assert not (out_dir.parent / "audit_export_test.xlsx").exists(), "traversal escaped the output dir!"
     target.unlink()

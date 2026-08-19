@@ -31,7 +31,7 @@ def _summarize_log(lines: list[str], max_events: int = 12, days: int | None = No
             continue
         by_level[level] = by_level.get(level, 0) + 1
         # 事件类型: 第一段冒号前/空格前(如 "search", "search diag", "QR", "fetch_reviews")
-        typ = re.split(r"[: ]", msg, 1)[0] or "?"
+        typ = re.split(r"[: ]", msg, maxsplit=1)[0] or "?"
         by_type[typ] = by_type.get(typ, 0) + 1
         events.append({"ts": ts, "level": level, "type": typ, "msg": msg[:140]})
     return {

@@ -18,8 +18,8 @@ def _results():
 def test_search_markdown_renders_rows():
     md = _search_markdown(_results(), keyword="密封收纳箱", max_rows=2)
     assert "### 搜索结果(2 个) — 密封收纳箱" in md
-    assert "| 28 | 1000 | 天鼠家居旗舰店 | 江苏 | 密封收纳箱 特大号 |" in md
-    assert "| - | - | B店 | 浙江 | 六卡扣收纳箱 |" in md
+    assert "| 28 | 1000 | 天鼠家居旗舰店 | 江苏 | [密封收纳箱 特大号](https://item.taobao.com/item.htm?id=1) |" in md
+    assert "| - | - | B店 | 浙江 | [六卡扣收纳箱](https://item.taobao.com/item.htm?id=2) |" in md
 
 
 def test_search_markdown_caps_rows():

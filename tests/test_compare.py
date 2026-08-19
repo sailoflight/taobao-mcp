@@ -13,7 +13,9 @@ def _product(**kw):
         title="天鼠收纳箱特厚超大家用密封塑料衣服棉被玩具杂物特硬储物箱",
         shop_name="天鼠家居旗舰店",
         price_range=(36.0, 274.75),
-        variants=[SimpleNamespace(price=36.0), SimpleNamespace(price=42.25), SimpleNamespace(price=54.75)],
+        variants=[SimpleNamespace(properties={}, price=36.0, stock=1, available=True),
+                  SimpleNamespace(properties={}, price=42.25, stock=1, available=True),
+                  SimpleNamespace(properties={}, price=54.75, stock=1, available=True)],
         reviews=[1, 2],
         subsidy_caveat=None,
         url="https://item.taobao.com/item.htm?id=862892097837",
@@ -38,7 +40,8 @@ def test_summarize_error_dict_passes_through():
 
 
 def test_summarize_dedupes_prices():
-    r = _summarize(_product(variants=[SimpleNamespace(price=36.0), SimpleNamespace(price=36.0)]))
+    r = _summarize(_product(variants=[SimpleNamespace(properties={}, price=36.0, stock=1, available=True),
+                                      SimpleNamespace(properties={}, price=36.0, stock=1, available=True)]))
     assert r["price_sample"] == [36.0]
 
 

@@ -29,10 +29,16 @@ def test_summarize_empty():
 
 
 def test_summarize_log_days_filter():
+    from datetime import date, timedelta
     from src.extract.activity import _summarize_log
-    lines = ["2026-08-18 10:00:00,123 INFO search kw=收纳箱",
-             "2026-08-17 09:00:00,123 INFO search kw=螺丝",
-             "2026-08-16 08:00:00,123 INFO QR login"]
+
+    today = date.today()
+    d0 = (today - timedelta(days=0)).isoformat()   # 今天
+    d1 = (today - timedelta(days=1)).isoformat()   # 昨天
+    d2 = (today - timedelta(days=2)).isoformat()   # 前天
+    lines = [f"{d0} 10:00:00,123 INFO search kw=收纳箱",
+             f"{d1} 09:00:00,123 INFO search kw=螺丝",
+             f"{d2} 08:00:00,123 INFO QR login"]
     assert _summarize_log(lines, days=None)["total"] == 3
     assert _summarize_log(lines, days=1)["total"] == 2
     assert _summarize_log(lines, days=0)["total"] == 1

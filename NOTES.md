@@ -1503,3 +1503,21 @@ Our deliverables: (i) a price for **every** SKU via `skuBase`/`sku2info` join; (
 - 顺序: 软'访问太频繁'弹窗先自动点X → 仍阻塞(滑块/惩罚)先试点对话框X(用户确认可点X关闭, 仅关闭不自动滑) → 仍阻塞才 human_action_required 交接。
 - 提醒: _alert_human = page.bring_to_front 前置 + Windows PowerShell FlashWindow/SetForegroundWindow 任务栏闪烁 msedge/chrome(尽力而为, 每轮询重复直到清除)。
 - 绝不自动滑滑块(§7.4)。有界等待 captcha_timeout_s(默认300s), 超时 CaptchaError。
+
+### 收官打磨 + 推送(2026-08-19, 用户指令"最后打磨bug,整理架构,然后git push")
+- 用 Windows venv(pytest 9.1.1)跑全量测试: **198 passed, 1 skipped**(此前 10 失败)。
+- **真实 bug 修复(2 个 MCP 注解)**: `taobao_message` 有 reply 发送写路径、`taobao_cart` 有
+  add/add_batch 写路径, 却都标 readOnlyHint=True → 改为 False(test_messages 断言 message 非只读,
+  cart 同理)。
+- **损坏/过时测试修复(8 个)**:
+  - test_compare: fixture 变体缺 `available`/`properties` → _summarize 崩(AttributeError)。
+  - test_activity: 日期写死 08-16/17/18 → 换成相对 date.today()(天鼠轮次后即失效)。
+  - test_cart_price / test_product_md: markdown 加了"单价¥"列后断言未更新。
+  - test_search_md: 标题改渲染成链接后断言未更新。
+  - test_search_filter: `SR(` typo → `_r(`(NameError)。
+  - test_tools: write_xlsx 返回绝对路径 vs 相对 target → 比较 resolve()(WSL 跨盘也稳)。
+- **架构/文档收口**: server.py 模块 docstring "12 tools"→"13 tools"; taobao_compare 补"参数:" 行;
+  taobao_debug action 注释/docstring/错误信息 三处补全 footmark/qa_expand; README debug 行同步;
+  activity.py `re.split(maxsplit=)` 去 DeprecationWarning。
+- 测试环境提示: 本机 python3 无 pytest/pydantic; 用 /mnt/c/MCP/taobao-mcp/.venv 的 Windows
+  python 跑(需 --basetemp=/tmp 避开 Windows Temp 权限)。198 passed 全绿。

@@ -68,7 +68,7 @@ def test_title_contains_combined_with_sales():
 
 def test_client_side_sort_reliable():
     from src.extract.search import filter_search_results
-    rs = [SR("a", 30, 50), SR("b", 10, 500), SR("c", None, 999), SR("d", 20, 100)]
+    rs = [_r("a", 30, 50), _r("b", 10, 500), _r("c", None, 999), _r("d", 20, 100)]
     assert [r.price for r in filter_search_results(rs, {"sort": 5})] == [10, 20, 30, None]
     assert [r.price for r in filter_search_results(rs, {"sort": 6})] == [30, 20, 10, None]
     assert [r.monthly_sales for r in filter_search_results(rs, {"sort": 2})] == [999, 500, 100, 50]

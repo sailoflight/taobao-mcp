@@ -23,8 +23,8 @@ def test_product_markdown_header_and_variants():
     md = _product_markdown(_product())
     assert "### 天鼠收纳箱 密封" in md
     assert "店铺: 天鼠家居旗舰店" in md and "¥36–¥54.75" in md and "型号数: 2" in md
-    assert "颜色:白; 规格:特大号 | 42.25 | 500 | ✓" in md
-    assert "颜色:白; 规格:超大号 | 54.75 | 0 | ✗" in md
+    assert "颜色:白; 规格:特大号 | 42.25 | - | 500 | ✓" in md
+    assert "颜色:白; 规格:超大号 | 54.75 | - | 0 | ✗" in md
 
 
 def test_product_markdown_subsidy_caveat():

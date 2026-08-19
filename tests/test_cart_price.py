@@ -162,7 +162,7 @@ def test_cart_markdown_renders_tables():
     md = _cart_markdown(data)
     assert "### 购物车(3 件)" in md
     assert "A店 | 2 | 33.75 | 1" in md
-    assert "天鼠收纳箱 | 特大号白色 | 33.75 | 42.25 | A店" in md
+    assert "天鼠收纳箱 | 特大号白色 | 33.75 | - | 42.25 | A店" in md  # 单价列(无"个装"→-)
 
 
 def test_cart_markdown_empty_items():
