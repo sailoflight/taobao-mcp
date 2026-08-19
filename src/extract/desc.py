@@ -746,12 +746,15 @@ async def recon_detail(product_url_or_id: str) -> dict:
     return evidence
 
 
-async def save_detail_images(product_url_or_id: str, output_dir: str = "", max_images: int = 60) -> dict:
+async def save_detail_images(product_url_or_id: str, output_dir: str = "", max_images: int = 60,
+                             detail: dict | None = None) -> dict:
     """细查后把详情长图下载到本地文件夹(买家离线查看; AI 模型读不了图, 人需要).
 
-    复用收藏链路(fetch_detail, miid_source='favorite')拿到带 mi_id 页的 .desc-root 详情图
+    收藏链路(fetch_detail, miid_source='favorite')拿到带 mi_id 页的 .desc-root 详情图
     URL, 再用浏览器会话上下文下载到 output/detail_imgs/<pid>/。只读浏览 + 落盘, 不收藏残留
     (fetch_detail 已 cleanup)、不发消息。WebP 图片, 浏览器/看图软件可直接打开。
+    detail: 传入本次 fine 调用已取得的 fetch_detail 结果(含 detail_images + 页面 URL 作
+    referer), 则**不再二次走收藏链路** — 一次 fine+save_images 只消耗一次 miid/收藏配额。
     """
     from pathlib import Path
 
@@ -759,14 +762,16 @@ async def save_detail_images(product_url_or_id: str, output_dir: str = "", max_i
     from src.extract.product import _to_product_id
 
     pid = _to_product_id(product_url_or_id)
-    result = await fetch_detail(pid, miid_source="favorite")
-    urls = result.get("detail_images") or []
+    if detail is None:
+        # 独立使用(未在 fine 调用中)时才自行走收藏链路
+        detail = await fetch_detail(pid, miid_source="favorite")
+    urls = detail.get("detail_images") or []
     out_dir = Path(output_dir or f"output/detail_imgs/{pid}")
     out_dir.mkdir(parents=True, exist_ok=True)
 
     session = get_session()
     page = await session.start()
-    referer = (result.get("url") or "")
+    referer = (detail.get("url") or "")
     saved: list[str] = []
     failures: list[str] = []
     for i, u in enumerate(urls[:max_images]):
@@ -788,5 +793,5 @@ async def save_detail_images(product_url_or_id: str, output_dir: str = "", max_i
         "dir": str(out_dir),
         "images": [str(out_dir / f) for f in saved],
         "failures": failures[:8],
-        "miid_stale": result.get("miid_stale"),
+        "miid_stale": detail.get("miid_stale"),
     }

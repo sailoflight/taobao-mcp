@@ -228,7 +228,7 @@ async def taobao_product(
             out["reviews"] = list((detail or {}).get("reviews") or [])
             out["qa"] = list((detail or {}).get("qa") or [])
         if save_images:
-            out["saved_images"] = await save_detail_images(product_url_or_id)
+            out["saved_images"] = await save_detail_images(product_url_or_id, detail=detail)
         elif with_images:
             out["detail_image_urls"] = list((detail or {}).get("detail_images") or [])
         return json.dumps(out, ensure_ascii=False, indent=2)
