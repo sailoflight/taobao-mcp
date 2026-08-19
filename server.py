@@ -12,7 +12,6 @@ from __future__ import annotations
 import json
 import os
 
-import anyio
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 from starlette.requests import Request
@@ -30,7 +29,6 @@ from src.extract.product import parse_product
 from src.extract.reviews import parse_reviews
 from src.extract.search import parse_search
 from src.models import Conversation, OrderStatus, Product, Review, SearchResult, VendorDossier
-from src.output.xlsx_writer import write_xlsx
 from src.public_auth import build_public_auth, load_public_auth_config
 
 
@@ -322,15 +320,108 @@ async def taobao_tracking(
 @mcp.tool(annotations=ToolAnnotations(
     readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False
 ))
-async def taobao_export_xlsx(products: list[Product], filename: str) -> str:
-    """Write a 3-sheet (summary/variants/reviews) comparison workbook; return its path.
+async def taobao_export(
+    type: str,                            # compare|cart|favorites|tracking|dossier|product
+    product_ids: list[str] | None = None, # compare 时: 商品ID/URL 短名单
+    product_url_or_id: str = "",          # product 时
+    filename: str = "",
+    title: str = "",
+    format: str = "md",                   # compare: md|xlsx; 其余 md
+    deep_price: bool = False,             # compare/product
+    max_items: int = 10,                  # compare
+    sort_by: str = "",                    # compare/favorites
+    with_variants: bool = False,          # compare: 追加全型号价表
+    min_review_total: int = 0,            # compare: 过滤低评价
+    limit: int = 30,                      # favorites
+    exclude_unavailable: bool = False,    # cart
+    only_active: bool = True,             # tracking
+    max: int = 12,                        # tracking
+    seller: str = "",                     # dossier
+    order_id: str = "",                   # dossier
+    with_reviews: bool = False,           # product
+) -> str:
+    """通用导出(一个工具 + type 参数): 把各域结果导出为 md/xlsx 文件(output/)留档/交接代购.
 
-    Example: {"products": [...], "filename": "p100_compare.xlsx"}
+    type=compare|cart|favorites|tracking|dossier|product; format=md(默认)|xlsx(仅 compare)。
+    只读浏览 + 落盘本地文件(gitignored); 不写入购物车/收藏, 不发消息。
+    - compare: product_ids 必填; sort_by/min_review_total/max_items/with_variants/title; format=xlsx 出电子表。
+    - product: product_url_or_id 必填; with_reviews 含嵌入式评论; title 自定义标题。
+    - tracking: 读今日缓存(零流量)否则每日一次抓取(限速); 含取件码📦摘要。
+    - cart/favorites/dossier: 可选 filename/title。
+    ⚠️ 本部署环境 .xlsx 会被外部机制约 12 秒后加密成 %TSD-Header blob, 无法使用 — 留档请用 md。
+    Example: {"type": "compare", "product_ids": ["862892097837"], "title": "收纳箱对比"} / {"type": "tracking", "title": "今日物流"} / {"type": "product", "product_url_or_id": "862892097837", "with_reviews": true}
     """
-    path = await anyio.to_thread.run_sync(write_xlsx, products, filename)  # don't block the loop
-    return (f"Wrote {len(products)} product(s) to {path} — sheets: Summary, Variants, Reviews.\n"
-            "⚠️ 注意: 本部署环境 .xlsx 文件会被外部机制约 12 秒后加密成 %TSD-Header blob, "
-            "无法使用; 如需留档请用 taobao_export_compare(md) 或导出后立即复制.")
+    if await ensure_logged_in() != "logged_in":
+        raise NotLoggedInError()
+    await _rate_limiter.acquire()
+    typ = str(type).strip().lower()
+
+    if typ == "compare":
+        from src.extract.compare import export_compare_markdown, export_compare_xlsx
+
+        if str(format).strip().lower() == "xlsx":
+            res = await export_compare_xlsx(product_ids or [], deep_price=deep_price,
+                                            max_items=max_items, sort_by=sort_by,
+                                            min_review_total=min_review_total, filename=filename)
+            return (f"已导出对比 xlsx 到 {res['path']} ({res['count']} 件)\n"
+                    "⚠️ 本环境 .xlsx 约12秒后被外部加密成 %TSD-Header blob, 无法使用 — 留档请用 format=md.")
+        res = await export_compare_markdown(product_ids or [], deep_price=deep_price,
+                                            max_items=max_items, sort_by=sort_by,
+                                            with_variants=with_variants,
+                                            min_review_total=min_review_total, title=title)
+        return f"已导出对比到 {res['path']} ({res['count']} 件)\n\n{res['markdown']}"
+
+    if typ == "cart":
+        from src.extract.cart_price import export_cart_markdown
+
+        res = await export_cart_markdown(max_items=max_items, exclude_unavailable=exclude_unavailable,
+                                         filename=filename, title=title)
+        return f"已导出采购清单到 {res['path']} ({res['count']} 件)\n\n{res['markdown']}"
+
+    if typ == "favorites":
+        from src.extract.favorite import export_favorites_markdown
+
+        res = await export_favorites_markdown(limit=limit, sort_by=sort_by, filename=filename, title=title)
+        return f"已导出候选清单到 {res['path']} ({res['count']} 个)\n\n{res['markdown']}"
+
+    if typ == "dossier":
+        from src.extract.linker import export_dossier_markdown
+
+        res = await export_dossier_markdown(seller=seller or None, order_id=order_id or None,
+                                            filename=filename, title=title)
+        return f"已导出店铺档案到 {res['path']} ({res['count']} 个档案)\n\n{res['markdown']}"
+
+    if typ == "product":
+        from src.extract.product import export_product_markdown
+
+        res = await export_product_markdown(product_url_or_id, filename=filename, title=title,
+                                            with_reviews=with_reviews)
+        return f"已导出商品记录到 {res['path']}\n\n{res['markdown']}"
+
+    if typ == "tracking":
+        from datetime import datetime, timezone
+        from pathlib import Path
+
+        from src.config import load_config
+        from src.extract.orders import _load_cached_today, _tracking_markdown, track_orders
+
+        cached = _load_cached_today()
+        if cached is not None:
+            orders = cached
+        else:
+            await _rate_limiter.acquire()  # 会实际抓取
+            orders = await track_orders(only_active=only_active, max_drill=max)
+        md = _tracking_markdown(orders)
+        ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        fname = filename or f"tracking_{ts}.md"
+        out_dir = Path(load_config().output.dir)
+        path = out_dir / fname
+        head = f"# {title or '今日物流'}  ({ts})\n\n"
+        path.write_text(head + md + "\n", encoding="utf-8")
+        return f"已导出物流摘要到 {path}\n\n{md}"
+
+    return (f"未知 type={type}; 支持 compare/cart/favorites/tracking/dossier/product。"
+            "留档用 md(xlsx 本环境会被外部加密).")
 
 
 @mcp.tool(annotations=ToolAnnotations(
@@ -735,27 +826,6 @@ async def taobao_activity_report(limit: int = 12, days: int | None = None) -> st
     md = "\n".join(head)
     return md + "\n\n<details><summary>JSON 明细</summary>\n\n```json\n" + \
         json.dumps(data, ensure_ascii=False, indent=2) + "\n```\n</details>"
-
-
-@mcp.tool(annotations=ToolAnnotations(
-    readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True
-))
-async def taobao_export_product(product_url_or_id: str, filename: str = "", title: str = "",
-                                 with_reviews: bool = False) -> str:
-    """抓单个商品并导出完整 markdown 记录(output/product_<pid>.md) — 买家留档单商品全貌.
-
-    只读浏览(复用 product_summary 的渲染) + 落盘本地 md。product_url_or_id 可传ID或完整URL。
-    filename 可选(自定义文件名); title 可选(自定义标题); with_reviews=True 时含嵌入式评论。
-    Example: {"product_url_or_id": "862892097837", "title": "天鼠收纳箱", "with_reviews": true}
-    """
-    if await ensure_logged_in() != "logged_in":
-        raise NotLoggedInError()
-    await _rate_limiter.acquire()
-    from src.extract.product import export_product_markdown
-
-    res = await export_product_markdown(product_url_or_id, filename=filename, title=title,
-                                        with_reviews=with_reviews)
-    return f"已导出商品记录到 {res['path']}\n\n{res['markdown']}"
 
 
 @mcp.tool(annotations=ToolAnnotations(
