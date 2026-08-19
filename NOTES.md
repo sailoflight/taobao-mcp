@@ -1427,3 +1427,14 @@ Our deliverables: (i) a price for **every** SKU via `skuBase`/`sku2info` join; (
 - 自 round111 起 s.taobao.com/search 的 captcha/punish 已解除(人工清除或站点停止惩罚)。
 - 新版搜索工具(方案A: 工具按 format 渲染 md)端到端验证通过: 价格/销量/店铺/位置/可点商品链接。
 - 首个结果即天鼠(id=862892097837, ¥28/6000销量, 购物车已有)。
+
+### Tmall 评论渲染机制定论(2026-08-19, 实证)
+- **评论只在收藏链路 mi_id 个性化详情页渲染**; 普通 SSR 页 rateContent=0、无评论卡。
+  探针实测: plain 页 n_评价=1/评论卡0 vs miid 弹窗页 n_查看全部评价=1/抽屉开/22 评论卡。
+- **mi_id 是一次性上下文**: 每次经 收藏→点击收藏卡 新建(新鲜 mi_id + spm 追踪), 用完即关,
+  刷新/重导航即退回普通页(评论/问答消失)。不存在可复用/可保持的 miid。
+- 推论: 评论+问答+详情必须在 miid 弹窗页关闭前**就地一次抽取**(fetch_detail 已实现 with_reviews+qa)。
+- miid 页评论卡含 已购型号(meta)可关联变体; **无星标元素** → 无星级, 分层抽样用 前/中/后 三段。
+- miid 页也有"问大家"条目 → parse_qa(page=...) 就地补齐 Product.qa。
+- 修复: 1f023a7 — parse_reviews/parse_qa 支持 page 就地抽取; fetch_detail 在 miid 页抽评论+问答。
+  实机: fine+with_reviews → 9 评论(8 带已购型号)+2 问答+23 详情图(此前仅 3 嵌入式好评)。
