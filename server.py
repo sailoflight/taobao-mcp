@@ -144,8 +144,10 @@ async def taobao_search(
     sort: int | None = None,
     title_contains: str | None = None,
     max_results: int = 30,
-) -> list[SearchResult]:
-    """Search Taobao for `keyword` and return the result list for the human to pick from.
+    format: str = "json",      # json(默认, 结构化) | md(可读表格)
+    headless: bool = True,     # A类查询: 仅搜索列表(标题+外部标价), 不点击进入商品详情(恒真语义)
+) -> list[SearchResult] | str:
+    """搜索淘宝并返回结果供挑选。查询类 A: 仅通过搜索框取标题+外部标价, 不点击进入商品。
 
     filters (optional, applied to the search URL + client-side):
       min_price / max_price — price band (e.g. {"min_price": 30, "max_price": 80})
@@ -156,8 +158,10 @@ async def taobao_search(
         (e.g. {"title_contains": "加固"})
     便捷: 也支持顶层 min_price/max_price/min_sales/max_sales/sort/title_contains(自动并入
     filters, 免去手写 dict 被静默忽略的坑)。max_results 截断结果数(默认 30, 上限 100)。
-    Note: the result list comes back as one text block per item (FastMCP); read them all.
-    Example: {"keyword": "密封收纳箱 特大号", "min_price": 30, "max_price": 80, "min_sales": 100, "sort": 5, "max_results": 20}
+    format=md 时返回可读 markdown 表(价格/销量/店铺/位置/标题), 一屏挑商品比 JSON 直观;
+    format=json(默认) 返回结构化列表(可复用 product_id 继续查询)。
+    headless=A 类语义标注(恒为列表页查询, 不进入详情; 需要进商品取全型号原价用 product mode=coarse)。
+    Note: json 格式结果按 FastMCP 一条文本一块返回, 请读全。Example: {"keyword": "密封收纳箱 特大号", "min_price": 30, "max_price": 80, "min_sales": 100, "sort": 5, "max_results": 20, "format": "md"}
     """
     f = dict(filters or {})
     for k, v in [("min_price", min_price), ("max_price", max_price),
@@ -167,40 +171,12 @@ async def taobao_search(
             f[k] = v
     await _rate_limiter.acquire()
     results = await parse_search(keyword, page_num=page, filters=f)
-    return results[: max(1, min(int(max_results or 30), 100))]
+    capped = results[: max(1, min(int(max_results or 30), 100))]
+    if str(format).strip().lower() == "md":
+        from src.extract.search import _search_markdown
 
-
-@mcp.tool(annotations=ToolAnnotations(
-    readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True
-))
-async def taobao_search_md(
-    keyword: str,
-    page: int = 1,
-    filters: dict | None = None,
-    min_price: float | None = None,
-    max_price: float | None = None,
-    min_sales: int | None = None,
-    max_sales: int | None = None,
-    sort: int | None = None,
-    title_contains: str | None = None,
-    max_results: int = 30,
-) -> str:
-    """搜索并返回可读 markdown 表(价格/销量/店铺/位置/标题), 一屏挑商品比 JSON 直观。
-
-    参数与 taobao_search 相同(顶层便捷参数自动并入 filters; max_results 截断)。
-    只读 — 不发消息。Example: {"keyword": "密封收纳箱 特大号", "min_price": 20, "max_price": 60, "max_results": 15}
-    """
-    f = dict(filters or {})
-    for k, v in [("min_price", min_price), ("max_price", max_price),
-                 ("min_sales", min_sales), ("max_sales", max_sales),
-                 ("sort", sort), ("title_contains", title_contains)]:
-        if v is not None:
-            f[k] = v
-    await _rate_limiter.acquire()
-    from src.extract.search import _search_markdown, parse_search
-
-    results = await parse_search(keyword, page_num=page, filters=f)
-    return _search_markdown(results, keyword=keyword, max_rows=max_results, page=page)
+        return _search_markdown(capped, keyword=keyword, max_rows=max_results, page=page)
+    return capped
 
 
 @mcp.tool(annotations=ToolAnnotations(
