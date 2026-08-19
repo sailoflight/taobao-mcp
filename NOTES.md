@@ -1474,3 +1474,9 @@ Our deliverables: (i) a price for **every** SKU via `skuBase`/`sku2info` join; (
 - 实机: fine+with_reviews → miid_from=footmark_click, 配额未耗, 9评论+2问答+23详情图。
 - 提交: c3ea43f(双机制) + 80cb3ba(探针问答结构)。
 - 遗留: 问答卡需展开才见多个回答("查看更多/查看全部问答"按钮 1 个) — 完整问答分页/展开未做, 需要时采集人工数据。
+
+### 双机制兜底路径验证(2026-08-19)
+- 用未浏览商品(好居乐 932185928162)测 auto 通道: 足迹点第一张(天鼠, 打开非目标 id=862892097837,
+  matches_target=false) → footmark_fallback=True → **退回收藏链路**(quota 8/30 耗1, fav added→cleanup removed 无残留)
+  → miid_from=favorite_click, 取到正确商品 miid 页: 9 评论(好居乐专属)+2 问答+22 详情图。
+- 结论: 双机制(足迹→收藏兜底)按用户设计全链路正确 — 足迹命中零配额, 不命中自动兜底收藏。
