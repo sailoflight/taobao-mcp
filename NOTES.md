@@ -1409,3 +1409,8 @@ Our deliverables: (i) a price for **every** SKU via `skuBase`/`sku2info` join; (
   compare(2dfc2b6) → cart(b5bde71) → favorites(93db993) → tracking(2d49e47) → dossier(bf71e33) →
   message(5243d5d) → inventory(1acca0a) → export(610149a) → debug(e87fa2c) → session(d562b80) →
   daily删除(2e93654) → 文档压缩(本提交)
+
+### 重构 Step 15(测试整合 + 最终审计)
+- 全量 py_compile 通过; **13 工具**(全在 def main() 前注册); 31 个测试文件; 工作区 clean。
+- 新增测试: test_config(10 断言) / test_reviews_stratified(4 组断言)。
+- 旧 39 工具测试全部保留(src 纯函数未变, 仅 server 工具面收敛)。
