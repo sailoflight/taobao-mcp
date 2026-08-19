@@ -112,6 +112,51 @@ def apply_filters(
     return out
 
 
+def stratified_reviews(
+    reviews: list[Review],
+    max_total: int | None = None,
+    per_rating: int | None = None,
+) -> list[Review]:
+    """Pure: 好/中/差评各自分层抽样, 防止被注入好评(用户要求).
+
+    站点列表常按"好评优先"排序, 只取前 N 条会系统性偏向好评。
+    - 若多数评论带 rating(>=60%): 按 好(>=4)/中(3)/差(<=2) 分组, 每组各取 per_rating 条,
+      无星级评论从前段补位少量, 再截断到 max_total。
+    - 若无星级(列表接口常见): 按 前/中/后 三段各取 per_rating 条, 摊开覆盖不同时期/倾向。
+    per_rating 缺省取 config anti_risk.review_sample_per_rating(默认 3)。
+    """
+    if per_rating is None:
+        try:
+            from src.config import load_config
+
+            per_rating = load_config().anti_risk.review_sample_per_rating
+        except Exception:
+            per_rating = 3
+    per = max(1, int(per_rating or 1))
+    if max_total is None or max_total <= 0:
+        max_total = len(reviews)
+    if not reviews:
+        return []
+
+    rated = [r for r in reviews if r.rating is not None]
+    unrated = [r for r in reviews if r.rating is None]
+    picked: list[Review] = []
+
+    if rated and len(rated) >= len(reviews) * 0.6:
+        good = [r for r in rated if r.rating >= 4]
+        neutral = [r for r in rated if r.rating == 3]
+        bad = [r for r in rated if r.rating <= 2]
+        for g in (good, neutral, bad):
+            picked.extend(g[:per])
+        picked.extend(unrated[: max(1, per // 2)])
+    else:
+        n = len(reviews)
+        seg = max(1, n // 3)
+        for start in (0, seg, 2 * seg):
+            picked.extend(reviews[start:start + per])
+    return picked[:max_total]
+
+
 def group_by_variant(reviews: list[Review]) -> dict[str, list[Review]]:
     """Roll reviews up into {sku_bought label -> [Review]} for Product.reviews_by_variant."""
     groups: dict[str, list[Review]] = {}
@@ -191,3 +236,40 @@ async def parse_reviews(
     if not include_default:
         reviews = [r for r in reviews if not is_default_review(r.text)]
     return apply_filters(reviews, only_with_images, most_recent_first, cap, keyword)
+
+
+async def parse_reviews_stratified(
+    product_url_or_id: str,
+    max_reviews: int | None = 12,
+    keyword: str = "",
+    only_with_images: bool = False,
+    most_recent_first: bool = True,
+) -> list[Review]:
+    """Live: 抓评论后做 好/中/差评 分层抽样(防注入好评), 供 taobao_product with_reviews.
+
+    先按 max_reviews*3 抓原始池(保证每层有足够样本), 再 stratified_reviews 摊开到 max_reviews。
+    抽屉抓取返回空(Tmall 站点漂移)时回退到 fetch_product 嵌入式预览评论 + keyword 过滤。
+    """
+    from src.extract.reviews import parse_reviews as _pr
+
+    cap = max(3, int(max_reviews or 12) * 3)
+    try:
+        raw = await _pr(product_url_or_id, only_with_images=only_with_images,
+                        most_recent_first=most_recent_first, max_reviews=cap, keyword=keyword)
+    except Exception:
+        raw = []
+    if raw:
+        return stratified_reviews(raw, max_total=max_reviews)
+
+    # 回退: 嵌入式预览评论(站点漂移)
+    try:
+        from src.extract.product import parse_product
+
+        p = await parse_product(product_url_or_id)
+        embedded = list(p.reviews or [])
+        kw = (keyword or "").strip()
+        if kw:
+            embedded = [r for r in embedded if kw in (r.text or "") or kw in (r.sku_bought or "")]
+        return stratified_reviews(embedded, max_total=max_reviews)
+    except Exception:
+        return []

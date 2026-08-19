@@ -182,29 +182,27 @@ async def taobao_search(
 @mcp.tool(annotations=ToolAnnotations(
     readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True
 ))
-async def taobao_fetch_product(product_url_or_id: str, deep_price: bool = False) -> Product:
-    """Fetch one product: title, shop, EVERY SKU variant + its price/stock, specs, images.
+async def taobao_product(
+    product_url_or_id: str,
+    mode: str = "coarse",        # coarse(B类粗查) | fine(C类细查, 收藏线路mi_id内建)
+    format: str = "json",        # json | md (仅 coarse 生效)
+    deep_price: bool = False,    # coarse: 点击型号读实时"平台加补后"价
+    with_reviews: bool = False,  # 附带评论(好/中/差评 分层抽样, 防注入好评)
+    reviews_max: int = 12,
+    reviews_keyword: str = "",
+    with_images: bool = False,   # fine: 返回详情长图URL清单
+    save_images: bool = False,   # fine: 下载详情长图到本地 output/detail_imgs/<pid>/
+) -> Product | str:
+    """商品查询(三类查询之一)。B粗查 coarse: 点击进入商品, 取全型号原价(无 mi_id);
+    C细查 fine: 完整收藏线路(mi_id 内建, 不再暴露独立取 mi_id 工具)进入, 拿图文详情 + 可选评论/图片。
 
-    Auto-ensures login first. deep_price=True clicks variants to read the live
-    平台加补后 (after-subsidy) price — slower, best for small-SKU items. It is
-    budget-limited: >24 clickable SKUs are skipped with a note, otherwise it
-    updates as many SKUs as fit in ~40s and marks partial results in
-    subsidy_caveat. Example: {"product_url_or_id": "736546459871", "deep_price": true}
-    """
-    if await ensure_logged_in() != "logged_in":
-        raise NotLoggedInError()
-    await _rate_limiter.acquire()
-    return await parse_product(product_url_or_id, deep_price=deep_price)
-
-
-@mcp.tool(annotations=ToolAnnotations(
-    readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True
-))
-async def taobao_product_summary(product_url_or_id: str, deep_price: bool = False) -> str:
-    """抓取一个商品并返回可读 markdown(标题/店铺/价区间 + 全部型号价表+库存/有货).
-
-    买家一屏看全所有型号价格; deep_price=True 时读实时"平台加补后"价并附补贴提示。
-    只读 — 不收藏、不重新生成 mi_id、不发消息。Example: {"product_url_or_id": "862892097837"}
+    A类(仅搜索框标题+外部标价, 不点击进入)由 taobao_search 承担 — 本工具只进商品页。
+    mode=coarse(默认): parse_product 全型号原价+库存+规格+图片; deep_price=True 点击型号读实时
+      "平台加补后"价(较慢); format=md 返回可读表。
+    mode=fine: 先 coarse 取型号价, 再走 收藏→模拟点击→完整追踪参数(防风控) 拿 .desc-root 图文详情,
+      结束时取消收藏(无残留); with_reviews 附加评论(分层抽样, 防被注入好评);
+      save_images 下载详情长图到本地(买家离线查看 — AI 读不了图但人需要)。
+    只读 — 不付款/不改地址/不发消息。Example: {"product_url_or_id": "862892097837", "mode": "fine", "with_reviews": true, "save_images": true}
     """
     if await ensure_logged_in() != "logged_in":
         raise NotLoggedInError()
@@ -212,7 +210,42 @@ async def taobao_product_summary(product_url_or_id: str, deep_price: bool = Fals
     from src.extract.product import _product_markdown, parse_product
 
     p = await parse_product(product_url_or_id, deep_price=deep_price)
-    return _product_markdown(p)
+
+    if str(mode).strip().lower() == "fine":
+        # C 细查: 收藏线路(mi_id 内建) — 由本工具自行使用, 不暴露独立取 mi_id 工具
+        from src.extract.desc import fetch_detail, save_detail_images
+        from src.extract.reviews import parse_reviews_stratified
+
+        detail = await fetch_detail(product_url_or_id, miid_source="favorite")
+        out = {
+            "mode": "fine",
+            "product_id": p.product_id,
+            "url": p.url,
+            "title": p.title,
+            "shop": p.shop_name,
+            "price_range": list(p.price_range) if p.price_range else None,
+            "variants": [v.model_dump() for v in p.variants],
+            "specs": p.specs,
+            "detail": detail,
+        }
+        if with_reviews:
+            out["reviews"] = [r.model_dump() for r in await parse_reviews_stratified(
+                product_url_or_id, max_reviews=reviews_max, keyword=reviews_keyword)]
+        if save_images:
+            out["saved_images"] = await save_detail_images(product_url_or_id)
+        elif with_images:
+            out["detail_image_urls"] = list((detail or {}).get("detail_images") or [])
+        return json.dumps(out, ensure_ascii=False, indent=2)
+
+    # B 粗查
+    if with_reviews:
+        from src.extract.reviews import parse_reviews_stratified
+
+        p.reviews = await parse_reviews_stratified(
+            product_url_or_id, max_reviews=reviews_max, keyword=reviews_keyword)
+    if str(format).strip().lower() == "md":
+        return _product_markdown(p)
+    return p
 
 
 @mcp.tool(annotations=ToolAnnotations(
@@ -239,55 +272,6 @@ async def taobao_compare_products(product_ids: list[str], deep_price: bool = Fal
     md = _to_markdown(rows, data.get("count", 0))
     return md + "\n\n<details><summary>JSON 明细</summary>\n\n```json\n" + \
         json.dumps(data, ensure_ascii=False, indent=2) + "\n```\n</details>"
-
-
-@mcp.tool(annotations=ToolAnnotations(
-    readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True
-))
-async def taobao_fetch_reviews(
-    product_url_or_id: str,
-    only_with_images: bool = False,
-    most_recent_first: bool = True,
-    max: int = 60,
-    keyword: str = "",
-) -> list[Review]:
-    """Fetch recent reviews (raw Chinese), each tagged with the variant bought (sku_bought).
-
-    keyword (optional): keep only reviews whose 评论文本 OR 购买型号(sku_bought) 含该子串
-    (e.g. "密封" / "开裂" / "味道" / "尺寸" — 中文直接可用) — 买家快速找差评/缺陷/尺寸抱怨/特定型号评论常用。
-    Example: {"product_url_or_id": "736546459871", "keyword": "开裂", "max": 40}
-    """
-    if await ensure_logged_in() != "logged_in":
-        raise NotLoggedInError()
-    await _rate_limiter.acquire()
-    reviews = await parse_reviews(
-        product_url_or_id,
-        only_with_images=only_with_images,
-        most_recent_first=most_recent_first,
-        max_reviews=max,
-        keyword=keyword,
-    )
-    if not reviews:
-        # 抽屉抓取返回空(当前 Tmall 详情页 innerText 不渲染评价区, 站点漂移) →
-        # 回退到 fetch_product 的嵌入式预览评论(至少给买家一点评论数据)。
-        from src.extract.product import parse_product
-        from src.log import get_logger
-
-        try:
-            p = await parse_product(product_url_or_id)
-        except Exception as exc:
-            get_logger().warning("fetch_reviews fallback to embedded failed: %s", str(exc)[:100])
-            return reviews
-        embedded = list(p.reviews or [])
-        if embedded:
-            get_logger().warning(
-                "fetch_reviews drawer crawl returned 0 — fell back to %d embedded preview "
-                "reviews (site drift); use fetch_product for full variants", len(embedded))
-            kw = keyword.strip() if keyword else ""
-            if kw:
-                embedded = [r for r in embedded if kw in (r.text or "") or kw in (r.sku_bought or "")]
-            return embedded
-    return reviews
 
 
 @mcp.tool(annotations=ToolAnnotations(
@@ -584,76 +568,6 @@ async def taobao_debug_miid_price(product_url_or_id: str, target_chip: str = "�
     from src.extract.desc import probe_miid_price
 
     return json.dumps(await probe_miid_price(product_url_or_id, target_chip=target_chip),
-                      ensure_ascii=False, indent=2)
-
-
-@mcp.tool(annotations=ToolAnnotations(
-    readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True
-))
-async def taobao_fetch_detail(product_url_or_id: str, miid_source: str = "config") -> str:
-    """Fetch the full 详情 (图文详情) image strip — the long picture list at the bottom.
-
-    TWO-PHASE WORKFLOW (query separation, user-designed):
-      * 粗查定位 (coarse locate) = taobao_search + taobao_fetch_product. NEVER touches
-        favorites, never regenerates mi_id — pick/compare candidates here.
-      * 细查对比 (fine compare) = this tool with miid_source="favorite" — ONLY on the
-        shortlisted products. It ensures the item is favorited, opens the 收藏夹, clicks
-        it from there (a REAL simulated click → fresh mi_id + the favorites-channel
-        tracking params every call), harvests .desc-root in place, then UN-FAVORITES
-        again if we added it this round (no residue). Slow but risk-friendly.
-    miid_source="config" (default, safe): uses the static mi_id, NO favorite involved —
-    use it for a quick look during 粗查 without touching favorites.
-    If the result has miid_stale=true, re-run with miid_source="favorite" (regenerates)
-    or call taobao_get_miid. Example: {"product_url_or_id": "755873641229", "miid_source": "favorite"}
-    """
-    if await ensure_logged_in() != "logged_in":
-        raise NotLoggedInError()
-    await _rate_limiter.acquire()
-    from src.extract.desc import fetch_detail
-
-    return json.dumps(await fetch_detail(product_url_or_id, miid_source=miid_source),
-                      ensure_ascii=False, indent=2)
-
-
-@mcp.tool(annotations=ToolAnnotations(
-    readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True
-))
-async def taobao_save_detail_images(product_url_or_id: str, output_dir: str = "", max_images: int = 60) -> str:
-    """细查后把详情长图下载到本地文件夹(买家离线查看 — AI 读不了图但人需要).
-
-    复用收藏链路(fetch_detail, miid_source='favorite')拿 .desc-root 详情图, 用浏览器会话
-    上下文下载到 output/detail_imgs/<pid>/ (WebP)。只读浏览 + 落盘; fetch_detail 已 cleanup
-    (无收藏残留); 不发消息。Example: {"product_url_or_id": "862892097837"}
-    """
-    if await ensure_logged_in() != "logged_in":
-        raise NotLoggedInError()
-    await _rate_limiter.acquire()
-    from src.extract.desc import save_detail_images
-
-    return json.dumps(await save_detail_images(product_url_or_id, output_dir=output_dir, max_images=max_images),
-                      ensure_ascii=False, indent=2)
-
-
-@mcp.tool(annotations=ToolAnnotations(
-    readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True
-))
-async def taobao_get_miid(watch_seconds: int = 90, keyword: str = "3D打印机", mode: str = "auto") -> str:
-    """Obtain/refresh the mi_id used by taobao_fetch_detail.
-
-    mode="auto" (default): programmatically reads the mi_id from the homepage 猜你喜欢
-    feed's fixed first link (or clicks it) — no human needed, minimal footprint.
-    mode="human": opens a search page; a person clicks a product; the click-generated
-    tracking URL's mi_id is captured. Either way it's persisted to output/.miid.json
-    and picked up automatically. Call when fetch_detail reports miid_stale=true, or to
-    rotate every few detail fetches. Read-only.
-    Example: {"mode": "auto"} or {"mode": "human", "watch_seconds": 90}
-    """
-    if await ensure_logged_in() != "logged_in":
-        raise NotLoggedInError()
-    await _rate_limiter.acquire()
-    from src.extract.miid import get_miid
-
-    return json.dumps(await get_miid(watch_seconds=watch_seconds, keyword=keyword, mode=mode),
                       ensure_ascii=False, indent=2)
 
 
