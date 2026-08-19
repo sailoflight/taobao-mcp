@@ -1480,3 +1480,12 @@ Our deliverables: (i) a price for **every** SKU via `skuBase`/`sku2info` join; (
   matches_target=false) → footmark_fallback=True → **退回收藏链路**(quota 8/30 耗1, fav added→cleanup removed 无残留)
   → miid_from=favorite_click, 取到正确商品 miid 页: 9 评论(好居乐专属)+2 问答+22 详情图。
 - 结论: 双机制(足迹→收藏兜底)按用户设计全链路正确 — 足迹命中零配额, 不命中自动兜底收藏。
+
+### 问答展开 + 天鼠"密封"语义定论(2026-08-19)
+- **问答展开**: mi_id 页默认 2 问答卡, 点"查看全部问答"展开抽屉 → ~11 卡; parse_qa 已实现
+  展开(展开前 Esc 关其它抽屉, 抽取后 Esc 关问答抽屉) + dicts_to_qa 按问题去重/清洗
+  ('已购'标签/'更多回答'按钮噪声)。fetch_detail 先问答后评论。实机: 9 去重问答 + 9 评论 + 23 图。
+- **定论**: 天鼠问答 #9 "这个收纳箱盖子带密封条吗" → **"没有封条。个人感觉箱子挺结实的。"**
+  买家直接证实天鼠**无密封条** — "密封"只是标题/型号(密封加强款)营销扣盖语义。
+  结合评论(软/只装衣物被子)与问答(承重差/无封条) → 天鼠不适合装易碎/电器/需真密封场景。
+- 提交: 02f9bac(问答展开) + ecbf643(debug qa_expand/footmark)。
