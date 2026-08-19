@@ -80,26 +80,20 @@ async def openai_apps_challenge(_: Request) -> PlainTextResponse:
 @mcp.tool(annotations=ToolAnnotations(
     readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=True
 ))
-async def taobao_initialize_login() -> str:
-    """Open the visible Chrome window and ensure login. The human scans the QR by phone.
+async def taobao_session(action: str = "status") -> str:
+    """会话(一个工具 + action 参数)。status 只读报告登录/会话健康 + 防风控限速遥测;
+    login 打开可见 Chrome 窗口并确保登录(人工手机扫码 QR, 每次会话首次调用)。
 
-    Call this first, once per session. Example: {}
-    Returns 'logged_in', or a 'login_required:
-    ...' message instructing the human to scan the QR code in the Chrome window.
+    action=status: 幂等只读 — not_started / logged_in / human_action_required(需人工在 Chrome 扫码或过滑块) + 限速/收藏配额遥测。
+    action=login: 打开浏览器并确保登录, 返回 'logged_in' 或 'login_required: ...'(提示人工扫码)。
+    Example: {"action": "status"} / {"action": "login"}
     """
-    return await ensure_logged_in()
+    if str(action).strip().lower() == "login":
+        return await ensure_logged_in()
 
-
-@mcp.tool(annotations=ToolAnnotations(
-    readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
-))
-async def taobao_session_status() -> str:
-    """Report login/session health + anti-risk pacing telemetry. Read-only and idempotent.
-    Example: {}
-    """
     s = get_session()
     if s.context is None:
-        return "not_started: call taobao_initialize_login first (opens Chrome for QR login)."
+        return "not_started: call taobao_session(action=login) first (opens Chrome for QR login)."
     logged_in = await s.is_logged_in()
     note = (
         " — human_action_required (scan the QR / solve the slider in the Chrome window)"
