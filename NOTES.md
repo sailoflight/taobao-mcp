@@ -1450,3 +1450,14 @@ Our deliverables: (i) a price for **every** SKU via `skuBase`/`sku2info` join; (
 - **修复(5112677)**: save_detail_images 原先在 fine 里二次跑收藏链路(2 配额/次) —
   现复用已取 detail, 仅下载不重跑 → 一次 fine = 一次收藏(配额+1), cleanup removed 无残留。
   实机: fine+with_reviews+save_images → 9评论+2问答+23图, 23/23 落盘 detail_imgs/<pid>/。
+
+### 手动演示机制(2026-08-19, 用户 watch 演示): 中/差评与问答的定位渠道
+- 监听(watch)记录: 用户经 **足迹(footMark/浏览历史)** 渠道打开天鼠 miid 页 —
+  `detail.tmall.com/item.htm?id=862892097837&last_time=…&mi_id=…`(**非收藏渠道**!)
+- 启示: miid 页可由足迹渠道获得(带 last_time+mi_id), 可能不消耗收藏配额(30/日) —
+  中/差评与问答可在该页抽取, 是收藏链路的替代/补充; 自动化可行性待验证
+  (footMark 需要先浏览过该商品, last_time 为时间戳参数)。
+- **天鼠问答最后一条(用户点名)**: "箱子会不会很软,搬家装电器那些,承重怎么样啊"
+  → 答 "只能装衣服被子" — 佐证天鼠箱体偏软、仅适合装衣物被子, 不适合承重(电器/易碎),
+  与"密封=营销扣盖、非真密封条"一致。
+- Q&A 共 2 条: [1] 问puls款带轮带盖高度51? 答"不是姐妹"; [2] 如上(最后一条)。
