@@ -1,6 +1,6 @@
 """FastMCP entrypoint — tool registration ONLY (CLAUDE.md §3).
 
-The 12 tools are thin shims over the src/* extraction + output layers.
+The 13 tools are thin shims over the src/* extraction + output layers.
 
 Run locally:  .venv/bin/python server.py        (stdio transport)
 Run public:   MCP_TRANSPORT=streamable-http python server.py
@@ -259,11 +259,11 @@ async def taobao_compare(
 ) -> str:
     """粗查批量对比(买家挑选常用): 输入最小化 — 仅商品 id/URL 列表(自动提取 id)。
 
+    参数: product_ids(必填, 商品ID或URL列表, 自动提取 id) · format=md(默认, 可读对比表+JSON明细)|json ·
+      deep_price(bool, true 读实时"平台加补后"价, 较慢) · max_items(默认10, 上限20) ·
+      sort_by(''输入序/'price'有货最低价升/'unit'最低单价升) · min_review_total(过滤低评价)。
     format=md(默认): 一屏对比行(标题/店铺/价区间/型号数/价格示例/评论/补贴提示) + JSON 明细;
     format=json: 仅结构化 JSON(供后续复用)。
-    sort_by: ''(输入序)/'price'(有货最低价升)/'unit'(最低单价升), 错误行排最后;
-    min_review_total>0 过滤评价数低于阈值的商品; deep_price=True 读实时"平台加补后"价(较慢)。
-    max_items 控制最多对比件数(默认 10, 上限 20)。
     只读 — 不收藏/不重新生成 mi_id/不发消息。留档导出请用 taobao_export(type=compare)。
     Example: {"product_ids": ["862892097837", "759429259765"], "sort_by": "unit", "min_review_total": 500}
     """
@@ -427,7 +427,7 @@ async def taobao_export(
 
 
 @mcp.tool(annotations=ToolAnnotations(
-    readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True
+    readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=True
 ))
 async def taobao_message(
     action: str = "list",        # list | reply
@@ -515,7 +515,7 @@ async def taobao_dossier(
     readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True
 ))
 async def taobao_debug(
-    action: str,                       # detail|sku_structure|sweep_price|miid_price|home|collect|favorite|watch|activity
+    action: str,                       # detail|sku_structure|sweep_price|miid_price|home|collect|favorite|watch|activity|probe_reviews|footmark|qa_expand
     product_url_or_id: str = "",
     target: str = "特大号白色",         # sku_structure
     target_chip: str = "特大号",        # miid_price
@@ -528,11 +528,13 @@ async def taobao_debug(
 ) -> str:
     """调试诊断(一个工具 + action 参数, [DEBUG] 只读/观测用, 不改变账号状态).
 
-    参数: action(必填)=detail|sku_structure|sweep_price|miid_price|home|collect|favorite|watch|activity|probe_reviews ·
-      product_url_or_id(detail/sku_structure/sweep_price/miid_price/favorite/probe_reviews 时) · target(sku_structure 目标芯片) ·
+    参数: action(必填)=detail|sku_structure|sweep_price|miid_price|home|collect|favorite|watch|activity|probe_reviews|footmark|qa_expand ·
+      product_url_or_id(detail/sku_structure/sweep_price/miid_price/favorite/probe_reviews/footmark/qa_expand 时) · target(sku_structure 目标芯片) ·
       target_chip(miid_price 目标变体) · max_chips(sweep_price 扫描上限) · target_pid(collect 可选) ·
       watch_seconds/start_url(watch 监听器: 人工操作时记录多页/tab URL+mi_id) · limit/days(activity: 事件数/范围 None全部 0今天 1近2天)。
     probe_reviews: 实证评论渲染 — 分别探测 普通页 vs 收藏链路 mi_id 弹窗页 是否渲染评论区(诊断评论抓取路径)。
+    footmark: 足迹渠道诊断 — 打开足迹页点第一张卡, 校验打开的 id 是否为目标(双机制第一棒)。
+    qa_expand: 问答展开机制诊断 — 数问答卡, 点"查看全部问答", 报告是否开新页/更多卡/抽屉。
     [DEBUG] 仅诊断/观测; 收藏链路调试会收藏再取消(无残留)。Example: {"action": "activity"} / {"action": "probe_reviews", "product_url_or_id": "862892097837"} / {"action": "miid_price", "product_url_or_id": "862892097837"}
     """
     if await ensure_logged_in() != "logged_in":
@@ -646,11 +648,11 @@ async def taobao_debug(
         return json.dumps(await probe_qa_expand(product_url_or_id), ensure_ascii=False, indent=2)
 
     return (f"未知 action={action}; 支持 detail/sku_structure/sweep_price/miid_price/"
-            "home/collect/favorite/watch/activity/probe_reviews/footmark")
+            "home/collect/favorite/watch/activity/probe_reviews/footmark/qa_expand")
 
 
 @mcp.tool(annotations=ToolAnnotations(
-    readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True
+    readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=True
 ))
 async def taobao_cart(
     action: str = "list",              # list | add | add_batch
