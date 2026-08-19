@@ -1,8 +1,10 @@
 # MCP 工具面重构执行计划(REFACTOR PLAN)
 
-> 状态:待执行(2026-08-19 用户拍板)。每条 = 一个 git 提交,按序推进,每步含验证。
-> 用户已确认:①历史重置到 origin/main 后按功能重提交;②activity_report 保留并入 debug;
-> ③尝试部署 + 实机冒烟(需 /mnt/c 写权限);④每功能实现提交一次。
+> **状态: ✅ 全部完成(2026-08-19)。** 39 → 13 工具, 每功能一个提交, 实机冒烟 7/7 全绿。
+> 用户已确认: ①历史重置到 origin/main 后按功能重提交(已执行: 297→单基线+每功能一提交);
+> ②activity_report 保留并入 debug(已并入 taobao_debug action=activity);
+> ③部署 + 实机冒烟(已执行, /mnt/c 全同步, 7/7 绿, 修复 orders.py load_config 真 bug);
+> ④每功能实现提交一次(已执行, 见下方步骤 git log)。
 
 ---
 
