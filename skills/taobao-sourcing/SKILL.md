@@ -40,8 +40,8 @@ acting; the entries give the通用套路 to apply:
   buyer Q&A (never the listing copy) → E3.
 - **套装 vs 单买 / 口径匹配** / `bundle-vs-alacarte` — bag+pump set vs separate purchase;
   valve-port matching risk on standalone pumps → E4.
-- **提取 SKU 选项图** / `valueItemImg` / `gw.alicdn.com` / `_.webp` — how to get each
-  variant's option image (debug sku_structure → strip `_.webp`) → E5.
+- **提取 SKU 选项图** / `valueItemImg` / `gw.alicdn.com` / `_.webp` — variant `image` 字段现随
+  coarse 内建返回(不再需 debug 旁路); size-in-image 判断可直接做 → E5.
 - **临时 OCR 读图内文字** / `tesseract` — read size text out of an image with the installed
   Tesseract when a formal OCR plan is deferred; **the current Windows deployment already has it
   (含 chi_sim 中文包, path confirmed) — no install needed** → E6.

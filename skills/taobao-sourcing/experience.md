@@ -94,18 +94,23 @@ QA 是未过滤的真话来源,常直接回答耐用性、是否值得买。
 
 ## E5 提取 SKU 选项图 URL 的通用手法
 
-**触发场景**: 需要拿到每个 SKU 型号的选项图(读图内尺寸/规格),而 MCP 工具没直接暴露选项图。
+**触发场景**: 需要拿到每个 SKU 型号的选项图(读图内尺寸/规格)。
 
-**怎么做(纯工具,不写代码)**:
-1. `taobao_debug(action="sku_structure", product_url_or_id=…)` — 返回 SKU 芯片 DOM,
-   每个 `valueItem` 的 html 里带选项图 `valueItemImg` 的 `src`;
-2. 用正则从返回文本提取: `https://gw\.alicdn\.com/bao/uploaded/[^\s"]+?\.jpg`;
-3. **URL 处理**: 原始 URL 带处理后缀 `_.webp`(如 `….jpg_.webp`)→ 切成 `….jpg` 即可直接下载
-   (去 `_.webp`,不是拼 `.jpg`);
-4. `urllib`/`curl` 下载,Referer 用 `https://item.taobao.com/` 或 `detail.tmall.com/`。
+**首选路径(2026-08-19 工具已内建, 不再需要旁路)**:
+1. `taobao_product(url_or_id, mode="coarse")` — **每个变体现在自带 `image` 字段**
+   (SkuVariant.image, 即 skuBase `values[].image`, 尺寸/规格图就在这)。
+   一次 coarse 就拿到 全部档位 + 价格 + 选项图 URL。
+2. 下载: URL 已是 `https://gw.alicdn.com/bao/uploaded/….jpg`(无 `_.webp` 后缀),
+   直接 `urllib`/`curl` 下载, Referer 用 `https://item.taobao.com/`。
+3. 用 [E6](#e6-临时-ocr-读图内文字) 的 Tesseract 读图内尺寸。
 
-**注意**: `sku_structure` 的 DOM 抓取有上限(约前 10 个 chip);型号很多的商品可能只拿到前几档的图。
-缺档时对剩余档位换 `target` 再探,或接受"前几档已够判断"。
+**旧旁路(仅在极老版本/数据缺失时用)**: `taobao_debug(action="sku_structure", …)`
+从 valueItem html 抠 `valueItemImg` 的 src — 已不再需要, 且该 DOM 抓取有 10-chip 上限,
+型号很多的商品只拿得到前几档。
+
+**实测(2026-08-19, 索晨食品袋 19 档)**: coarse 返回 19 个变体全部带 image;
+OCR 各档选项图确认 大号/超大号=26cm(25×28)、特大号=30cm(30×34)、加大号=32cm(32×45) —
+"大号更便宜但装不下 30×34"这类判断现在可自动得出, 不必猜。
 
 ---
 
@@ -121,11 +126,13 @@ QA 是未过滤的真话来源,常直接回答耐用性、是否值得买。
 - 含**中文语言包** `-l chi_sim`(已实测可读中文商品图);
 - 无需安装任何东西、无需联网,直接命令行调用即可 — 这就是"当前环境自带的现成工具"。
 
-**怎么做**:
-- `tesseract 图.jpg stdout -l chi_sim --psm 11`(psm 11 = sparse text,适合海报式排版;psm 6 也行);
-- 中文用 `-l chi_sim`;数字/尺寸行用 `grep -E "[0-9]{2,3}\s*cm|[0-9]{2,3}[xX×]"` 过滤;
-- 图太大/字太小 → 放大 2-3x 再 OCR(注意:放大后有时反而更差,原图 + psm 11 优先);
-- OCR 噪声大是常态,读出数字后与常识交叉验证(如"中号 22cm > 小号 16cm"的递增关系)。
+**怎么做(实测修正 2026-08-19 — 放大是错误用法, 原图才是关键)**:
+- **用原图, 不要放大**。实测: 原图 psm 11 稳定读出 "16cm"; 放大 1.5x/2x/3x(灰度/锐化/对比 各种预处理)后**反而全部空白** — Tesseract 对商品海报小字, 放大插值会毁掉边缘, 得不偿失。
+- **psm 选 6 或 11**(sparse text, 适合海报式排版); 不要用 psm 3/12(自动/OSD 会把图中其他数字误读, 如把 "22cm" 当主尺寸)。
+- `tesseract 图.jpg stdout -l chi_sim --psm 11`; 中文用 `-l chi_sim`;
+- 数字/尺寸行用 `grep -oE "[0-9]{2,3}cm|[0-9]{2,3}[xX×][0-9]{2,3}"` 过滤 — 只要尺寸, 过滤海报营销噪声;
+- OCR 噪声大是常态, 读出数字后与常识交叉验证(如"中号 22cm > 小号 16cm"的递增关系);
+- 若某张图空白, 换 psm 6 再试一次, 不要先放大。
 
 **边界**: 这是**一次性临时手段**,正式图内识别方案留待用户决定是否构建。
 
