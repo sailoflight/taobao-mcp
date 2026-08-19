@@ -79,3 +79,32 @@ def test_location_for_yishou_card():
     # LOW: 已售-form cards must still get a location
     r = parse_card_text("1", "显卡 ¥ 500 已售2000+ 上海 包邮 蓝天服务器")
     assert r.location == "上海"
+
+
+def test_spec_text_extracted():
+    """Card 规格/尺寸片段被提取(spec_contains 过滤的原料) — 2026-08-19."""
+    r = parse_card_text("1", "真空袋 规格：特大号30*34厘米 加厚 ¥ 11.4 1000人付款 江苏 索晨旗舰店")
+    assert r.spec_text and "30*34" in r.spec_text
+
+
+def test_spec_text_none_when_absent():
+    r = parse_card_text("2", "普通收纳箱 ¥ 15.9 200人付款 浙江 某店")
+    assert r.spec_text is None
+
+
+def test_spec_contains_filter():
+    from src.extract.search import filter_search_results
+    from src.models import SearchResult
+
+    def _r(pid, spec=None):
+        return SearchResult(product_id=pid,
+                            url=f"https://item.taobao.com/item.htm?id={pid}",
+                            title=f"商品{pid}", price=1.0, monthly_sales=10,
+                            shop_name=None, location=None, spec_text=spec)
+
+    rs = [_r("1", "特大号30*34厘米"), _r("2", "加大号32*45厘米"), _r("3", None)]
+    out = filter_search_results(rs, {"spec_contains": "30*34"})
+    assert [r.product_id for r in out] == ["1"]
+    # 无规格卡片不过滤(保持现状语义)
+    out2 = filter_search_results(rs, {"spec_contains": "32*45"})
+    assert [r.product_id for r in out2] == ["2"]

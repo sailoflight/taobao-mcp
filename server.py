@@ -135,13 +135,14 @@ async def taobao_search(
     max_sales: int | None = None,
     sort: int | None = None,
     title_contains: str | None = None,
+    spec_contains: str | None = None,
     max_results: int = 30,
     format: str = "json",      # json(默认, 结构化) | md(可读表格)
     headless: bool = True,     # A类查询: 仅搜索列表(标题+外部标价), 不点击进入商品详情(恒真语义)
 ) -> list[SearchResult] | str:
     """搜索淘宝并返回结果供挑选。查询类 A: 仅通过搜索框取标题+外部标价, 不点击进入商品。
 
-    参数: keyword(必填) · page(页码, 默认1) · filters(可选 dict, 见下) · min_price/max_price/min_sales/max_sales/sort/title_contains(顶层便捷参数, 自动并入 filters) · max_results(截断, 默认30上限100) · format=json(默认)|md · headless=A类语义标注。
+    参数: keyword(必填) · page(页码, 默认1) · filters(可选 dict, 见下) · min_price/max_price/min_sales/max_sales/sort/title_contains/spec_contains(顶层便捷参数, 自动并入 filters) · max_results(截断, 默认30上限100) · format=json(默认)|md · headless=A类语义标注。
     filters (optional, applied to the search URL + client-side):
       min_price / max_price — price band (e.g. {"min_price": 30, "max_price": 80})
       sort — 1=综合 2=销量 5=价格从低到高 6=价格从高到低 (e.g. {"sort": 2})
@@ -149,9 +150,11 @@ async def taobao_search(
         (reliable; skips sketchy near-zero-sales listings) (e.g. {"min_sales": 100})
       title_contains — case-insensitive substring required in the title
         (e.g. {"title_contains": "加固"})
-    便捷: 也支持顶层 min_price/max_price/min_sales/max_sales/sort/title_contains(自动并入
-    filters, 免去手写 dict 被静默忽略的坑)。max_results 截断结果数(默认 30, 上限 100)。
-    format=md 时返回可读 markdown 表(价格/销量/店铺/位置/标题), 一屏挑商品比 JSON 直观;
+      spec_contains — substring required in the card's 规格/尺寸片段 (搜索卡片常带
+        "规格:30*34cm" 等), 可在搜索阶段按尺寸圈选 (e.g. {"spec_contains": "30*34"})
+    便捷: 也支持顶层 min_price/max_price/min_sales/max_sales/sort/title_contains/spec_contains
+    (自动并入 filters, 免去手写 dict 被静默忽略的坑)。max_results 截断结果数(默认 30, 上限 100)。
+    format=md 时返回可读 markdown 表(价格/销量/店铺/位置/标题/规格), 一屏挑商品比 JSON 直观;
     format=json(默认) 返回结构化列表(可复用 product_id 继续查询)。
     headless=A 类语义标注(恒为列表页查询, 不进入详情; 需要进商品取全型号原价用 product mode=coarse)。
     Note: json 格式结果按 FastMCP 一条文本一块返回, 请读全。Example: {"keyword": "密封收纳箱 特大号", "min_price": 30, "max_price": 80, "min_sales": 100, "sort": 5, "max_results": 20, "format": "md"}
@@ -159,7 +162,8 @@ async def taobao_search(
     f = dict(filters or {})
     for k, v in [("min_price", min_price), ("max_price", max_price),
                  ("min_sales", min_sales), ("max_sales", max_sales),
-                 ("sort", sort), ("title_contains", title_contains)]:
+                 ("sort", sort), ("title_contains", title_contains),
+                 ("spec_contains", spec_contains)]:
         if v is not None:
             f[k] = v
     await _rate_limiter.acquire()

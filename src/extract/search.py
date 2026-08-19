@@ -18,6 +18,8 @@ _PRICE_RE = re.compile(r"¥\s*([\d,]+(?:\.\d+)?)")            # allow thousands 
 _SALES_RE = re.compile(r"([\d.]+万?)\s*\+?\s*(?:人付款|人付|付款|人收货|收货)")
 _SALES_RE2 = re.compile(r"(?:已售|月销|成交)\s*([\d.]+万?)")   # 已售2000+ / 月销1000
 _SHIP_TOKENS = ("包邮", "公益宝贝", "退货宝", "48小时内发", "24小时内发", "极速退款", "补贴后", "优惠前", "包退")
+# 卡片内规格/尺寸片段: 规格:xxx / 尺寸:xxx / 规格 xxx, 取到下一个 ¥ 或促销词前。
+_SPEC_RE = re.compile(r"(?:规格|尺寸|尺码|规格参数|参数)\s*[:：]?\s*([^¥\n]{2,60})")
 _PROMO_RE = re.compile(r"满\d+减\d+|立减|直降|券|补贴|赠")
 _CJK_TOKEN = re.compile(r"[一-龥]{2,}")
 # A ¥-amount immediately preceded by one of these is a struck-through "优惠前" price or a
@@ -35,6 +37,41 @@ def _to_count(s: str) -> int | None:
         return int(round(float(s) * mult))
     except ValueError:
         return None
+
+
+# 裸尺寸模式: "30cmX35cm" / "30*34cm" / "30×34厘米" / "35cmx42cm" — 搜索卡片常裸写尺寸, 无"规格:"前缀
+# 兼容两种写法: "30cmX35cm"(中间带 cm) 和 "30*34cm"(纯数字+连接符)
+_BARE_SIZE_RE = re.compile(
+    r"(\d{2,3}\s*cm?\s*[xX*×]\s*\d{2,3}\s*cm|"
+    r"\d{2,3}\s*[xX*×]\s*\d{2,3}\s*(?:cm|厘米))"
+)
+# 档位词(特大号/大号/中号…) — 尺寸常与档位名连写
+_GRADE_RE = re.compile(r"(特大号|加大号|超大号|大号|中号|小号|加厚|特厚)")
+
+
+def _extract_spec(text: str) -> str | None:
+    """Pure: 从卡片文本提取规格/尺寸片段(如 "30*34cm", "特大号30*34厘米").
+
+    优先带 "规格：/尺寸:" 前缀的片段; 否则 fallback 到裸尺寸模式
+    ("30cmX35cm" / "30*34cm" — 淘宝卡片常裸写, 无前缀)。供 spec_contains
+    过滤, 让"按尺寸圈选"在搜索阶段就能做(不必等 coarse 逐款抓)。
+    清理促销噪声, 截断到 40 字。
+    """
+    for m in _SPEC_RE.finditer(text):           # 1) 带前缀 "规格:xxx"
+        frag = m.group(1).strip().rstrip("，。;；,")
+        if not frag:
+            continue
+        frag = re.split(r"品牌|促销|店铺|元|¥", frag, maxsplit=1)[0].strip()
+        if frag:
+            return frag[:40]
+    m = _BARE_SIZE_RE.search(text)              # 2) 裸尺寸 "30cmX35cm" / "30*34cm"
+    if m:
+        return m.group(1).replace(" ", "")[:40]
+    # 3) 档位词(仅在完全没有尺寸时的弱信号 — "加厚/特大号" 在标题常见, 不能抢在裸尺寸前)
+    g = _GRADE_RE.search(text)
+    if g:
+        return g.group(1)
+    return None
 
 
 def parse_card_text(product_id: str, text: str) -> SearchResult:
@@ -96,6 +133,7 @@ def parse_card_text(product_id: str, text: str) -> SearchResult:
         monthly_sales=monthly_sales,
         shop_name=shop_name,
         location=location,
+        spec_text=_extract_spec(text),
     )
 
 
@@ -130,6 +168,7 @@ def filter_search_results(results: list[SearchResult], filters: dict | None) -> 
       min_sales / max_sales — monthly_sales band (skips near-zero-sales sketchy listings)
       min_price / max_price — price band (falls back to client-side when the URL param is ignored)
       title_contains — case-insensitive substring required in the title (e.g. "加固")
+      spec_contains — substring required in the card's 规格/尺寸片段 (e.g. "30*34")
       sort — client-side re-sort for reliability (SPA 的 s=N 排序偶发不生效):
         5 = 价格从低到高, 6 = 价格从高到低, 2 = 销量从高到低 (缺价/缺销量排最后)
     Items missing the compared field pass through (None is not filtered out).
@@ -141,8 +180,9 @@ def filter_search_results(results: list[SearchResult], filters: dict | None) -> 
     lo_p = filters.get("min_price")
     hi_p = filters.get("max_price")
     tc = filters.get("title_contains")
+    sc = filters.get("spec_contains")
     sort = filters.get("sort")
-    if not any(x is not None for x in (lo_s, hi_s, lo_p, hi_p, tc, sort)):
+    if not any(x is not None for x in (lo_s, hi_s, lo_p, hi_p, tc, sc, sort)):
         return results
     out = []
     for r in results:
@@ -155,6 +195,8 @@ def filter_search_results(results: list[SearchResult], filters: dict | None) -> 
         if hi_p is not None and r.price is not None and r.price > hi_p:
             continue
         if tc is not None and tc and (tc not in (r.title or "")):
+            continue
+        if sc is not None and sc and (sc not in (r.spec_text or "")):
             continue
         out.append(r)
     if sort == 5:
@@ -236,12 +278,14 @@ def _search_markdown(results, keyword: str = "", max_rows: int = 30, page: int |
     if page:
         title += f" (第 {page} 页)"
     head = [title, "",
-            "| 价格¥ | 销量 | 店铺 | 位置 | 商品 |", "|---|---|---|---|---|"]
+            "| 价格¥ | 销量 | 店铺 | 位置 | 规格/尺寸 | 商品 |",
+            "|---|---|---|---|---|---|"]
     for r in rows:
         p = f"{r.price:g}" if r.price is not None else "-"
         s = str(r.monthly_sales) if r.monthly_sales is not None else "-"
-        title = (r.title or "").replace("|", "/")[:38]
+        sp = (r.spec_text or "").replace("|", "/")[:24]
+        title = (r.title or "").replace("|", "/")[:36]
         if r.url:
             title = f"[{title}]({r.url})"  # 买家可直接点开商品
-        head.append(f"| {p} | {s} | {(r.shop_name or '')[:14]} | {(r.location or '')[:8]} | {title} |")
+        head.append(f"| {p} | {s} | {(r.shop_name or '')[:12]} | {(r.location or '')[:8]} | {sp or '-'} | {title} |")
     return "\n".join(head)
