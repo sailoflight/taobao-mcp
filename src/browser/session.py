@@ -14,6 +14,7 @@ leave the window visible, and poll until the human clears it. NEVER auto-solve.
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 from pathlib import Path
 
@@ -391,6 +392,50 @@ class BrowserSession:
                 pass
         return False
 
+    async def _alert_human(self, page=None) -> None:
+        """Bring the browser window to front and (on Windows) flash its taskbar
+        icon, so the human notices a captcha/punish handoff. Best-effort only.
+        """
+        page = page or self.page
+        if page is not None:
+            try:
+                await page.bring_to_front()
+            except Exception:
+                pass
+        if os.name == "nt":  # Windows 部署 — 任务栏闪烁 msedge/chrome + 置前
+            try:
+                import subprocess
+
+                ps = (
+                    "Add-Type @'\\n"
+                    "using System; using System.Runtime.InteropServices;\\n"
+                    "public class FlashWin { [DllImport(\"user32.dll\")] public static extern bool "
+                    "FlashWindow(IntPtr h, bool b); [DllImport(\"user32.dll\")] public static extern bool "
+                    "SetForegroundWindow(IntPtr h); }\\n"
+                    "'@\\n"
+                    "$w = Get-Process msedge, chrome | Where-Object { $_.MainWindowHandle -ne 0 } | "
+                    "Select-Object -First 1\\n"
+                    "if ($w) { [FlashWin]::FlashWindow($w.MainWindowHandle, $true) | Out-Null; "
+                    "[FlashWin]::SetForegroundWindow($w.MainWindowHandle) | Out-Null }"
+                )
+                flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                subprocess.Popen(["powershell", "-NoProfile", "-Command", ps], creationflags=flags)
+            except Exception:
+                pass
+
+    async def _dismiss_block_x(self, page) -> bool:
+        """先能X就X: 点击阻塞对话框(含滑块, 用户确认可点X关闭)的关闭钮; 不自动滑."""
+        try:
+            clicked = await page.evaluate(_CLOSE_FREQUENCY_DIALOG_JS)
+        except Exception:
+            return False
+        if clicked:
+            await asyncio.sleep(1.5)
+            if not await self._looks_blocked(page):
+                get_logger().info("dismissed block dialog via X (%s)", clicked)
+                return True
+        return False
+
     async def guard_captcha(self, page=None, timeout_s: int | None = None, poll_s: float | None = None) -> None:
         """If a slider/punish/login wall is showing, pause and wait for the human.
 
@@ -405,12 +450,16 @@ class BrowserSession:
         page = page or self.page
         if page is None:
             return
-        await self.dismiss_frequency_dialog(page)
+        await self.dismiss_frequency_dialog(page)  # 软'访问太频繁'先自动点X
+        if await self._looks_blocked(page):
+            # 再试阻塞对话框的 X(滑块常可点X关闭, 用户明确可点X或滑动) — 不自动滑
+            await self._dismiss_block_x(page)
         if not await self._looks_blocked(page):
             return
         self.human_action_required = True
         self.status = "human_action_required"
         get_logger().warning("captcha/punish detected at %s — handing off to human", (page.url or "").split("?")[0][:80])
+        await self._alert_human(page)  # 提醒人工(前置+任务栏闪烁)
         waited = 0.0
         interval = poll_s
         while waited < timeout_s:
@@ -422,6 +471,7 @@ class BrowserSession:
                 self.status = "resumed"
                 get_logger().info("captcha cleared after ~%.0fs — resuming", waited)
                 return
+            await self._alert_human(page)  # 持续提醒直到清除
         get_logger().error("captcha not cleared within %ss", timeout_s)
         raise CaptchaError()
 
