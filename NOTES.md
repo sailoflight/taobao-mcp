@@ -1414,3 +1414,10 @@ Our deliverables: (i) a price for **every** SKU via `skuBase`/`sku2info` join; (
 - 全量 py_compile 通过; **13 工具**(全在 def main() 前注册); 31 个测试文件; 工作区 clean。
 - 新增测试: test_config(10 断言) / test_reviews_stratified(4 组断言)。
 - 旧 39 工具测试全部保留(src 纯函数未变, 仅 server 工具面收敛)。
+
+### 重构收官(Step 16 部署+实机冒烟)
+- 全量同步 /mnt/c/MCP/taobao-mcp(src 33 / tests 31 / server.py / config.toml / skills / 文档), md5 全核。
+- **实机冒烟 7/7 全绿**: taobao_session status / taobao_config get / taobao_product(coarse md) /
+  taobao_cart list / taobao_tracking list(md) / taobao_compare json / taobao_export tracking。
+- 冒烟暴露并修复 1 真 bug: orders.py 模块级 load_config(修复后复测绿)。
+- **重构完成**: 39 → 13 工具(session/search/product/compare/cart/favorites/tracking/dossier/message/inventory/config/debug/export)。
