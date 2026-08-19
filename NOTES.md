@@ -1521,3 +1521,14 @@ Our deliverables: (i) a price for **every** SKU via `skuBase`/`sku2info` join; (
   activity.py `re.split(maxsplit=)` 去 DeprecationWarning。
 - 测试环境提示: 本机 python3 无 pytest/pydantic; 用 /mnt/c/MCP/taobao-mcp/.venv 的 Windows
   python 跑(需 --basetemp=/tmp 避开 Windows Temp 权限)。198 passed 全绿。
+
+### 工具改进后实机验证(2026-08-19, 30×34 食品气阀袋选品复核)
+- **SkuVariant.image 内建生效**: 索晨/恒冠/胜将各 23 档全部带选项图;OCR 确认
+  大号/超大号=26cm(25×28)、特大号=30cm(30×34/35)、加大号=32cm(32×45)。
+- **搜索 spec_contains 生效**: "真空袋 气阀 可重复使用 自封 30" 直接圈出 30cm 档
+  气阀袋 — 之前漏掉 3 款: 索晨 1056356567421(30×40)、胜将 1057127186623/1057132938428(30×35)。
+- **新确认 30cm 档**: 胜将/索晨 特大号无泵×10 = ¥12.5(略贵于用户基准 ¥11.4, 但 30×40 更大)。
+- **同厂多店识别**: 胜将两款变体指纹 md5 相同(23 档一致) = 同厂分发, 二选一。
+- **用户基准结论不变**: 恒冠 1060960469596 30×35 ×10 ¥11.6 仍是 30cm 档最低;
+  + 收纳博士泵 ¥12.9 = ¥24.5(省 ¥0.4)。
+- 报告已更新: output/sourcing/基准对比-30x34食品袋+泵.md。
