@@ -1489,3 +1489,12 @@ Our deliverables: (i) a price for **every** SKU via `skuBase`/`sku2info` join; (
   买家直接证实天鼠**无密封条** — "密封"只是标题/型号(密封加强款)营销扣盖语义。
   结合评论(软/只装衣物被子)与问答(承重差/无封条) → 天鼠不适合装易碎/电器/需真密封场景。
 - 提交: 02f9bac(问答展开) + ecbf643(debug qa_expand/footmark)。
+
+### 足迹"奋力加载中"真相 = 滑块验证(2026-08-19, 用户指正)
+- 不是卡死/懒加载: 足迹页访问太多次触发滑块验证, 页面显示"奋力加载中"(滑块遮罩在商品列表之上)。
+- 用户可 **点X 关闭 或 滑动 通过**。之前 open_via_footmark/click_from_favorites goto 后未调
+  guard_captcha → 滑块未被检测、误判无卡退收藏。已修: 两处 goto/重载后调 guard_captcha
+  (滑块→human_action_required, 有界等待人工, 超时抛 CaptchaError)。_SLIDER_SELECTORS 已覆盖
+  标准滑块(.nc-container/.nc_iconfont/.baxia-dialog)。
+- 有界重试(2次×滚动+加载态轮询+1次重载, ~15-30s)减少无谓 fallback。
+- 提交: 83b4f64(guard_captcha+有界重试) / c6d0c37(qa标签收紧)。
