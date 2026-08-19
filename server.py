@@ -320,32 +320,6 @@ async def taobao_export_xlsx(products: list[Product], filename: str) -> str:
 
 
 @mcp.tool(annotations=ToolAnnotations(
-    readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=True
-))
-async def taobao_add_to_cart(
-    product_url_or_id: str,
-    options: list[str] | None = None,
-    qty: int = 1,
-    confirm: bool = False,
-    cheapest_available: bool = False,
-) -> str:
-    """Stage one product+variant into the cart — the hand-off to your China agent.
-
-    Preview-only unless confirm=True (gated write). `options` = one value per variant
-    group (e.g. ["P100 质保3年 以换代修"]). cheapest_available=True 且不给 options 时,
-    自动选最便宜有货型号(预览可先确认, 再 confirm=True 加购)。NEVER buys, checks out,
-    pays, or picks an address — only stages into the cart (validates the variant chip +
-    live skuId, then adds via the mtop.trade.addBag API; the 加入购物车 button click is the fallback).
-    Example: {"product_url_or_id":"736546459871","options":["P100 质保7天 80个起售"],"qty":1,"confirm":true}
-    """
-    if await ensure_logged_in() != "logged_in":
-        raise NotLoggedInError()
-    await _rate_limiter.acquire()
-    return await add_to_cart(product_url_or_id, options=options, qty=qty, confirm=confirm,
-                             cheapest_available=cheapest_available)
-
-
-@mcp.tool(annotations=ToolAnnotations(
     readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True
 ))
 async def taobao_read_messages(
@@ -441,41 +415,77 @@ async def taobao_debug_detail(product_url_or_id: str) -> str:
 @mcp.tool(annotations=ToolAnnotations(
     readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True
 ))
-async def taobao_list_cart(max_items: int = 50, exclude_unavailable: bool = False) -> str:
-    """只读: 结构化列出购物车每件商品(标题/型号/优惠/实际到手价/标价).
+async def taobao_cart(
+    action: str = "list",              # list | add | add_batch
+    max_items: int = 50,
+    exclude_unavailable: bool = False,
+    format: str = "md",                # list 时: md | json
+    product_url_or_id: str = "",       # add 时: 商品ID/URL
+    options: list[str] | None = None,  # add 时: 每组型号选一个值
+    qty: int = 1,
+    confirm: bool = False,             # add 时: true 才实际加购
+    cheapest_available: bool = False,  # add 时: 自动选最便宜有货型号
+    items: list[dict] | None = None,   # add_batch 时: 多个待预览项
+) -> str:
+    """购物车(一个工具 + action 参数)。list 只读列出每件(标题/型号/优惠/实际到手价/标价);
+    add 加购(预览/确认两段式: confirm=false 验证芯片+skuId+预览, confirm=true 才写购物车);
+    add_batch 批量预览(全部只走 confirm=false, 不实际加购)。
 
-    买家下单前常用 — 一眼看清每件实际到手价(店铺优惠后/平台加补后/立减)。只读,
-    不写入、不收藏、不发消息。exclude_unavailable=True 时过滤缺货/下架件(采购清单)。
-    Example: {"max_items": 50, "exclude_unavailable": true}
+    add 永不下单/付款/选地址 — 仅入购物车交接给代购(经 mtop.trade.addBag API)。
+    list: format=md(默认)可读表+JSON明细; format=json 仅结构化。
+    add: cheapest_available=True 且不给 options 时自动选最便宜有货型号。
+    add_batch: items=[{"product_url_or_id": "...", "options": [...], "qty": 1, "cheapest_available": true}, ...],
+      单会话顺序+限速, 不批量开 tab, 单件>40s 超时跳过并重置浏览器。
+    只读浏览不写购物车; 导出采购清单请用 taobao_export(type=cart)。
+    Example: {"action": "list"} / {"action": "add", "product_url_or_id": "862892097837", "options": ["特大号白色","1个装"], "confirm": true}
     """
     if await ensure_logged_in() != "logged_in":
         raise NotLoggedInError()
     await _rate_limiter.acquire()
-    from src.extract.cart_price import _cart_markdown, list_cart
+    act = str(action).strip().lower()
 
-    data = await list_cart(max_items=max_items, exclude_unavailable=exclude_unavailable)
-    return _cart_markdown(data) + "\n\n<details><summary>JSON 明细</summary>\n\n```json\n" + \
-        json.dumps(data, ensure_ascii=False, indent=2) + "\n```\n</details>"
+    if act == "list":
+        from src.extract.cart_price import _cart_markdown, list_cart
 
+        data = await list_cart(max_items=max_items, exclude_unavailable=exclude_unavailable)
+        if str(format).strip().lower() == "json":
+            return json.dumps(data, ensure_ascii=False, indent=2)
+        return _cart_markdown(data) + "\n\n<details><summary>JSON 明细</summary>\n\n```json\n" + \
+            json.dumps(data, ensure_ascii=False, indent=2) + "\n```\n</details>"
 
-@mcp.tool(annotations=ToolAnnotations(
-    readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True
-))
-async def taobao_export_cart(max_items: int = 50, exclude_unavailable: bool = False,
-                             filename: str = "", title: str = "") -> str:
-    """把购物车导出为 md 文件(output/cart_<ts>.md) — 采购清单交接代购用.
+    if act == "add":
+        return await add_to_cart(product_url_or_id, options=options, qty=qty, confirm=confirm,
+                                 cheapest_available=cheapest_available)
 
-    只读浏览购物车 + 落盘本地 md(带时间戳头), 不写入、不收藏、不发消息。
-    exclude_unavailable=True 只导可买件。Example: {"exclude_unavailable": true, "filename": "采购清单.md"}
-    """
-    if await ensure_logged_in() != "logged_in":
-        raise NotLoggedInError()
-    await _rate_limiter.acquire()
-    from src.extract.cart_price import export_cart_markdown
+    if act == "add_batch":
+        import asyncio
 
-    res = await export_cart_markdown(max_items=max_items, exclude_unavailable=exclude_unavailable,
-                                     filename=filename, title=title)
-    return f"已导出采购清单到 {res['path']} ({res['count']} 件)\n\n{res['markdown']}"
+        from src.browser.session import get_session
+
+        session = get_session()
+        lines = [f"### 批量预览({len(items or [])} 件, 未加购)\n"]
+        for i, it in enumerate(items or [], start=1):
+            pid = it.get("product_url_or_id") or it.get("product_id")
+            opts = it.get("options")
+            q = it.get("qty") or qty
+            cheapest = bool(it.get("cheapest_available"))
+            try:
+                preview = await asyncio.wait_for(
+                    add_to_cart(pid, options=opts, qty=int(q), confirm=False,
+                                cheapest_available=cheapest),
+                    timeout=40)
+                lines.append(f"{i}. {preview}\n")
+            except asyncio.TimeoutError:
+                try:
+                    await session.close()
+                except Exception:
+                    pass
+                lines.append(f"{i}. ⏱ 超时跳过: {pid} (单件>40s, 已重置浏览器)\n")
+            except Exception as exc:
+                lines.append(f"{i}. ✗ {pid}: {str(exc)[:120]}\n")
+        return "\n".join(lines)
+
+    return f"未知 action={action}; 支持 list / add / add_batch"
 
 
 @mcp.tool(annotations=ToolAnnotations(
@@ -712,51 +722,6 @@ async def taobao_activity_report(limit: int = 12, days: int | None = None) -> st
     md = "\n".join(head)
     return md + "\n\n<details><summary>JSON 明细</summary>\n\n```json\n" + \
         json.dumps(data, ensure_ascii=False, indent=2) + "\n```\n</details>"
-
-
-@mcp.tool(annotations=ToolAnnotations(
-    readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True
-))
-async def taobao_add_to_cart_batch(items: list[dict], qty: int = 1) -> str:
-    """批量预览加购(安全, 不实际加购): 对多个商品逐个验证型号并返回预览.
-
-    items = [{"product_url_or_id": "...", "options": ["每组一个值"], "qty": 1}, ...]
-    每个只走 confirm=False(验证芯片+skuId+预览), 不写购物车 — 买家先看全短名单预览,
-    决定后再逐个 confirm=True 加购。单会话顺序+限速, 不批量开 tab。
-    Example: {"items": [{"product_url_or_id": "862892097837", "options": ["特大号白色","1个装"]},
-                        {"product_url_or_id": "759429259765", "cheapest_available": true}]}
-    """
-    if await ensure_logged_in() != "logged_in":
-        raise NotLoggedInError()
-    await _rate_limiter.acquire()
-    from src.cart import add_to_cart
-
-    import asyncio
-    from src.browser.session import get_session
-
-    session = get_session()
-    lines = [f"### 批量预览({len(items)} 件, 未加购)\n"]
-    for i, it in enumerate(items or [], start=1):
-        pid = it.get("product_url_or_id") or it.get("product_id")
-        opts = it.get("options")
-        q = it.get("qty") or qty
-        cheapest = bool(it.get("cheapest_available"))
-        try:
-            preview = await asyncio.wait_for(
-                add_to_cart(pid, options=opts, qty=int(q), confirm=False,
-                            cheapest_available=cheapest),
-                timeout=40)
-            lines.append(f"{i}. {preview}\n")
-        except asyncio.TimeoutError:
-            # 复用页面卡死(如坏商品在导航/验证时不返回) — 重置会话防拖垮整批
-            try:
-                await session.close()
-            except Exception:
-                pass
-            lines.append(f"{i}. ⏱ 超时跳过: {pid} (单件>40s, 已重置浏览器)\n")
-        except Exception as exc:
-            lines.append(f"{i}. ✗ {pid}: {str(exc)[:120]}\n")
-    return "\n".join(lines)
 
 
 @mcp.tool(annotations=ToolAnnotations(
