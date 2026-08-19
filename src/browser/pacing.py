@@ -47,9 +47,12 @@ async def move_mouse_randomly(page) -> None:
         await asyncio.sleep(random.uniform(0.1, 0.4))
 
 
-async def human_click(page, locator) -> None:
+async def human_click(page, locator, position=None) -> None:
     """Human-like click on a locator: random point inside the element (not center),
     animated mouse path (configurable steps), micro-jitter, varied hover/hold, then down+up.
+
+    position: 可选 (fx, fy) 相对点 0..1(如 (0.5,0.5)=居中) — 当随机点可能命中元素内
+    覆盖物(如足迹卡图片角上的批量勾选框)时, 指定居中+小抖动, 避开覆盖物再点击。
 
     Speed is driven by config [click] (real-person reach ~0.3-0.8s — keep it quick; over
     a remote bridge every mouse.move STEP round-trips, so many steps make a click take
@@ -70,9 +73,15 @@ async def human_click(page, locator) -> None:
         await locator.click(timeout=8000)
         return
     try:
-        # random aim point inside the box, drifting off-center by config.off_center
-        px = box["x"] + box["width"] * (0.5 + random.uniform(-c.off_center, c.off_center))
-        py = box["y"] + box["height"] * (0.5 + random.uniform(-c.off_center, c.off_center))
+        if position:
+            # 指定相对点居中 + 小抖动(避开角落覆盖物/勾选框)
+            j = c.jitter_px
+            px = box["x"] + box["width"] * max(0.05, min(0.95, float(position[0]))) + random.uniform(-j, j)
+            py = box["y"] + box["height"] * max(0.05, min(0.95, float(position[1]))) + random.uniform(-j, j)
+        else:
+            # random aim point inside the box, drifting off-center by config.off_center
+            px = box["x"] + box["width"] * (0.5 + random.uniform(-c.off_center, c.off_center))
+            py = box["y"] + box["height"] * (0.5 + random.uniform(-c.off_center, c.off_center))
         # hover start: off to the side / above the element (a person approaching)
         sx = box["x"] + box["width"] * random.uniform(0.0, 1.0) + random.uniform(-40, 40)
         sy = box["y"] + box["height"] * random.uniform(-0.3, 0.5) + random.uniform(-25, 25)

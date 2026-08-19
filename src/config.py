@@ -91,6 +91,7 @@ class AntiRiskCfg:
     login_timeout_s: int = 180     # QR-login wait for the human scan
     track_cache: bool = True       # once-per-day track/inventory cache (zero same-day traffic)
     fav_flow: bool = True          # master switch for the 收藏链路 (miid fine-detail)
+    miid_channel: str = "auto"     # miid 获取渠道: auto=足迹→收藏 双机制 | footmark 仅足迹 | favorite 仅收藏 | config 静态
     review_sample_per_rating: int = 3  # reviews: take N good/neutral/bad each (anti good-only injection)
 
 

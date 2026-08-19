@@ -52,6 +52,8 @@ captcha_poll_s = 3.0           # 验证码轮询间隔(秒)
 login_timeout_s = 180          # QR 登录等待人工扫码上限(秒)
 track_cache = true             # 物流/库存每日首次实机+同日缓存(零流量); false=每次实机
 fav_flow = true                # 收藏链路(miid 细查)总开关; false=禁止任何收藏动作
+miid_channel = "auto"          # miid 获取渠道(双机制, 用户设计): auto=足迹→收藏兜底 | footmark 仅足迹 | favorite 仅收藏 | config 静态miid
+# 足迹渠道: 不耗收藏配额(30/日), 但列表易受用户手动浏览并发扰动 → 打开后校验 opened_id==pid, 不符即退回收藏
 # 行为不变量(不可配置, 始终执行): 单标签顺序复用不批量开tab · 优先网络拦截少打DOM ·
 # 人类节奏延迟([pacing]) · 人类化模拟点击([click]) · 限速上限(pacing.max_products_per_minute) ·
 # 收藏每日配额(limits.fav_flow_per_day)

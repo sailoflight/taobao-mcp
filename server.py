@@ -210,7 +210,7 @@ async def taobao_product(
         from src.extract.desc import fetch_detail, save_detail_images
 
         # with_reviews 在 mi_id 详情页就地抽取(评论+问答只在该页渲染); 关闭弹窗前一次完成
-        detail = await fetch_detail(product_url_or_id, miid_source="favorite",
+        detail = await fetch_detail(product_url_or_id, miid_source="auto",
                                     with_reviews=with_reviews, reviews_max=reviews_max,
                                     reviews_keyword=reviews_keyword)
         out = {
@@ -610,8 +610,35 @@ async def taobao_debug(
         return json.dumps(await probe_reviews_rendering(product_url_or_id),
                           ensure_ascii=False, indent=2)
 
+    if act == "footmark":
+        from src.browser.session import get_session
+        from src.extract.favorite import open_via_footmark
+        from src.extract.product import _to_product_id
+
+        session = get_session()
+        page = await session.start()
+        res = await open_via_footmark(page, _to_product_id(product_url_or_id))
+        if not res.get("url"):
+            try:  # 结构诊断: 足迹页实际 DOM 形态
+                res["structure"] = await page.evaluate("""() => {
+                  const titles = [...document.querySelectorAll('[class*="footerCard"]')]
+                    .map(c => { const t = c.querySelector('[class*="titleWrap"]'); return t ? (t.innerText || '').trim().slice(0, 40) : ''; })
+                    .filter(Boolean).slice(0, 5);
+                  return {url: location.href, titles};
+                }""")
+            except Exception as exc:
+                res["structure_error"] = str(exc)[:100]
+        popup = res.pop("popup", None)
+        if popup and not popup.is_closed():
+            try:
+                await popup.close()
+            except Exception:
+                pass
+        res["popup_closed"] = True
+        return json.dumps(res, ensure_ascii=False, indent=2)
+
     return (f"未知 action={action}; 支持 detail/sku_structure/sweep_price/miid_price/"
-            "home/collect/favorite/watch/activity/probe_reviews")
+            "home/collect/favorite/watch/activity/probe_reviews/footmark")
 
 
 @mcp.tool(annotations=ToolAnnotations(

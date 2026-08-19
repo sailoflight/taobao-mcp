@@ -231,6 +231,105 @@ async def click_from_favorites(page, pid: str, added_by_us: bool = True) -> dict
     }
 
 
+# 足迹(浏览历史)渠道 — 双机制中的默认 miid 获取渠道(用户设计, 2026-08-19)
+# 原理: 足迹页(i.taobao.com/my_itaobao/itao-tool/footMark)收录最近浏览的商品,
+# 目标商品若在列, 点开其卡 → 生成带 mi_id + last_time 的详情页(新标签, detail.tmall.com),
+# 不消耗收藏配额、不碰收藏。足迹列表易受用户手动浏览并发扰动 → 若列表无目标 id(或未渲染)
+# 则 reason 返回, 由调用方退回收藏渠道(双机制: 默认足迹, 兜底收藏)。
+FOOTMARK_URL = "https://i.taobao.com/my_itaobao/itao-tool/footMark"
+FOOTMARK_CARD_SELS = ('[class*="goodsItem"]', '[class*="footMark"]', '[class*="visitCard"]',
+                      '[class*="historyCard"]')
+
+
+async def open_via_footmark(page, pid: str, title: str = "") -> dict:
+    """[足迹渠道] 模拟点击足迹【第一张】商品卡, 检查打开的 URL 是否为目标 pid.
+
+    实证(2026-08-19): 足迹商品卡(.footerCard--, 含 .titleWrap/.priceWrap)用 JS 导航,
+    无 href/无 data-id, 图片 URL 里的数字也不是商品 id — 无法按 id 定位, 故直接点第一张
+    (足迹按最近浏览排序, 目标若在列通常在最前), 再校验 opened URL 的 id。
+    opened_id != pid(第一张非目标) 或列表为空 → reason 返回, 调用方退回收藏渠道
+    (双机制: 默认足迹, 兜底收藏)。返回 {url, mi_id, opened_id, matches_target, popup, channel, cards},
+    或 {url:None, reason, cards}。
+    """
+    from urllib.parse import parse_qs, urlparse
+
+    from src.browser.pacing import human_scroll
+    from src.extract.miid import miid_from_url
+
+    await page.goto(FOOTMARK_URL, wait_until="domcontentloaded")
+    for _ in range(5):  # 商品足迹区懒加载 — 分段滚动触发
+        try:
+            await human_scroll(page, 2)
+        except Exception:
+            break
+        await human_delay(0.8, 1.5)
+    cards = page.locator('[class*="footerCard"]')
+    n = await cards.count()
+    if n == 0:
+        return {"url": None, "reason": "no footmark product cards rendered",
+                "channel": "footmark", "cards": 0}
+    # 只认"真商品卡": 含 titleWrap + priceWrap 文本
+    product_idx = -1
+    for i in range(min(n, 60)):
+        try:
+            t = (await cards.nth(i).locator('[class*="titleWrap"]').first.inner_text() or "").strip()
+        except Exception:
+            t = ""
+        if t:
+            product_idx = i
+            break
+    if product_idx < 0:
+        return {"url": None, "reason": "no product card with title in footmark",
+                "channel": "footmark", "cards": n}
+    popup = None
+    url = ""
+    click_err = ""
+    try:
+        card = cards.nth(product_idx)
+        # 实证(2026-08-19): 足迹卡 JS 导航由【图片区 productImg】触发; 卡根/标题点击不导航。
+        # 该元素(div+background)的导航 handler 只响应 Playwright 原生 click —
+        # page.mouse 路径(随机点或居中)均不触发(点偏勾选框也非主因)。用 img.click()。
+        img = card.locator('[class*="productImg"]').first
+        if await img.count() == 0:
+            img = card
+        async with page.expect_popup(timeout=20000) as pi:
+            try:
+                await img.click(timeout=8000)
+            except Exception:
+                await human_click(page, img, position=(0.5, 0.5))  # 兜底
+        popup = await pi.value
+        try:
+            await popup.wait_for_load_state("domcontentloaded", timeout=20000)
+        except Exception:
+            pass
+        await human_delay(2.0, 3.2)
+        url = (popup.url or "") if not popup.is_closed() else ""
+        if not url or ("item.htm" not in url and "detail.tmall" not in url):
+            click_err = f"popup opened but url={url[:80]}"
+            url = ""
+            try:
+                await popup.close()
+            except Exception:
+                pass
+    except Exception as exc:
+        # 可能同标签导航而非新标签
+        try:
+            await human_delay(2.0, 3.2)
+            url = page.url or ""
+            if url and "item.htm" not in url and "detail.tmall" not in url:
+                click_err = f"same-tab url={url[:80]}"
+                url = ""
+        except Exception:
+            pass
+    miid = miid_from_url(url)
+    qs = parse_qs(urlparse(url or "").query)
+    opened_id = (qs.get("id") or [None])[0]
+    return {"url": url[:240] if url else None, "mi_id": miid, "opened_id": opened_id,
+            "matches_target": (opened_id == pid) if opened_id else False, "popup": popup,
+            "channel": "footmark", "cards": n, "matched_idx": product_idx,
+            "click_err": click_err or None}
+
+
 # 收藏后出现的弹窗/Toast(判断收藏状态的核心信号)
 FAV_POPUP_JS = r"""() => {
   const out = { popups: [], bodyHas: {} };

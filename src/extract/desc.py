@@ -501,13 +501,17 @@ async def fetch_detail(product_url_or_id: str, miid_source: str = "config",
 
     TWO-PHASE WORKFLOW (query separation, user-designed): 粗查定位 uses
     taobao_search + taobao_fetch_product (NEVER favorites, never regenerates mi_id);
-    细查对比 uses this tool with miid_source="favorite" ONLY on shortlisted products.
+    细查对比 uses this tool ONLY on shortlisted products.
 
+    miid_source: ""/auto(默认, 走 config anti_risk.miid_channel, 即足迹→收藏 双机制) |
+      footmark(仅足迹) | favorite(仅收藏) | config(静态 mi_id, 安全不碰收藏/足迹)。
+    双机制(用户设计, 2026-08-19): 默认先试 足迹(浏览历史, 不耗收藏配额, 但列表易受用户
+    手动浏览并发扰动 → 校验 opened_id==pid), 足迹失败(无卡/打开非目标)再退回 收藏链路。
     with_reviews: 在 mi_id 详情页就地抽取评论(好/中/差分层抽样) — Tmall 评论只在
-    该页渲染(普通 SSR 页无评论卡); mi_id 每次经收藏点击新建、用完即关(无复用 URL),
-    故评论/问答必须在关闭弹窗前一次抽取。QA(问大家)在 true mi_id 上下文下总是顺带抽取。
-    miid_source="config" (DEFAULT — safe, no favorite): uses the static mi_id. Use it
-    for a quick look during 粗查 without touching favorites.
+    该页渲染(普通 SSR 页无评论卡); mi_id 每次经 足迹/收藏 点击新建、用完即关(无复用 URL),
+    故评论/问答必须在关闭弹窗前一次抽取。QA(问大家)在真实 mi_id 上下文下总是顺带抽取。
+    miid_source="config": uses the static mi_id. Use it for a quick look during 粗查
+    without touching favorites/footmark.
     miid_source="favorite" (LOW-RISK, fine-compare, CLAUDE.md §7 paced):
       1. ensure_favorited — judge the #collectBtn color; ONLY add when not favorited,
          never touch/re-order an existing favorite (added_by_us tracks cleanup need).
@@ -529,10 +533,36 @@ async def fetch_detail(product_url_or_id: str, miid_source: str = "config",
     session = get_session()
     page = await session.start()
 
-    entry: dict = {"miid_source": miid_source, "added_by_us": False, "favorite_fallback": False}
+    miid_channel = str(miid_source or "")
+    if not miid_channel or miid_channel == "auto":
+        from src.config import load_config
+
+        miid_channel = load_config().anti_risk.miid_channel or "auto"
+
+    entry: dict = {"miid_source": miid_channel, "added_by_us": False, "favorite_fallback": False}
     harvest_page = page
     popup = None
-    if miid_source == "favorite":
+    footmark_ok = False
+
+    # 1) 足迹渠道(默认, 不耗收藏配额; 列表易受用户手动浏览并发扰动 → 校验 opened_id==pid)
+    if miid_channel in ("auto", "footmark"):
+        from src.extract.favorite import open_via_footmark
+
+        fres = await open_via_footmark(page, pid)
+        if fres.get("url") and fres.get("mi_id") and fres.get("matches_target"):
+            entry["footmark"] = {k: fres[k] for k in ("url", "mi_id", "opened_id", "cards", "matched_idx")
+                                 if k in fres}
+            entry["miid_from"] = "footmark_click"
+            popup = fres.get("popup")
+            harvest_page = popup or page
+            footmark_ok = True
+        else:
+            entry["footmark"] = {k: fres.get(k) for k in ("reason", "cards") if fres.get(k) is not None}
+            entry["footmark_fallback"] = True
+            entry["click_fail_reason"] = fres.get("reason")
+
+    # 2) 收藏渠道(兜底: "auto" 且足迹失败, 或显式 "favorite")
+    if not footmark_ok and miid_channel in ("auto", "favorite"):
         from src.config import load_config
         if not load_config().anti_risk.fav_flow:
             # 收藏链路总开关关闭 — 不碰收藏, 落到静态 config mi_id 快速查看
@@ -556,17 +586,18 @@ async def fetch_detail(product_url_or_id: str, miid_source: str = "config",
             else:
                 fav = await ensure_favorited(page, pid)
                 entry["favorite"] = fav
-            entry["added_by_us"] = bool(fav.get("added_by_us"))
-            res = await click_from_favorites(page, pid, added_by_us=entry["added_by_us"])
-            popup = res.get("popup")
-            if res.get("mi_id") and res.get("matches_target"):
-                entry["clicked_url"] = res["url"]
-                entry["miid_from"] = "favorite_click"
-                harvest_page = popup or page
-            else:
-                entry["favorite_fallback"] = True  # click missed/not found → static config below
-                entry["click_fail_reason"] = res.get("reason")
-                entry["clicked_opened_id"] = res.get("opened_id")
+                entry["added_by_us"] = bool(fav.get("added_by_us"))
+                res = await click_from_favorites(page, pid, added_by_us=entry["added_by_us"])
+                popup2 = res.get("popup")
+                if res.get("mi_id") and res.get("matches_target"):
+                    entry["clicked_url"] = res["url"]
+                    entry["miid_from"] = "favorite_click"
+                    popup = popup2
+                    harvest_page = popup2 or page
+                else:
+                    entry["favorite_fallback"] = True  # click missed/not found → static config below
+                    entry["click_fail_reason"] = res.get("reason")
+                    entry["clicked_opened_id"] = res.get("opened_id")
     else:
         entry["favorite"] = None
 
@@ -607,7 +638,7 @@ async def fetch_detail(product_url_or_id: str, miid_source: str = "config",
     # Price observation (fine-compare): on the mi_id-entered page the personalized
     # channel may show the platform-subsidy / coupon price (e.g. 平台加补后 ¥33.75).
     price_observed: dict = {}
-    if miid_source == "favorite" and not entry.get("favorite_fallback"):
+    if entry.get("miid_from") in ("footmark_click", "favorite_click"):
         from src.extract.selectors import PRICE_LINES_JS, SUBSIDY_PRICE_JS
 
         try:
@@ -620,7 +651,7 @@ async def fetch_detail(product_url_or_id: str, miid_source: str = "config",
             pass
 
     # On-page 评论/问答 (Tmall 只在 mi_id 详情页渲染): 关闭弹窗前就地一次抽取。
-    # mi_id 每次经收藏点击新建、用完即关, 不存在可复用 URL — 所以必须在这里取。
+    # mi_id 每次经 足迹/收藏 点击新建、用完即关, 不存在可复用 URL — 所以必须在这里取。
     reviews_extra: list = []
     qa_extra: list = []
     if harvest_page is not None and harvest_page.url and "item.htm" in harvest_page.url:
@@ -633,7 +664,7 @@ async def fetch_detail(product_url_or_id: str, miid_source: str = "config",
                 reviews_extra = [r.model_dump() for r in revs]
         except Exception as exc:
             reviews_extra = [{"error": str(exc)[:120]}]
-        if miid_source == "favorite" and not entry.get("favorite_fallback"):
+        if entry.get("miid_from") in ("footmark_click", "favorite_click"):
             try:
                 from src.extract.qa import parse_qa
 
@@ -642,7 +673,7 @@ async def fetch_detail(product_url_or_id: str, miid_source: str = "config",
                 qa_extra = [{"error": str(exc)[:120]}]
 
     # Cleanup (user rule): if WE favorited it this round, un-favorite — no residue.
-    if miid_source == "favorite" and entry.get("added_by_us"):
+    if entry.get("added_by_us"):
         try:
             entry["cleanup"] = await ensure_unfavorited(page, pid)
         except Exception as exc:
@@ -764,7 +795,7 @@ async def save_detail_images(product_url_or_id: str, output_dir: str = "", max_i
     pid = _to_product_id(product_url_or_id)
     if detail is None:
         # 独立使用(未在 fine 调用中)时才自行走收藏链路
-        detail = await fetch_detail(pid, miid_source="favorite")
+        detail = await fetch_detail(pid, miid_source="auto")
     urls = detail.get("detail_images") or []
     out_dir = Path(output_dir or f"output/detail_imgs/{pid}")
     out_dir.mkdir(parents=True, exist_ok=True)
