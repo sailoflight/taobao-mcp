@@ -362,6 +362,24 @@ async def probe_reviews_rendering(product_url_or_id: str) -> dict:
                 except Exception as exc:
                     drawer_info["error"] = str(exc)[:120]
                 out["drawer_on_miid"] = drawer_info
+
+                # Q&A(问大家)区结构: 可见卡数 / "查看更多·查看全部"按钮 / 问答页链接
+                qa_info: dict = {}
+                try:
+                    qa_sel = '[class*="askAnswerItem"], [class*="qaItem"], [class*="QA"]'
+                    qa_info["cards"] = await popup.locator(qa_sel).count()
+                    first_qa = popup.locator(qa_sel).first
+                    if await first_qa.count() > 0:
+                        qa_info["first_html"] = (await first_qa.evaluate("el => el.outerHTML") or "")[:1200]
+                    for lbl in ("查看更多", "查看全部问答", "全部问答", "更多问答", "问大家"):
+                        n = await popup.get_by_text(lbl, exact=False).count()
+                        if n:
+                            qa_info.setdefault("buttons", {})[lbl] = n
+                    qa_info["links"] = await popup.evaluate(
+                        """() => [...document.querySelectorAll('a[href*="ask"],a[href*="qa"],a[href*="wenda"],a[href*="answer"],a[href*="wenj"]')].map(a => a.href).slice(0,6)""")
+                except Exception as exc:
+                    qa_info["error"] = str(exc)[:100]
+                out["qa_on_miid"] = qa_info
                 try:
                     await popup.close()
                 except Exception:
