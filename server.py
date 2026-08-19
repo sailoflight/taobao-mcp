@@ -511,20 +511,101 @@ async def taobao_dossier(
 @mcp.tool(annotations=ToolAnnotations(
     readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True
 ))
-async def taobao_debug_detail(product_url_or_id: str) -> str:
-    """[DEBUG] Open one product page and dump HOW the 详情 (description strip) loads.
+async def taobao_debug(
+    action: str,                       # detail|sku_structure|sweep_price|miid_price|home|collect|favorite|watch|activity
+    product_url_or_id: str = "",
+    target: str = "特大号白色",         # sku_structure
+    target_chip: str = "特大号",        # miid_price
+    max_chips: int = 12,               # sweep_price
+    target_pid: str = "",              # collect
+    watch_seconds: int = 180,          # watch
+    start_url: str = "https://detail.tmall.com/item.htm?id=755873641229",  # watch
+    limit: int = 12,                   # activity
+    days: int | None = None,           # activity (None=全部/0=今天/1=近2天)
+) -> str:
+    """调试诊断(一个工具 + action 参数, [DEBUG] 只读/观测用, 不改变账号状态).
 
-    Returns the embedded-data keys (hunting for descUrl/descPath), the page's
-    iframes, a sample of alicdn image URLs, and which desc hosts appear in the
-    HTML. Read-only and paced — used to build the full-detail extractor, then
-    record the mechanism in NOTES.md. Example: {"product_url_or_id": "736546459871"}
+    action=detail|sku_structure|sweep_price|miid_price|home|collect|favorite|watch|activity
+      - detail / sku_structure / sweep_price / miid_price / favorite: 需 product_url_or_id
+      - home: 无需参数(首页广告/商品链接结构 recon, 供自动 mi_id 设计)
+      - collect: 收藏夹 recon(target_pid 可选, 检查置顶卡是否为目标)
+      - watch: 监听器 — 人工操作时记录多页/tab 的 URL 变化 + mi_id(诊断站点漂移)
+      - activity: 会话活动摘要(防风控可观测: run.log 按类型计数 + 最近事件 + 限速/收藏配额遥测)
+    [DEBUG] 仅诊断/观测; 收藏链路调试会收藏再取消(无残留)。Example: {"action": "activity"} / {"action": "watch", "watch_seconds": 60} / {"action": "miid_price", "product_url_or_id": "862892097837"}
     """
     if await ensure_logged_in() != "logged_in":
         raise NotLoggedInError()
     await _rate_limiter.acquire()
-    from src.extract.desc import recon_detail
+    act = str(action).strip().lower()
 
-    return json.dumps(await recon_detail(product_url_or_id), ensure_ascii=False, indent=2)
+    if act == "detail":
+        from src.extract.desc import recon_detail
+
+        return json.dumps(await recon_detail(product_url_or_id), ensure_ascii=False, indent=2)
+    if act == "sku_structure":
+        from src.extract.desc import probe_sku_structure
+
+        return json.dumps(await probe_sku_structure(product_url_or_id, target=target),
+                          ensure_ascii=False, indent=2)
+    if act == "sweep_price":
+        from src.extract.desc import sweep_variant_prices
+
+        return json.dumps(await sweep_variant_prices(product_url_or_id, max_chips=max_chips),
+                          ensure_ascii=False, indent=2)
+    if act == "miid_price":
+        from src.extract.desc import probe_miid_price
+
+        return json.dumps(await probe_miid_price(product_url_or_id, target_chip=target_chip),
+                          ensure_ascii=False, indent=2)
+    if act == "home":
+        from src.extract.miid import recon_home_ads
+
+        return json.dumps(await recon_home_ads(), ensure_ascii=False, indent=2)
+    if act == "collect":
+        from src.extract.favorite import recon_collect
+
+        return json.dumps(await recon_collect(target_pid or ""), ensure_ascii=False, indent=2)
+    if act == "favorite":
+        from src.extract.favorite import recon_favorite
+
+        return json.dumps(await recon_favorite(product_url_or_id), ensure_ascii=False, indent=2)
+    if act == "watch":
+        from src.extract.miid import watch_pages
+
+        return json.dumps(await watch_pages(watch_seconds=watch_seconds, start_url=start_url),
+                          ensure_ascii=False, indent=2)
+    if act == "activity":
+        from pathlib import Path
+
+        from src.config import load_config
+        from src.extract.activity import _summarize_log, read_log_lines
+        from src.extract.fav_quota import quota_status
+
+        out_dir = Path(load_config().output.dir)
+        lines = read_log_lines(out_dir / "run.log")
+        data = _summarize_log(lines, max_events=max(1, min(int(limit or 12), 50)), days=days)
+        pace = _rate_limiter.usage()
+        try:
+            quota = quota_status()
+        except Exception:  # pragma: no cover
+            quota = {}
+        by_type = data.get("by_type") or {}
+        head = [f"### 会话活动摘要(共 {data.get('total', 0)} 条日志事件)"]
+        head.append("- 级别: " + ", ".join(f"{k}:{v}" for k, v in (data.get('by_level') or {}).items()))
+        head.append("- 事件类型: " + (", ".join(f"{k}×{v}" for k, v in by_type.items()) or "—"))
+        head.append("- 限速遥测: " + (json.dumps(pace, ensure_ascii=False) if pace else "—"))
+        head.append("- 收藏配额: " + json.dumps(quota, ensure_ascii=False))
+        head.append("")
+        head.append("| 时间 | 级别 | 类型 | 事件 |")
+        head.append("|---|---|---|---|")
+        for ev in data.get("recent") or []:
+            head.append(f"| {ev['ts']} | {ev['level']} | {ev['type']} | {ev['msg'][:70]} |")
+        md = "\n".join(head)
+        return md + "\n\n<details><summary>JSON 明细</summary>\n\n```json\n" + \
+            json.dumps(data, ensure_ascii=False, indent=2) + "\n```\n</details>"
+
+    return (f"未知 action={action}; 支持 detail/sku_structure/sweep_price/miid_price/"
+            "home/collect/favorite/watch/activity")
 
 
 @mcp.tool(annotations=ToolAnnotations(
@@ -604,91 +685,6 @@ async def taobao_cart(
 
 
 @mcp.tool(annotations=ToolAnnotations(
-    readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=True
-))
-async def taobao_debug_sku_structure(product_url_or_id: str, target: str = "特大号白色") -> str:
-    """[DEBUG] 诊断 SKU 芯片真实结构: 走收藏链路落 mi_id 页, dump valueItem 芯片的
-    selected 态/外层 HTML, 点击目标芯片后对比 URL/价格是否变化 — 定位点击为何不选中。
-    Example: {"product_url_or_id":"862892097837","target":"特大号白色"}
-    """
-    if await ensure_logged_in() != "logged_in":
-        raise NotLoggedInError()
-    await _rate_limiter.acquire()
-    from src.extract.desc import probe_sku_structure
-
-    return json.dumps(await probe_sku_structure(product_url_or_id, target=target),
-                      ensure_ascii=False, indent=2)
-
-
-@mcp.tool(annotations=ToolAnnotations(
-    readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=True
-))
-async def taobao_debug_sweep_price(product_url_or_id: str, max_chips: int = 12) -> str:
-    """[DEBUG] 细查逐型号价格扫描: 走收藏链路落到带 mi_id 的页面, 逐个点击 SKU 型号芯片,
-    读每个型号的价格(店铺优惠后/券后/到手价) — 确认能分清每个 SKU 的价格。
-    May add+cleanup a favorite (benign, reversible). Example: {"product_url_or_id":"862892097837"}
-    """
-    if await ensure_logged_in() != "logged_in":
-        raise NotLoggedInError()
-    await _rate_limiter.acquire()
-    from src.extract.desc import sweep_variant_prices
-
-    return json.dumps(await sweep_variant_prices(product_url_or_id, max_chips=max_chips),
-                      ensure_ascii=False, indent=2)
-
-
-@mcp.tool(annotations=ToolAnnotations(
-    readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=True
-))
-async def taobao_debug_miid_price(product_url_or_id: str, target_chip: str = "特大号") -> str:
-    """[DEBUG] 细查观察: 走收藏链路落到带 mi_id 的个性化页面, 尝试选中目标变体芯片,
-    读该页显示的价格(平台加补后/到手价/价格行), 看优惠价是否可见(如天鼠 ¥33.75)。
-    May add+cleanup a favorite (benign, reversible). Example: {"product_url_or_id":"862892097837","target_chip":"特大号"}
-    """
-    if await ensure_logged_in() != "logged_in":
-        raise NotLoggedInError()
-    await _rate_limiter.acquire()
-    from src.extract.desc import probe_miid_price
-
-    return json.dumps(await probe_miid_price(product_url_or_id, target_chip=target_chip),
-                      ensure_ascii=False, indent=2)
-
-
-@mcp.tool(annotations=ToolAnnotations(
-    readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True
-))
-async def taobao_debug_home() -> str:
-    """[DEBUG] Dump the Taobao homepage's ad/product link structure (for building the
-    auto mi_id click). Returns product-page anchors + ad-like containers. Read-only.
-    Example: {}
-    """
-    if await ensure_logged_in() != "logged_in":
-        raise NotLoggedInError()
-    await _rate_limiter.acquire()
-    from src.extract.miid import recon_home_ads
-
-    return json.dumps(await recon_home_ads(), ensure_ascii=False, indent=2)
-
-
-@mcp.tool(annotations=ToolAnnotations(
-    readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=True
-))
-async def taobao_debug_collect(target_pid: str = "") -> str:
-    """[DEBUG] One-pass 收藏夹 recon: the JS-rendered goodsItem grid + the click-generated
-    tracking URL. Waits for the grid, dumps card samples, clicks the FIRST card (a fresh
-    favorite sits at top) and captures the NEW-TAB URL's fresh mi_id (the exact mechanism
-    taobao_fetch_detail(favorite) uses). Pass target_pid to check if the top card is it.
-    Read-only (one click + popup open, no writes). Example: {"target_pid": "755873641229"}
-    """
-    if await ensure_logged_in() != "logged_in":
-        raise NotLoggedInError()
-    await _rate_limiter.acquire()
-    from src.extract.favorite import recon_collect
-
-    return json.dumps(await recon_collect(target_pid or ""), ensure_ascii=False, indent=2)
-
-
-@mcp.tool(annotations=ToolAnnotations(
     readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True
 ))
 async def taobao_favorites(
@@ -720,43 +716,6 @@ async def taobao_favorites(
 
 
 @mcp.tool(annotations=ToolAnnotations(
-    readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=True
-))
-async def taobao_debug_favorite(product_url_or_id: str) -> str:
-    """[DEBUG] Probe the 收藏 (favorite) flow for the fixed-position mi_id design:
-    finds the 收藏 button on the product page, clicks it, then checks which favorites
-    page URL lists the item and whether its links carry mi_id. May ADD the product to
-    the account's favorites (benign, reversible). Example: {"product_url_or_id": "755873641229"}
-    """
-    if await ensure_logged_in() != "logged_in":
-        raise NotLoggedInError()
-    await _rate_limiter.acquire()
-    from src.extract.favorite import recon_favorite
-
-    return json.dumps(await recon_favorite(product_url_or_id), ensure_ascii=False, indent=2)
-
-
-@mcp.tool(annotations=ToolAnnotations(
-    readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True
-))
-async def taobao_debug_pages_watch(watch_seconds: int = 180, start_url: str = "https://detail.tmall.com/item.htm?id=755873641229") -> str:
-    """[DEBUG] Record URL changes + mi_id across MULTIPLE pages/tabs while a human operates.
-
-    Tracks every page in the browser context (new tabs included). Every URL change is
-    logged with its mi_id, tagged item/fav/cart/search. Use it to record a manual
-    收藏→收藏夹→点击 flow so we can automate it. Read-only (URL/DOM observation).
-    Example: {"watch_seconds": 180, "start_url": "https://detail.tmall.com/item.htm?id=755873641229"}
-    """
-    if await ensure_logged_in() != "logged_in":
-        raise NotLoggedInError()
-    await _rate_limiter.acquire()
-    from src.extract.miid import watch_pages
-
-    return json.dumps(await watch_pages(watch_seconds=watch_seconds, start_url=start_url),
-                      ensure_ascii=False, indent=2)
-
-
-@mcp.tool(annotations=ToolAnnotations(
     readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=True
 ))
 async def taobao_inventory(
@@ -784,48 +743,6 @@ async def taobao_inventory(
     return (f"Wrote {s['lines']} line items ({s['orders']} orders, {s['date_range']}) to {s['path']}. "
             f"Landed total ¥{s['landed_total']:,.2f}; {s['images']} images; "
             f"{s['flagged']} custom-link lines flagged. Sheets: Inventory + By Category.")
-
-
-@mcp.tool(annotations=ToolAnnotations(
-    readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True
-))
-async def taobao_activity_report(limit: int = 12, days: int | None = None) -> str:
-    """会话活动摘要(防风控可观测): 读 output/run.log 统计工具活动
-    (搜索/抓取/收藏/验证码等按类型计数) + 最近事件 + 限速/收藏配额遥测。只读。
-    days>0 时只看最近 N 天的事件(默认全部)。
-    Example: {"limit": 12, "days": 1}
-    """
-    if await ensure_logged_in() != "logged_in":
-        raise NotLoggedInError()
-    await _rate_limiter.acquire()
-    from pathlib import Path
-
-    from src.config import load_config
-    from src.extract.activity import _summarize_log, read_log_lines
-    from src.extract.fav_quota import quota_status
-
-    out_dir = Path(load_config().output.dir)
-    lines = read_log_lines(out_dir / "run.log")
-    data = _summarize_log(lines, max_events=max(1, min(int(limit or 12), 50)), days=days)
-    pace = _rate_limiter.usage()
-    try:
-        quota = quota_status()
-    except Exception as exc:  # pragma: no cover
-        quota = {"error": str(exc)[:80]}
-    by_type = data.get("by_type") or {}
-    head = [f"### 会话活动摘要(共 {data.get('total', 0)} 条日志事件)"]
-    head.append(f"- 级别: " + ", ".join(f"{k}:{v}" for k, v in (data.get('by_level') or {}).items()))
-    head.append(f"- 事件类型: " + (", ".join(f"{k}×{v}" for k, v in by_type.items()) or "—"))
-    head.append(f"- 限速遥测: " + (json.dumps(pace, ensure_ascii=False) if pace else "—"))
-    head.append(f"- 收藏配额: " + json.dumps(quota, ensure_ascii=False))
-    head.append("")
-    head.append("| 时间 | 级别 | 类型 | 事件 |")
-    head.append("|---|---|---|---|")
-    for ev in data.get("recent") or []:
-        head.append(f"| {ev['ts']} | {ev['level']} | {ev['type']} | {ev['msg'][:70]} |")
-    md = "\n".join(head)
-    return md + "\n\n<details><summary>JSON 明细</summary>\n\n```json\n" + \
-        json.dumps(data, ensure_ascii=False, indent=2) + "\n```\n</details>"
 
 
 @mcp.tool(annotations=ToolAnnotations(
