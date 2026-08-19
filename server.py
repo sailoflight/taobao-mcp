@@ -251,13 +251,22 @@ async def taobao_product(
 @mcp.tool(annotations=ToolAnnotations(
     readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True
 ))
-async def taobao_compare_products(product_ids: list[str], deep_price: bool = False, max_items: int = 10,
-                                  sort_by: str = "", min_review_total: int = 0) -> str:
-    """粗查批量对比(买家挑选常用): 对短名单商品逐个 fetch, 返回一屏对比行
-    (标题/店铺/价区间/型号数/价格示例/评论/补贴提示). 只读 — 不收藏、不重新生成 mi_id、
-    不发任何消息. 单会话顺序+限速. product_ids 可传商品ID或完整淘宝/天猫URL(自动提取 id).
-    max_items 控制最多对比件数(默认 10, 上限 20). sort_by: ''(输入序)/'price'(有货最低价升)/
-    'unit'(最低单价升), 错误行排最后. min_review_total>0 时过滤掉评价数低于阈值的商品.
+async def taobao_compare(
+    product_ids: list[str],
+    format: str = "md",          # md(默认, 可读对比表+JSON明细) | json
+    deep_price: bool = False,
+    max_items: int = 10,
+    sort_by: str = "",
+    min_review_total: int = 0,
+) -> str:
+    """粗查批量对比(买家挑选常用): 输入最小化 — 仅商品 id/URL 列表(自动提取 id)。
+
+    format=md(默认): 一屏对比行(标题/店铺/价区间/型号数/价格示例/评论/补贴提示) + JSON 明细;
+    format=json: 仅结构化 JSON(供后续复用)。
+    sort_by: ''(输入序)/'price'(有货最低价升)/'unit'(最低单价升), 错误行排最后;
+    min_review_total>0 过滤评价数低于阈值的商品; deep_price=True 读实时"平台加补后"价(较慢)。
+    max_items 控制最多对比件数(默认 10, 上限 20)。
+    只读 — 不收藏/不重新生成 mi_id/不发消息。留档导出请用 taobao_export(type=compare)。
     Example: {"product_ids": ["862892097837", "759429259765"], "sort_by": "unit", "min_review_total": 500}
     """
     if await ensure_logged_in() != "logged_in":
@@ -268,6 +277,8 @@ async def taobao_compare_products(product_ids: list[str], deep_price: bool = Fal
 
     data = await compare_products(product_ids, deep_price=deep_price, max_items=max_items,
                                   sort_by=sort_by, min_review_total=min_review_total)
+    if str(format).strip().lower() == "json":
+        return json.dumps(data, ensure_ascii=False, indent=2)
     rows = data.get("products") or []
     md = _to_markdown(rows, data.get("count", 0))
     return md + "\n\n<details><summary>JSON 明细</summary>\n\n```json\n" + \
@@ -304,59 +315,6 @@ async def taobao_export_xlsx(products: list[Product], filename: str) -> str:
     """
     path = await anyio.to_thread.run_sync(write_xlsx, products, filename)  # don't block the loop
     return (f"Wrote {len(products)} product(s) to {path} — sheets: Summary, Variants, Reviews.\n"
-            "⚠️ 注意: 本部署环境 .xlsx 文件会被外部机制约 12 秒后加密成 %TSD-Header blob, "
-            "无法使用; 如需留档请用 taobao_export_compare(md) 或导出后立即复制.")
-
-
-@mcp.tool(annotations=ToolAnnotations(
-    readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=True
-))
-async def taobao_export_compare(product_ids: list[str], deep_price: bool = False, max_items: int = 10,
-                                 sort_by: str = "", with_variants: bool = False,
-                                 min_review_total: int = 0, title: str = "") -> str:
-    """短名单对比并导出 markdown 文件(output/compare_<ts>.md)留档。
-
-    Reuses taobao_compare_products 的逻辑(只读浏览 + 落盘本地文件)。不收藏、不重新生成
-    mi_id、不发消息。返回文件路径 + markdown 内容。product_ids 可传ID或完整URL。
-    max_items 控制对比件数(1..20); sort_by: ''(输入序)/'price'/'unit';
-    with_variants=True 时追加每个商品全型号价表(完整报告); min_review_total 过滤低评价商品;
-    title 可选(自定义报告标题, 如"收纳箱对比")。
-    Example: {"product_ids": ["862892097837", "759429259765"], "title": "收纳箱对比", "with_variants": true}
-    """
-    if await ensure_logged_in() != "logged_in":
-        raise NotLoggedInError()
-    await _rate_limiter.acquire()
-    max_items = max(1, min(int(max_items or 10), 20))
-    from src.extract.compare import export_compare_markdown
-
-    res = await export_compare_markdown(product_ids, deep_price=deep_price, max_items=max_items,
-                                        sort_by=sort_by, with_variants=with_variants,
-                                        min_review_total=min_review_total, title=title)
-    return f"已导出对比到 {res['path']} ({res['count']} 件)\n\n{res['markdown']}"
-
-
-@mcp.tool(annotations=ToolAnnotations(
-    readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=True
-))
-async def taobao_export_compare_xlsx(product_ids: list[str], deep_price: bool = False, filename: str = "",
-                                      max_items: int = 10, sort_by: str = "", min_review_total: int = 0) -> str:
-    """短名单对比并导出 xlsx 电子表格(output/compare_<ts>.xlsx), 买家保留对比表。
-
-    Reuses taobao_compare_products 的逻辑(只读浏览 + 落盘本地文件)。不收藏、不重新生成
-    mi_id、不发消息。product_ids 可传ID或完整URL。max_items 控制对比件数(1..20);
-    sort_by: ''(输入序)/'price'/'unit'; min_review_total 过滤低评价商品。
-    Example: {"product_ids": ["862892097837", "759429259765"], "sort_by": "unit"}
-    """
-    if await ensure_logged_in() != "logged_in":
-        raise NotLoggedInError()
-    await _rate_limiter.acquire()
-    max_items = max(1, min(int(max_items or 10), 20))
-    from src.extract.compare import export_compare_xlsx
-
-    res = await export_compare_xlsx(product_ids, deep_price=deep_price, filename=filename,
-                                    max_items=max_items, sort_by=sort_by,
-                                    min_review_total=min_review_total)
-    return (f"已导出对比 xlsx 到 {res['path']} ({res['count']} 件)\n"
             "⚠️ 注意: 本部署环境 .xlsx 文件会被外部机制约 12 秒后加密成 %TSD-Header blob, "
             "无法使用; 如需留档请用 taobao_export_compare(md) 或导出后立即复制.")
 
