@@ -637,6 +637,11 @@ async def taobao_debug(
         res["popup_closed"] = True
         return json.dumps(res, ensure_ascii=False, indent=2)
 
+    if act == "qa_expand":
+        from src.extract.qa import probe_qa_expand
+
+        return json.dumps(await probe_qa_expand(product_url_or_id), ensure_ascii=False, indent=2)
+
     return (f"未知 action={action}; 支持 detail/sku_structure/sweep_price/miid_price/"
             "home/collect/favorite/watch/activity/probe_reviews/footmark")
 
