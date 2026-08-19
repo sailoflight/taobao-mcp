@@ -187,7 +187,7 @@ async def taobao_product(
     save_images: bool = False,   # fine: 下载详情长图到本地 output/detail_imgs/<pid>/
 ) -> Product | str:
     """商品查询(三类查询之一)。B粗查 coarse: 点击进入商品, 取全型号原价(无 mi_id);
-    C细查 fine: 完整收藏线路(mi_id 内建, 不再暴露独立取 mi_id 工具)进入, 拿图文详情 + 可选评论/图片。
+    C细查 fine: 足迹→收藏 双机制(miid 内建, 默认足迹不耗收藏配额, 失败退回收藏)进入, 拿图文详情 + 可选评论/图片。
 
     A类(仅搜索框标题+外部标价, 不点击进入)由 taobao_search 承担 — 本工具只进商品页。
     参数: product_url_or_id(必填) · mode=coarse(默认)|fine · format=json(默认)|md(coarse 时) ·

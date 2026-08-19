@@ -1461,3 +1461,16 @@ Our deliverables: (i) a price for **every** SKU via `skuBase`/`sku2info` join; (
   → 答 "只能装衣服被子" — 佐证天鼠箱体偏软、仅适合装衣物被子, 不适合承重(电器/易碎),
   与"密封=营销扣盖、非真密封条"一致。
 - Q&A 共 2 条: [1] 问puls款带轮带盖高度51? 答"不是姐妹"; [2] 如上(最后一条)。
+
+### 足迹渠道 + 双机制(miid 获取, 2026-08-19, 用户设计+watch演示)
+- **足迹(footMark)渠道**: i.taobao.com/my_itaobao/itao-tool/footMark 收录最近浏览商品;
+  点第一张商品卡(JS 导航, .footerCard-- 卡) → 新标签 detail.tmall.com?id=…&last_time=…&mi_id=…&spm=tbpc.mytb_footmark.item.goods
+  → **不耗收藏配额(30/日)**。列表易受用户手动浏览并发扰动 → 校验 opened_id==pid。
+- **足迹卡结构(实证)**: .footerCard--(含 .titleWrap/.priceWrap/.productImg/角上 selectBox 勾选框);
+  无 href/无 data-id, 图片 URL 数字非商品 id。导航由【productImg 图片区】触发, 且只响应
+  Playwright 原生 click(page.mouse 路径不触发) → img.click() 为主。human_click 增 position 参数。
+- **双机制**: fetch_detail miid_channel=auto(默认) → 先足迹, 失败(无卡/打开非目标)退回收藏链路;
+  可配 footmark/favorite/config。配置 [anti_risk] miid_channel。
+- 实机: fine+with_reviews → miid_from=footmark_click, 配额未耗, 9评论+2问答+23详情图。
+- 提交: c3ea43f(双机制) + 80cb3ba(探针问答结构)。
+- 遗留: 问答卡需展开才见多个回答("查看更多/查看全部问答"按钮 1 个) — 完整问答分页/展开未做, 需要时采集人工数据。
