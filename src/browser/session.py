@@ -279,7 +279,7 @@ class BrowserSession:
             return False
         return self.login_confirmed
 
-    async def ensure_logged_in(self, timeout_s: int = 180, poll_s: float = 3.0) -> str:
+    async def ensure_logged_in(self, timeout_s: int | None = None, poll_s: float | None = None) -> str:
         """Ensure a logged-in session, actively polling for the human's QR scan.
 
         Fast path: a recent page-verified login is reused without any extra
@@ -288,6 +288,9 @@ class BrowserSession:
         Returns 'logged_in', or a 'login_required: ...' message if the human
         hasn't scanned within timeout_s.
         """
+        ar = load_config().anti_risk
+        timeout_s = ar.login_timeout_s if timeout_s is None else timeout_s
+        poll_s = 3.0 if poll_s is None else poll_s
         page = await self.start()
 
         if (
@@ -388,13 +391,17 @@ class BrowserSession:
                 pass
         return False
 
-    async def guard_captcha(self, page=None, timeout_s: int = 300, poll_s: float = 3.0) -> None:
+    async def guard_captcha(self, page=None, timeout_s: int | None = None, poll_s: float | None = None) -> None:
         """If a slider/punish/login wall is showing, pause and wait for the human.
 
         Soft '访问太频繁' popups are dismissed automatically first. Sets
         ``human_action_required`` and polls until the page clears. Raises
         CaptchaError on timeout. Never auto-solves a real slider (§7.4).
+        Bounded by anti_risk.captcha_timeout_s (config.toml).
         """
+        ar = load_config().anti_risk
+        timeout_s = ar.captcha_timeout_s if timeout_s is None else timeout_s
+        poll_s = ar.captcha_poll_s if poll_s is None else poll_s
         page = page or self.page
         if page is None:
             return

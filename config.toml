@@ -32,6 +32,7 @@ off_center = 0.15             # aim drift from center (fraction of box)
 max_reviews = 60             # per product, paginated
 review_pages = 4
 fav_flow_per_day = 30            # daily cap on the 收藏链路 (favorite flow)
+review_sample_per_rating = 3     # 评论聚合: 好/中/差评各取 N 条(防被注入好评)
 
 [output]
 dir = "./output"
@@ -42,3 +43,15 @@ dir = "./output"
 # Discovered live 2026-08-18 (see NOTES.md). This is ACCOUNT-SPECIFIC — keep it in the
 # gitignored config.local.toml (or it's set at runtime by taobao_get_miid → output/.miid.json).
 mi_id = ""
+
+[anti_risk]
+# 防风控参数全量集中体现(每一项对应一个运行时防护动作)。运行时修改请用 taobao_config 工具
+# (写入 gitignored output/.config_overrides.toml, 不污染本文件), 首次 set 需人工二次确认。
+captcha_timeout_s = 300        # 验证码人工清除有界等待上限; 超时抛 CaptchaError, 绝不自动解决
+captcha_poll_s = 3.0           # 验证码轮询间隔(秒)
+login_timeout_s = 180          # QR 登录等待人工扫码上限(秒)
+track_cache = true             # 物流/库存每日首次实机+同日缓存(零流量); false=每次实机
+fav_flow = true                # 收藏链路(miid 细查)总开关; false=禁止任何收藏动作
+# 行为不变量(不可配置, 始终执行): 单标签顺序复用不批量开tab · 优先网络拦截少打DOM ·
+# 人类节奏延迟([pacing]) · 人类化模拟点击([click]) · 限速上限(pacing.max_products_per_minute) ·
+# 收藏每日配额(limits.fav_flow_per_day)

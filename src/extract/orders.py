@@ -129,8 +129,10 @@ async def track_orders(
     ONCE-PER-DAY cap (anti-detection): the first call each day fetches live and caches the
     result; later same-day calls return the cache with NO Taobao traffic. Pass force=True
     only when you genuinely need a same-day refresh (e.g. a parcel just arrived).
+    The cache is controlled by anti_risk.track_cache (config.toml): true=once-per-day,
+    false=always fetch live.
     """
-    if not force:
+    if (not force) and load_config().anti_risk.track_cache:
         cached = _load_cached_today()
         if cached is not None:
             return cached   # already ran today — serve cache, hit Taobao zero times

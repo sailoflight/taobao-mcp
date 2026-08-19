@@ -1075,6 +1075,41 @@ async def taobao_export_daily(filename: str = "", title: str = "今日交接") -
     return f"已导出今日交接单到 {path}\n\n{body}"
 
 
+@mcp.tool(annotations=ToolAnnotations(
+    readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False
+))
+async def taobao_config(action: str = "get", key: str = "", value: str = "", confirm: bool = False) -> str:
+    """配置查询/修改(只读 get / 写 set)。防风控参数全部在 config.toml 的 [browser][pacing][click][limits][output][detail][anti_risk] 体现。
+
+    action=get: 返回当前生效配置(markdown, 含本地覆盖)。只读, 零流量。
+    action=set: 修改单个键, 格式 "section.key"(如 pacing.min_delay_s / anti_risk.captcha_timeout_s)。
+      - 首次请先 confirm=false 预览: 返回确认+人工提醒文案, 不写入。
+      - 人工核对后以 confirm=true 再次调用才生效。
+      - 写入 gitignored output/.config_overrides.toml(不污染 config.toml); load_config 检测 mtime 自动生效。
+      - ⚠️ 防风控参数直接影响账号安全, 修改请在人工在场时进行。
+    Example: {"action": "get"} / {"action": "set", "key": "anti_risk.track_cache", "value": "false"} / 确认时 {"action": "set", "key": "...", "value": "...", "confirm": true}
+    """
+    from src.config import _SECTIONS, apply_override, load_config
+
+    if action == "get":
+        cfg = load_config()
+        md = ["## 当前生效配置", ""]
+        for section, cls in _SECTIONS:
+            obj = getattr(cfg, section)
+            md.append(f"### [{section}]")
+            for name in cls.__dataclass_fields__:
+                md.append(f"- `{section}.{name}` = {getattr(obj, name)}")
+            md.append("")
+        ov = load_config().output.dir + "/.config_overrides.toml"
+        md.append(f"> 运行时覆盖: {ov}(gitignored, 存在时优先于 config.toml)")
+        return "\n".join(md)
+    if action == "set":
+        if not key:
+            return "key 必填, 格式 section.key, 如 anti_risk.track_cache。已知键见 get。"
+        return apply_override(key, value, confirm=confirm)["message"]
+    return f"未知 action={action}; 支持 get / set"
+
+
 def main() -> None:
     """Run stdio for Codex, or authenticated Streamable HTTP for public hosting."""
     mcp.run(transport=_TRANSPORT)

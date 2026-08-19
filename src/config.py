@@ -7,6 +7,7 @@ server still runs if config.toml is absent.
 
 from __future__ import annotations
 
+import json
 import os
 import tomllib
 from dataclasses import dataclass
@@ -77,6 +78,23 @@ class DetailCfg:
 
 
 @dataclass(frozen=True)
+class AntiRiskCfg:
+    """Anti-block parameters, all surfaced in config.toml [anti_risk].
+
+    Every runtime protection maps to a key here; a long-running server re-reads on
+    mtime change (load_config), so taobao_config runtime edits take effect live.
+    Behavioural invariants (single-tab reuse, network-interception-first, human
+    pacing/click, rate cap, daily fav quota) are documented in config.toml comments.
+    """
+    captcha_timeout_s: int = 300   # bounded wait for the human to clear a captcha; then CaptchaError
+    captcha_poll_s: float = 3.0    # captcha polling interval
+    login_timeout_s: int = 180     # QR-login wait for the human scan
+    track_cache: bool = True       # once-per-day track/inventory cache (zero same-day traffic)
+    fav_flow: bool = True          # master switch for the 收藏链路 (miid fine-detail)
+    review_sample_per_rating: int = 3  # reviews: take N good/neutral/bad each (anti good-only injection)
+
+
+@dataclass(frozen=True)
 class Config:
     browser: BrowserCfg
     pacing: PacingCfg
@@ -84,6 +102,23 @@ class Config:
     limits: LimitsCfg
     output: OutputCfg
     detail: DetailCfg
+    anti_risk: AntiRiskCfg
+
+
+_SECTIONS: tuple[tuple[str, type], ...] = (
+    ("browser", BrowserCfg),
+    ("pacing", PacingCfg),
+    ("click", ClickCfg),
+    ("limits", LimitsCfg),
+    ("output", OutputCfg),
+    ("detail", DetailCfg),
+    ("anti_risk", AntiRiskCfg),
+)
+
+
+def known_keys() -> list[str]:
+    """All known config keys as 'section.key', for taobao_config key validation."""
+    return [f"{sec}.{name}" for sec, cls in _SECTIONS for name in cls.__dataclass_fields__]
 
 
 _CACHE: dict = {}
@@ -109,9 +144,9 @@ def _persisted_miid() -> str:
 
 def load_config(path: str | Path = "config.toml") -> Config:
     """Parse config.toml into a typed Config. Cached, but RE-READ when the file's mtime
-    changes, so a long-running server picks up runtime edits. A sibling
-    ``config.local.toml`` (or ``TAOBAO_CONFIG_LOCAL``) overrides machine-specific
-    values and is intentionally ignored by Git. Unknown keys are ignored."""
+    changes, so a long-running server picks up runtime edits. Merge priority (low→high):
+    config.toml < config.local.toml (gitignored, per-machine) < output/.config_overrides.toml
+    (written by taobao_config set; gitignored, machine-local). Unknown keys are ignored."""
     p = Path(path)
     local_override = os.environ.get("TAOBAO_CONFIG_LOCAL", "").strip()
     local_p = Path(local_override).expanduser() if local_override else p.with_name("config.local.toml")
@@ -119,19 +154,33 @@ def load_config(path: str | Path = "config.toml") -> Config:
     local_mtime = local_p.stat().st_mtime if local_p.exists() else 0.0
     miid_file = Path("output") / ".miid.json"
     miid_mtime = miid_file.stat().st_mtime if miid_file.exists() else 0.0
-    key = (str(p), mtime, str(local_p), local_mtime, miid_mtime)
+
+    # overrides file lives under output.dir (read from base config; default "./output")
+    base_data: dict = {}
+    if p.exists():
+        with p.open("rb") as f:
+            base_data = tomllib.load(f)
+    out_dir = base_data.get("output", {}).get("dir", "./output") if isinstance(base_data.get("output"), dict) else "./output"
+    ov_p = Path(out_dir) / ".config_overrides.toml"
+    ov_mtime = ov_p.stat().st_mtime if ov_p.exists() else 0.0
+
+    key = (str(p), mtime, str(local_p), local_mtime, miid_mtime, ov_mtime)
     if key in _CACHE:
         return _CACHE[key]
 
-    data: dict = {}
-    if p.exists():
-        with p.open("rb") as f:
-            data = tomllib.load(f)
+    data: dict = dict(base_data)
 
     if local_p.exists():
         with local_p.open("rb") as f:
             local_data = tomllib.load(f)
         for section, values in local_data.items():
+            if isinstance(values, dict):
+                data.setdefault(section, {}).update(values)
+
+    if ov_p.exists():
+        with ov_p.open("rb") as f:
+            ov_data = tomllib.load(f)
+        for section, values in ov_data.items():
             if isinstance(values, dict):
                 data.setdefault(section, {}).update(values)
 
@@ -146,7 +195,91 @@ def load_config(path: str | Path = "config.toml") -> Config:
         limits=LimitsCfg(**_filter(LimitsCfg, "limits")),
         output=OutputCfg(**_filter(OutputCfg, "output")),
         detail=DetailCfg(mi_id=_persisted_miid() or _filter(DetailCfg, "detail").get("mi_id", "")),
+        anti_risk=AntiRiskCfg(**_filter(AntiRiskCfg, "anti_risk")),
     )
     _CACHE.clear()      # keep only the latest base + local override pair
     _CACHE[key] = cfg
     return cfg
+
+
+def _toml_literal(v) -> str:
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, (int, float)):
+        return str(v)
+    return json.dumps(v)  # str quoted
+
+
+def _write_toml(data: dict, path: Path) -> None:
+    """Write a flat section/key TOML (our config has no nesting beyond [section])."""
+    lines: list[str] = []
+    for section, values in data.items():
+        if isinstance(values, dict) and values:
+            lines.append(f"[{section}]")
+            for k, v in values.items():
+                lines.append(f"{k} = {_toml_literal(v)}")
+            lines.append("")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+    except OSError as e:
+        raise ValueError(f"无法写入配置覆盖文件 {path}: {e}") from e
+
+
+def _coerce(raw: str, hint):
+    if hint is bool:
+        return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+    if hint is int:
+        return int(str(raw).strip())
+    if hint is float:
+        return float(str(raw).strip())
+    return str(raw)
+
+
+def apply_override(key: str, value: str = "", confirm: bool = False) -> dict:
+    """taobao_config set backend. Writes to gitignored output/.config_overrides.toml.
+
+    confirm=False → validate + return a preview with the human reminder, NO write.
+    confirm=True → write the override; load_config picks it up on next read.
+    """
+    import json as _json  # noqa: F401 (kept for future typed overrides)
+
+    if "." not in key:
+        return {"ok": False, "message": f"key 格式应为 section.key(如 pacing.min_delay_s)。已知键: {', '.join(known_keys())}"}
+    section, name = key.split(".", 1)
+    cls = dict(_SECTIONS).get(section)
+    if cls is None or name not in cls.__dataclass_fields__:
+        return {"ok": False, "message": f"未知配置键 {key}。已知键: {', '.join(known_keys())}"}
+
+    # NOTE: `from __future__ import annotations` turns field .type into a string, so we must
+    # resolve real types via typing.get_type_hints before coercing the raw value.
+    try:
+        import typing
+        hint = typing.get_type_hints(cls).get(name, str)
+    except Exception:
+        hint = str
+    try:
+        coerced = _coerce(value, hint)
+    except (TypeError, ValueError):
+        return {"ok": False, "message": f"值 '{value}' 无法转换为 {getattr(hint, '__name__', hint)}"}
+
+    from src.config import load_config as _lc  # fresh, to keep cache key current
+    _ = _lc()
+
+    ov_p = Path(load_config().output.dir) / ".config_overrides.toml"
+    data: dict = {}
+    if ov_p.exists():
+        import tomllib as _tl
+        with ov_p.open("rb") as f:
+            data = _tl.load(f)
+    data.setdefault(section, {})[name] = coerced
+
+    reminder = ("⚠️ 防风控参数直接影响账号安全。请人工在场并再次确认后才应设置 confirm=true 使生效; "
+                "生效后 load_config 会在下次读取时自动应用(mtime 检测)。")
+    if not confirm:
+        return {"ok": False, "message": f"预览(未写入): {key} → {value}。\n{reminder}\n如确认请以 confirm=true 再次调用。"}
+    try:
+        _write_toml(data, ov_p)
+    except ValueError as e:
+        return {"ok": False, "message": str(e)}
+    return {"ok": True, "message": f"已生效: {key} → {coerced}(写入 {ov_p}, gitignored)。\n{reminder}"}

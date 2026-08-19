@@ -528,21 +528,29 @@ async def fetch_detail(product_url_or_id: str, miid_source: str = "config") -> d
     harvest_page = page
     popup = None
     if miid_source == "favorite":
-        from src.extract.favorite import click_from_favorites, ensure_favorited, ensure_unfavorited
-        from src.extract.fav_quota import check_and_record
-
-        quota = check_and_record()  # anti-risk: daily cap on the favorite flow
-        entry["quota"] = quota
-        if not quota.get("allowed"):
-            # 今日收藏链路配额已尽 — 不碰收藏, 落到静态 config mi_id 快速查看
-            entry["favorite"] = {"state": "quota_exceeded", "quota": quota}
+        from src.config import load_config
+        if not load_config().anti_risk.fav_flow:
+            # 收藏链路总开关关闭 — 不碰收藏, 落到静态 config mi_id 快速查看
+            entry["favorite"] = {"state": "disabled", "quota": {"allowed": False}}
             entry["favorite_fallback"] = True
-            entry["click_fail_reason"] = (f"今日收藏链路已达上限({quota.get('limit')}次), "
-                                          "已用 config mi_id 快速查看; 明日或调大 "
-                                          "limits.fav_flow_per_day 后再细查")
+            entry["click_fail_reason"] = ("anti_risk.fav_flow=false(配置总开关关闭), 已用 config mi_id 快速查看; "
+                                          "如需收藏链路细查请 taobao_config set anti_risk.fav_flow true(人工确认)")
         else:
-            fav = await ensure_favorited(page, pid)
-            entry["favorite"] = fav
+            from src.extract.favorite import click_from_favorites, ensure_favorited, ensure_unfavorited
+            from src.extract.fav_quota import check_and_record
+
+            quota = check_and_record()  # anti-risk: daily cap on the favorite flow
+            entry["quota"] = quota
+            if not quota.get("allowed"):
+                # 今日收藏链路配额已尽 — 不碰收藏, 落到静态 config mi_id 快速查看
+                entry["favorite"] = {"state": "quota_exceeded", "quota": quota}
+                entry["favorite_fallback"] = True
+                entry["click_fail_reason"] = (f"今日收藏链路已达上限({quota.get('limit')}次), "
+                                              "已用 config mi_id 快速查看; 明日或调大 "
+                                              "limits.fav_flow_per_day 后再细查")
+            else:
+                fav = await ensure_favorited(page, pid)
+                entry["favorite"] = fav
             entry["added_by_us"] = bool(fav.get("added_by_us"))
             res = await click_from_favorites(page, pid, added_by_us=entry["added_by_us"])
             popup = res.get("popup")
