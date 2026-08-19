@@ -51,6 +51,9 @@ acting; the entries give the通用套路 to apply:
   price → E8.
 - **购物车到手价对比** / `source=cart` / `skus` / `price_basis` — compare 用购物车到手价
   (含优惠/补贴)覆盖粗查原价; 可严格指定型号; 购物车没有则回退粗查 → E9.
+- **购物车没有的商品也比到手价** / `cart_atomic` / 加多少退多少 / skuId 精确定位 / 限购错误 —
+  购物车没有的商品自动"加购→读价→退回"(绝不污染购物车); 比价口径默认 ask 提示询问,
+  可 taobao_config 固化 → E10.
 
 ## Hard rules (never break)
 - **Never log in for the human.** Login is a QR scan they do on their phone. If a

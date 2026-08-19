@@ -183,13 +183,15 @@ async def list_cart(max_items: int = 50, exclude_unavailable: bool = False) -> d
               if (sh) { shop = (sh.innerText || '').trim().replace(/\\s+/g, ' '); break; }
               a = a.parentElement;
             }
-            let pid = null;
+            let pid = null, sku = null;
             const lnk = e.querySelector('a[href*="item.htm"], a[href*="detail.tmall.com"]');
             if (lnk) {
               const m = (lnk.getAttribute('href') || '').match(/[?&]id=(\\d{6,})/);
               if (m) pid = m[1];
+              const ms = (lnk.getAttribute('href') || '').match(/[?&]skuId=(\\d+)/);
+              if (ms) sku = ms[1];
             }
-            out.push({ shop, pid, text: t });
+            out.push({ shop, pid, sku, text: t });
           });
           return out;
         }"""
@@ -200,6 +202,7 @@ async def list_cart(max_items: int = 50, exclude_unavailable: bool = False) -> d
         r = _parse_cart_item(b.get("text", ""))
         r["shop"] = b.get("shop", "")
         r["product_id"] = b.get("pid")
+        r["sku_id"] = b.get("sku")
         key = (r["title"], r["variant"], r["after_price"] or r["platform_after"])
         if key in seen:
             continue  # the item block + a nested container both carry the text
@@ -245,3 +248,109 @@ async def export_cart_markdown(max_items: int = 50, exclude_unavailable: bool = 
         head += f" — {title}"
     path.write_text(head + "\n\n" + md + "\n", encoding="utf-8")
     return {"path": str(path), "count": data.get("count", 0), "markdown": head + "\n\n" + md}
+
+
+# --- 购物车删除(原子模式的"退多少"半边; 只删目标行, 绝不碰其他) ---
+CART_REMOVE_JS = r"""() => {
+  // 定位含"删除"操作入口的 cartItemInfo 行; 返回每行 {pid, sku, text, has_del}
+  const out = [];
+  document.querySelectorAll('[class*="cartItemInfo"]').forEach(e => {
+    const t = (e.innerText || '').replace(/\s+/g, ' ').trim();
+    if (!t) return;
+    let pid = null, sku = null;
+    const lnk = e.querySelector('a[href*="item.htm"], a[href*="detail.tmall.com"]');
+    if (lnk) {
+      const m = (lnk.getAttribute('href') || '').match(/[?&]id=([0-9]{6,})/);
+      if (m) pid = m[1];
+      const ms = (lnk.getAttribute('href') || '').match(/[?&]skuId=([0-9]+)/);
+      if (ms) sku = ms[1];
+    }
+    const del = [...e.querySelectorAll('[class*="cartOperationItem"], [class*="operation"] *, [class*="delete"], [class*="remove"]')]
+      .find(x => (x.innerText || '').trim() === '删除');
+    out.push({ pid, sku, text: t, has_del: !!del });
+  });
+  return out;
+}"""
+
+
+async def remove_cart_item(product_id: str, variant: str = "", qty: int | None = None,
+                           sku_id: str | None = None, max_items: int = 100) -> dict:
+    """只删购物车里"商品id + 型号/sku"匹配的那一行. 绝不碰其他行.
+
+    定位优先级: ① sku_id 精确(购物车行链接带 skuId, 最可靠) ② 型号文本规范化双向子串
+    ③ 仅商品 id(删该商品第一匹配行)。删除走真实点击"删除"按钮 + 确认弹窗。
+    返回删除详情; 找不到匹配行时不删除任何东西, 返回 not_found。
+    """
+    from src.browser.session import get_session
+
+    from .compare import _norm  # 复用规范化
+
+    session = get_session()
+    page = await session.start()
+    await page.goto("https://cart.taobao.com/cart.htm", wait_until="domcontentloaded")
+    await page.wait_for_timeout(6000)
+    try:
+        await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        await page.wait_for_timeout(1200)
+        await page.evaluate("window.scrollTo(0, 0)")
+    except Exception:
+        pass
+
+    rows = await page.evaluate(CART_REMOVE_JS)
+    pid = str(product_id)
+    n_target = _norm(variant or "")
+    sku_target = str(sku_id) if sku_id else None
+    candidates = [r for r in rows if str(r.get("pid")) == pid and r.get("has_del")]
+    matched = None
+    if sku_target:  # ① 精确 skuId
+        for r in candidates:
+            if str(r.get("sku")) == sku_target:
+                matched = r
+                break
+    if matched is None and n_target:  # ② 型号文本
+        for r in candidates:
+            n_row = _norm(r.get("text", ""))
+            if n_target and (n_target in n_row or n_row in n_target):
+                matched = r
+                break
+    if matched is None and candidates:  # ③ 仅商品 id(删第一匹配行)
+        matched = candidates[0]
+    if matched is None:
+        return {"removed": False, "reason": "not_found",
+                "note": f"购物车无匹配行(id={pid}, variant={variant or '(任意)'}, skuId={sku_id or '(任意)'}) — 未删除任何行."}
+
+    # 定位该行并点击删除
+    from src.browser.pacing import human_delay
+
+    try:
+        row_el = page.locator('[class*="cartItemInfo"]').filter(has_text=matched["text"][:30]).first
+        await row_el.scroll_into_view_if_needed(timeout=3000)
+        btn = row_el.locator('[class*="cartOperationItem"], [class*="delete"], [class*="remove"]') \
+            .filter(has_text="删除").first
+        await btn.click(timeout=4000)
+        await human_delay(1.0, 2.0)
+        # 确认弹窗(如有) — 诊断: 打印弹窗可见文本
+        try:
+            diag = await page.evaluate("() => document.body ? (document.body.innerText || '').slice(-400) : ''")
+        except Exception:
+            diag = ""
+        # 找确认按钮: 弹窗里的"确定/删除"按钮(非行内删除)
+        confirm = page.locator('[class*="dialog"] [class*="btn"], [class*="confirm"] [class*="btn"], button:has-text("确定"), button:has-text("删除")').last
+        if await confirm.count() > 0:
+            await confirm.click(timeout=3000)
+            await human_delay(1.0, 2.0)
+    except Exception as exc:
+        return {"removed": False, "reason": "error", "error": str(exc)[:140]}
+
+    # 验证: 该行已消失(按 sku 或 pid+文本)
+    await page.wait_for_timeout(1500)
+    rows2 = await page.evaluate(CART_REMOVE_JS)
+    if sku_target:
+        still = [r for r in rows2 if str(r.get("pid")) == pid and str(r.get("sku")) == sku_target]
+    else:
+        still = [r for r in rows2 if str(r.get("pid")) == pid
+                 and (not n_target or (n_target in _norm(r.get("text", "")) or _norm(r.get("text", "")) in n_target))]
+    if not still:
+        return {"removed": True, "product_id": pid, "variant": variant, "sku_id": sku_id}
+    return {"removed": False, "reason": "verify_failed",
+            "note": f"点击删除后该行仍在购物车(可能弹窗未确认) — 未继续删除, 请人工检查."}

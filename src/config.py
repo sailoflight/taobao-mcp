@@ -96,6 +96,21 @@ class AntiRiskCfg:
 
 
 @dataclass(frozen=True)
+class CompareCfg:
+    """比价口径(2026-08-19): taobao_compare 默认用什么价来比.
+
+    source = ask | cart | cart_atomic | coarse
+      ask        (默认): 每次调用提示 LLM 询问用户用哪种口径, 不自动决定。
+      cart       : 购物车到手价优先(购物车没有的商品退回粗查原价)。
+      cart_atomic: 购物车没有的商品 → 原子加购指定型号→读到手价→退回(加多少退多少)。
+      coarse     : 纯粗查原价。
+    每次 taobao_compare 返回头部都会按此提示当前口径(配置为 cart/cart_atomic 时
+    明示"即将使用购物车到手价"), 让用户感知。运行时用 taobao_config set compare.source。
+    """
+    source: str = "ask"
+
+
+@dataclass(frozen=True)
 class Config:
     browser: BrowserCfg
     pacing: PacingCfg
@@ -104,6 +119,7 @@ class Config:
     output: OutputCfg
     detail: DetailCfg
     anti_risk: AntiRiskCfg
+    compare: CompareCfg
 
 
 _SECTIONS: tuple[tuple[str, type], ...] = (
@@ -114,6 +130,7 @@ _SECTIONS: tuple[tuple[str, type], ...] = (
     ("output", OutputCfg),
     ("detail", DetailCfg),
     ("anti_risk", AntiRiskCfg),
+    ("compare", CompareCfg),
 )
 
 
@@ -197,6 +214,7 @@ def load_config(path: str | Path = "config.toml") -> Config:
         output=OutputCfg(**_filter(OutputCfg, "output")),
         detail=DetailCfg(mi_id=_persisted_miid() or _filter(DetailCfg, "detail").get("mi_id", "")),
         anti_risk=AntiRiskCfg(**_filter(AntiRiskCfg, "anti_risk")),
+        compare=CompareCfg(**_filter(CompareCfg, "compare")),
     )
     _CACHE.clear()      # keep only the latest base + local override pair
     _CACHE[key] = cfg

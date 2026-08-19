@@ -12,6 +12,29 @@ from src.errors import CaptchaError, ProductNotFoundError  # noqa: F401
 _ADD_BTN = "加入购物车"
 _SUCCESS_RE = r"加入购物车成功|已加入购物车|成功加入|添加成功|加购成功"
 
+
+def classify_add_error(ret: str) -> dict:
+    """Pure: 把 mtop.trade.addBag 的错误返回归类为可读原因(限购/无货/失效/其他).
+
+    供原子购物车模式与 add 诊断用 — 加购失败时告诉用户为什么(没货/限购/不提供),
+    而不是只有一串 ret 码。返回 {kind, reason, raw}。
+    """
+    s = str(ret or "")
+    low = s.lower()
+    pairs = [
+        # (kind, 中文原因, 命中词)
+        ("limit", "限购", ("限购", "超过限购", "超出限购", "limit", "超限", "购买数量已达上限")),
+        ("oos", "无货", ("无货", "缺货", "库存不足", "out of stock", "sold_out", "已售罄", "售罄")),
+        ("invalid", "商品失效", ("失效", "已下架", "下架", "不存在", "invalid", "not found", "商品已删除")),
+        ("risk", "账号/风控拦截", ("风控", "高风险", "操作频繁", "flow limit", "risk", "block")),
+    ]
+    for kind, reason, toks in pairs:
+        if any(t in s or t in low for t in toks):
+            return {"kind": kind, "reason": reason, "raw": s[:160]}
+    if "success" in low or "调用成功" in s:
+        return {"kind": "ok", "reason": "成功", "raw": s[:160]}
+    return {"kind": "unknown", "reason": "未知错误", "raw": s[:160]}
+
 # Add to cart via the mtop.trade.addBag API using the page's own lib.mtop SDK (it handles
 # signing + the login/ecode token). Robust on both Taobao and Tmall, where the SSR 加入购物车
 # button isn't reliably clickable. Returns {ok, ret} — ret contains "SUCCESS::调用成功" on success.
@@ -136,6 +159,12 @@ async def add_to_cart(
             await session.guard_captcha(page)
             return f"added to cart (API): {product.title[:44]} · {label} · qty {qty} · skuId {sku_id}."
         api_err = (api or {}).get("ret") or (api or {}).get("err") or "unknown"
+        _err_cls = classify_add_error(api_err)
+        if _err_cls["kind"] in ("limit", "oos", "invalid", "risk"):
+            raise ProductNotFoundError(
+                f"加购失败(商品 {pid} · {label}): {_err_cls['reason']}"
+                f"(ret: {_err_cls['raw'][:120]})"
+            )
     else:
         api_err = "no skuId"
 

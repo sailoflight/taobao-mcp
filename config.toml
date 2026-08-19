@@ -57,3 +57,9 @@ miid_channel = "auto"          # miid 获取渠道(双机制, 用户设计): aut
 # 行为不变量(不可配置, 始终执行): 单标签顺序复用不批量开tab · 优先网络拦截少打DOM ·
 # 人类节奏延迟([pacing]) · 人类化模拟点击([click]) · 限速上限(pacing.max_products_per_minute) ·
 # 收藏每日配额(limits.fav_flow_per_day)
+
+[compare]
+# taobao_compare 默认比价口径: ask(每次询问) | cart(购物车到手价优先) | cart_atomic(购物车无则原子加购读价再退回) | coarse(纯原价)
+# 每次调用 compare 会按此在返回头部提示当前口径(配置为 cart/cart_atomic 时明示"即将使用购物车")。
+# 运行时改: taobao_config set compare.source <值> (写入 gitignored output/.config_overrides.toml)。
+source = "ask"

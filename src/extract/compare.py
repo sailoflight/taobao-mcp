@@ -229,6 +229,59 @@ def _sort_rows(rows: list[dict], sort_by: str = "") -> list[dict]:
     return sorted(rows, key=key)
 
 
+async def _atomic_add_read_remove(pid: str, p, want: str | None, co: dict, atomic_log: list[dict]) -> dict:
+    """原子购物车模式的一步: 加购指定型号 → 读到手价 → 记录待退(真正删除在 finally).
+
+    只对"不在购物车"的型号做; 加购必须显式指定 sku(want), 否则不写购物车(返回原 co)。
+    加购走 add_to_cart(confirm=True, options=型号各组值) — 真实芯片点击+skuId 校验,
+    失败抛错并分类原因(限购/无货/失效)。成功后在 atomic_log 记账(供 finally 精确退回),
+    然后重新读购物车拿该型号到手价, 合并进 co。
+    """
+    from src.extract.cart_price import list_cart
+    from src.cart import add_to_cart
+
+    variants = [v for v in (getattr(p, "variants", None) or [])]
+    if not variants:
+        return co
+    # 确定要加购的型号: want 指定 → 匹配; 否则默认第一个有货型号
+    target = None
+    if want:
+        for v in variants:
+            label = _variant_label(v)
+            if want in label or _norm(want) == _norm(label) or _norm(label) in _norm(want):
+                target = v
+                break
+    if target is None:
+        avail = [v for v in variants if v.available and v.price is not None]
+        target = avail[0] if avail else variants[0]
+    label = _variant_label(target)
+    options = list((target.properties or {}).values())
+    if not options:
+        return co  # 无型号文本无法加购 — 不写购物车
+    # 加购(必须指定型号; 失败会抛带原因的错)
+    await add_to_cart(pid, options=options, qty=1, confirm=True, cheapest_available=False)
+    # 重新读购物车 → 拿该型号到手价 + 精确定位刚加行的 sku_id(供 finally 精确退回)
+    try:
+        fresh = (await list_cart(max_items=100)).get("items", []) or []
+    except Exception:
+        fresh = []
+    sku_id = None
+    n_opt = _norm("; ".join(options))
+    for it in fresh:
+        if str(it.get("product_id")) == str(pid):
+            n_var = _norm(str(it.get("variant", "")))
+            if n_opt and (n_opt in n_var or n_var in n_opt):
+                sku_id = it.get("sku_id")
+                break
+    atomic_log.append({"product_id": pid, "variant": "; ".join(options), "sku_id": sku_id})
+    new_co = _match_cart_price(pid, [target], fresh)
+    # 合并: 新命中覆盖
+    for k, v in new_co.items():
+        if v.get("matched"):
+            co[k] = v
+    return co
+
+
 async def compare_products(product_ids: list[str], deep_price: bool = False, max_items: int = 10,
                            sort_by: str = "", detailed: bool = False,
                            min_review_total: int = 0, source: str = "coarse",
@@ -240,66 +293,116 @@ async def compare_products(product_ids: list[str], deep_price: bool = False, max
     detailed=True 时每行附 variants_summary(全型号价/库存/选项图), 供 with_variants 导出完整报告。
     min_review_total>0 时过滤掉评价数低于阈值的商品(避开低评价商品)。
 
-    source='cart'(默认建议): 先读购物车到手价(after_price/platform_after), 用型号文本
-      匹配到对应变体 → 命中型号用购物车到手价覆盖原价(coarse 只取原价, 会漏长期优惠/
-      补贴), 行级标 price_basis='cart'|'mixed'|'coarse'。购物车没有该商品时自动退回
-      coarse 原价(零成本兜底)。
-    source='coarse': 纯粗查原价(旧行为)。
+    source:
+      'cart'(默认): 先读购物车到手价(after_price/platform_after), 用型号文本匹配到对应
+        变体 → 命中型号用购物车到手价覆盖原价(coarse 只取原价, 会漏长期优惠/补贴), 行级标
+        price_basis='cart'|'mixed'|'coarse'。购物车没有该商品时自动退回 coarse 原价(零成本兜底)。
+      'cart_atomic': 在 cart 基础上, 购物车**没有**的商品/型号 → 自动"加购指定型号 → 读到手价
+        → 退回"(加了多少退多少, try/finally 兜底, 绝不污染用户购物车)。加购必须显式指定 sku;
+        失败抛带原因的错(限购/无货/失效)。返回带 atomic_note。
+      'coarse': 纯粗查原价(旧行为)。
     skus: 严格指定要比的型号文本列表(与 product_ids 一一对应; 或 {"pid": [型号,...]} 由
-      server 层展平)。传了 sku 时, 只对该型号取价(购物车价优先, 无则粗查价)。
+      server 层展平)。传了 sku 时, 只对该型号取价(购物车价优先, 无则粗查价/原子加购价)。
     """
     from src.extract.product import parse_product
 
     ids = [str(x) for x in product_ids[:max_items]]
+    src = str(source).strip().lower()
     # 购物车数据(只读, 一次抓取)
     cart_items: list[dict] = []
-    if str(source).strip().lower() == "cart":
+    if src in ("cart", "cart_atomic"):
         try:
             from src.extract.cart_price import list_cart
 
             cart_items = (await list_cart(max_items=100)).get("items", []) or []
         except Exception:
             cart_items = []  # 购物车不可用 → 静默退回粗查
+    # 原子模式的写账: 加了多少必须退多少(try/finally 兜底, 绝不污染用户购物车)
+    atomic_log: list[dict] = []
     rows = []
-    for i, pid in enumerate(ids):
-        try:
-            p = await asyncio.wait_for(parse_product(pid, deep_price=deep_price), timeout=45)
-            # sku 严格指定: 只保留指定型号的变体(购物车优先, 无则粗查价)
-            want = None
-            if skus is not None and i < len(skus) and skus[i]:
-                want = str(skus[i]).strip()
-            if want:
-                keep = []
-                for v in (getattr(p, "variants", None) or []):
-                    label = _variant_label(v)
-                    if want in label or _norm(want) == _norm(label) or _norm(label) in _norm(want):
-                        keep.append(v)
-                if keep:
-                    p.variants = keep
-            co = _match_cart_price(pid, getattr(p, "variants", None) or [], cart_items)
-            row = _summarize(p, cart_overrides=co)
-            if detailed:
-                row["variants_summary"] = [
-                    {"label": _variant_label(v),
-                     "price": v.price, "stock": v.stock, "available": v.available,
-                     "image": v.image,  # 选项图 URL(尺寸/规格常印在图内)
-                     "cart_price": (co.get(_variant_label(v)) or {}).get("cart_price")}
-                    for v in (getattr(p, "variants", None) or [])
-                ]
-            rows.append(row)
-        except asyncio.TimeoutError:
+    try:
+        for i, pid in enumerate(ids):
             try:
-                from src.browser.session import get_session
-                await get_session().close()
-            except Exception:
-                pass
-            rows.append({"product_id": pid, "error": "timeout (单件>45s, 已重置浏览器)"})
-        except Exception as exc:
-            rows.append({"product_id": pid, "error": str(exc)[:140]})
+                p = await asyncio.wait_for(parse_product(pid, deep_price=deep_price), timeout=45)
+                # sku 严格指定: 只保留指定型号的变体(购物车优先, 无则粗查价)
+                want = None
+                if skus is not None and i < len(skus) and skus[i]:
+                    want = str(skus[i]).strip()
+                if want:
+                    keep = []
+                    for v in (getattr(p, "variants", None) or []):
+                        label = _variant_label(v)
+                        if want in label or _norm(want) == _norm(label) or _norm(label) in _norm(want):
+                            keep.append(v)
+                    if keep:
+                        p.variants = keep
+                co = _match_cart_price(pid, getattr(p, "variants", None) or [], cart_items)
+                # cart_atomic: 该商品不在购物车(无匹配)时, 自动加购指定型号 → 读到手价 → 删除
+                if src == "cart_atomic":
+                    matched_ids = {k for k, v in (co or {}).items() if v.get("matched")}
+                    variant_labels = [_variant_label(v) for v in (getattr(p, "variants", None) or [])]
+                    unmatched = [lb for lb in variant_labels if lb not in matched_ids]
+                    if unmatched:
+                        co = await _atomic_add_read_remove(pid, p, want, co, atomic_log)
+                row = _summarize(p, cart_overrides=co)
+                if detailed:
+                    row["variants_summary"] = [
+                        {"label": _variant_label(v),
+                         "price": v.price, "stock": v.stock, "available": v.available,
+                         "image": v.image,  # 选项图 URL(尺寸/规格常印在图内)
+                         "cart_price": (co.get(_variant_label(v)) or {}).get("cart_price")}
+                        for v in (getattr(p, "variants", None) or [])
+                    ]
+                rows.append(row)
+            except asyncio.TimeoutError:
+                try:
+                    from src.browser.session import get_session
+                    await get_session().close()
+                except Exception:
+                    pass
+                rows.append({"product_id": pid, "error": "timeout (单件>45s, 已重置浏览器)"})
+            except Exception as exc:
+                rows.append({"product_id": pid, "error": str(exc)[:140]})
+    finally:
+        # 原子模式兜底: 加了多少必须退多少(即使中间出错) — 绝不污染用户购物车.
+        # 逐条记录退回结果, 失败绝不吞掉 — 必须如实报告让用户知道去检查购物车.
+        if atomic_log:
+            try:
+                from src.extract.cart_price import remove_cart_item
+
+                for entry in reversed(atomic_log):
+                    try:
+                        res = await remove_cart_item(entry["product_id"],
+                                                     variant=entry.get("variant", ""),
+                                                     sku_id=entry.get("sku_id"))
+                        entry["removed"] = bool(res.get("removed"))
+                        entry["remove_reason"] = res.get("reason") if not res.get("removed") else ""
+                    except Exception as exc:
+                        entry["removed"] = False
+                        entry["remove_reason"] = str(exc)[:120]
+            except Exception as exc:
+                for entry in atomic_log:
+                    entry.setdefault("removed", False)
+                    entry.setdefault("remove_reason", str(exc)[:120])
     rows = _sort_rows(rows, sort_by)
     if min_review_total > 0:
         rows = [r for r in rows if (_review_total_num(r.get("review_total")) or 0) >= min_review_total]
-    return {"count": len(rows), "products": rows}
+    result = {"count": len(rows), "products": rows}
+    if atomic_log:
+        ok = sum(1 for e in atomic_log if e.get("removed"))
+        failed = [e for e in atomic_log if not e.get("removed")]
+        if not failed:
+            result["atomic_note"] = (
+                f"原子购物车模式: 临时加购 {len(atomic_log)} 件已全部退回 "
+                f"(加了多少退多少); 你的购物车未受影响.")
+        else:
+            result["atomic_note"] = (
+                f"⚠️ 原子购物车模式: 临时加购 {len(atomic_log)} 件, 退回 {ok}/{len(atomic_log)} 件 — "
+                f"以下 {len(failed)} 件未能自动删除, 请人工检查购物车并手动删除(绝不能留在购物车): "
+                + "; ".join(f"{e.get('product_id')}·{e.get('variant','')[:24]}({e.get('remove_reason','?')[:40]})"
+                            for e in failed))
+            result["atomic_failed_removals"] = failed
+    return result
 
 
 async def export_compare_markdown(product_ids: list[str], deep_price: bool = False,

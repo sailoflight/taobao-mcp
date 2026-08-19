@@ -260,7 +260,7 @@ async def taobao_compare(
     max_items: int = 10,
     sort_by: str = "",
     min_review_total: int = 0,
-    source: str = "cart",        # cart(默认: 购物车到手价优先, 无则退回粗查原价) | coarse(纯原价)
+    source: str = "",            # ''=用配置 compare.source(ask|cart|cart_atomic|coarse); 显式传则覆盖
     skus: list[str] | None = None,  # 严格指定型号文本(与 product_ids 一一对应); 缺省自动匹配购物车
 ) -> str:
     """批量对比(买家挑选常用): 输入最小化 — 仅商品 id/URL 列表(自动提取 id)。
@@ -268,32 +268,61 @@ async def taobao_compare(
     参数: product_ids(必填, 商品ID或URL列表, 自动提取 id) · format=md(默认, 可读对比表+JSON明细)|json ·
       deep_price(bool, true 读实时"平台加补后"价, 较慢) · max_items(默认10, 上限20) ·
       sort_by(''输入序/'price'有货最低价升/'unit'最低单价升) · min_review_total(过滤低评价) ·
-      source=cart(默认)|coarse · skus(可选, 严格指定型号, 与 product_ids 一一对应)。
-    source=cart(默认): 先读购物车到手价(含平台加补后/优惠), 按型号文本匹配到对应变体,
-      命中型号用购物车到手价覆盖原价(粗查只有原价, 会漏长期优惠/补贴) → 行级 price_basis
-      标 cart|mixed|coarse; 购物车没有该商品时自动退回粗查原价(零成本兜底)。
-    source=coarse: 纯粗查原价(旧行为)。
+      source(''=用配置 compare.source | ask|cart|cart_atomic|coarse 显式覆盖) · skus(可选, 严格型号)。
+    ⚠️ 比价口径: 默认按 config 的 compare.source。为 ask(默认)时, 每次调用都会在返回头部
+      提示"请选择比价口径", 请询问用户用哪种并/或用 taobao_config set compare.source 固化;
+      为 cart/cart_atomic 时, 每次调用都会明示"即将使用购物车到手价"(让用户知情)。
+    source 语义:
+      cart: 先读购物车到手价(含平台加补后/优惠), 按型号文本匹配变体 → 命中型号用购物车价覆盖
+        原价(粗查只有原价, 会漏长期优惠/补贴) → price_basis 标 cart|mixed|coarse;
+        购物车没有该商品时自动退回粗查原价(零成本兜底)。
+      cart_atomic: 在 cart 基础上, 购物车没有的商品/型号 → 自动"加购指定型号 → 读到手价 →
+        退回"(加了多少退多少, 绝不污染用户购物车); 加购失败抛带原因的错(限购/无货/失效)。
+      coarse: 纯粗查原价。
     skus: 严格指定要比的型号文本(如 ["10个袋子30*34cm+2夹子", ...]), 与 product_ids 一一对应;
-      传了则只对该型号取价(购物车价优先, 无则粗查价); 不传则自动匹配购物车全部型号。
+      传了则只对该型号取价(购物车价优先, 无则粗查价/原子加购价); 不传则自动匹配购物车全部型号。
     format=md(默认): 一屏对比行(标题/店铺/价区间/型号数/价格示例/评论/补贴提示/价格口径) + JSON 明细;
     format=json: 仅结构化 JSON(供后续复用)。
-    只读 — 不收藏/不重新生成 mi_id/不发消息。留档导出请用 taobao_export(type=compare)。
+    只读(cart/coarse) / 原子写后自退(cart_atomic) — 不收藏/不重新生成 mi_id/不发消息。
+    留档导出请用 taobao_export(type=compare)。
     Example: {"product_ids": ["1039147294809"], "source": "cart"} /
-      {"product_ids": ["1039147294809"], "skus": ["10个袋子30*34cm+2夹子"], "sort_by": "unit"}
+      {"product_ids": ["1039147294809"], "skus": ["10个袋子30*34cm+2夹子"], "sort_by": "unit"} /
+      {"product_ids": ["1039147294809"], "source": "cart_atomic", "skus": ["10个袋子30*34cm+2夹子"]}
     """
     if await ensure_logged_in() != "logged_in":
         raise NotLoggedInError()
     await _rate_limiter.acquire()
     max_items = max(1, min(int(max_items or 10), 20))  # 1..20 硬上限
+    from src.config import load_config
     from src.extract.compare import _to_markdown, compare_products
 
+    # 比价口径: 显式 source 优先; 否则用配置 compare.source(ask=每次提示询问)
+    cfg_src = (load_config().compare.source or "ask").strip().lower()
+    src = str(source).strip().lower() if str(source).strip() else cfg_src
+    if src not in ("cart", "cart_atomic", "coarse"):
+        src = cfg_src if cfg_src in ("cart", "cart_atomic", "coarse") else "ask"
     data = await compare_products(product_ids, deep_price=deep_price, max_items=max_items,
                                   sort_by=sort_by, min_review_total=min_review_total,
-                                  source=source, skus=skus)
+                                  source=src, skus=skus)
+    # 每次调用提示当前口径(ask 时提醒询问用户; cart/cart_atomic 时明示即将用购物车)
+    _SRC_PROMPT = {
+        "ask": "⚠️ 比价口径=ask(配置默认): 请先询问用户用哪种口径(cart 购物车到手价 / "
+               "cart_atomic 购物车无则原子加购 / coarse 纯原价), 或 taobao_config set compare.source 固化。",
+        "cart": "🛒 比价口径=cart: 即将使用购物车到手价(含优惠/补贴)对比, 购物车没有的商品退回原价。",
+        "cart_atomic": "🛒 比价口径=cart_atomic: 即将使用购物车到手价; 购物车没有的商品将自动"
+                       "加购指定型号→读价→退回(加多少退多少, 购物车不受影响)。",
+        "coarse": "比价口径=coarse: 纯粗查原价(不含优惠/补贴)。",
+    }
     if str(format).strip().lower() == "json":
-        return json.dumps(data, ensure_ascii=False, indent=2)
+        out = dict(data)
+        out["compare_source"] = src
+        out["compare_prompt"] = _SRC_PROMPT.get(src, "")
+        return json.dumps(out, ensure_ascii=False, indent=2)
     rows = data.get("products") or []
     md = _to_markdown(rows, data.get("count", 0))
+    md = "> " + _SRC_PROMPT.get(src, "") + "\n\n" + md
+    if data.get("atomic_note"):
+        md += "\n> " + data["atomic_note"] + "\n"
     return md + "\n\n<details><summary>JSON 明细</summary>\n\n```json\n" + \
         json.dumps(data, ensure_ascii=False, indent=2) + "\n```\n</details>"
 
@@ -674,7 +703,7 @@ async def taobao_debug(
     readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=True
 ))
 async def taobao_cart(
-    action: str = "list",              # list | add | add_batch
+    action: str = "list",              # list | add | add_batch | remove
     max_items: int = 50,
     exclude_unavailable: bool = False,
     format: str = "md",                # list 时: md | json
@@ -687,11 +716,13 @@ async def taobao_cart(
 ) -> str:
     """购物车(一个工具 + action 参数)。list 只读列出每件(标题/型号/优惠/实际到手价/标价);
     add 加购(预览/确认两段式: confirm=false 验证芯片+skuId+预览, confirm=true 才写购物车);
-    add_batch 批量预览(全部只走 confirm=false, 不实际加购)。
+    add_batch 批量预览(全部只走 confirm=false, 不实际加购);
+    remove 删除购物车中"商品id+型号文本"匹配的那一行(只删匹配行, 绝不碰其他; 供原子模式回退)。
 
-    参数: action=list|add|add_batch(默认list) · max_items(list 最大件数, 默认50) ·
+    参数: action=list|add|add_batch|remove(默认list) · max_items(list 最大件数, 默认50) ·
       exclude_unavailable(list 时过滤缺货/下架, 采购清单) · format(list 时 md(默认)|json) ·
       product_url_or_id/options/qty/confirm/cheapest_available(add 时) · items(add_batch 时)。
+      remove 时: product_url_or_id=要删的商品id, options=[型号文本](可选, 不给则删该商品第一匹配行)。
     add 永不下单/付款/选地址 — 仅入购物车交接给代购(经 mtop.trade.addBag API)。
     add: cheapest_available=True 且不给 options 时自动选最便宜有货型号。
     add_batch: items=[{"product_url_or_id": "...", "options": [...], "qty": 1, "cheapest_available": true}, ...],
@@ -716,6 +747,13 @@ async def taobao_cart(
     if act == "add":
         return await add_to_cart(product_url_or_id, options=options, qty=qty, confirm=confirm,
                                  cheapest_available=cheapest_available)
+
+    if act == "remove":
+        from src.extract.cart_price import remove_cart_item
+
+        variant = "; ".join(options or [])
+        res = await remove_cart_item(product_url_or_id, variant=variant, qty=qty)
+        return json.dumps(res, ensure_ascii=False, indent=2)
 
     if act == "add_batch":
         import asyncio
