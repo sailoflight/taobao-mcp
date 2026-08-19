@@ -93,11 +93,12 @@ def _append_variants_markdown(md: str, rows: list[dict]) -> str:
             md += "\n### " + title + "(无型号数据)\n"
             continue
         md += "\n### " + title + "\n\n"
-        md += "| 型号 | 价格¥ | 库存 | 有货 |\n|---|---|---|---|\n"
+        md += "| 型号 | 价格¥ | 库存 | 有货 | 选项图 |\n|---|---|---|---|---|\n"
         for v in vs[:200]:
             price = f"{v['price']:g}" if v["price"] is not None else "-"
             ok = "✓" if v["available"] else "✗"
-            md += f"| {v['label'] or '-'} | {price} | {v['stock'] if v['stock'] is not None else '-'} | {ok} |\n"
+            img = f"![图]({v['image']})" if v.get("image") else "-"
+            md += f"| {v['label'] or '-'} | {price} | {v['stock'] if v['stock'] is not None else '-'} | {ok} | {img} |\n"
         if len(vs) > 200:
             md += f"| … 共 {len(vs)} 个型号(前 200 显示) |\n"
     return md
@@ -150,7 +151,8 @@ async def compare_products(product_ids: list[str], deep_price: bool = False, max
             if detailed:
                 row["variants_summary"] = [
                     {"label": "; ".join(f"{k}:{val}" for k, val in (v.properties or {}).items()),
-                     "price": v.price, "stock": v.stock, "available": v.available}
+                     "price": v.price, "stock": v.stock, "available": v.available,
+                     "image": v.image}  # 选项图 URL(尺寸/规格常印在图内)
                     for v in (getattr(p, "variants", None) or [])
                 ]
             rows.append(row)
