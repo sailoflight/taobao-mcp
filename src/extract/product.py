@@ -562,7 +562,8 @@ async def export_product_markdown(product_url_or_id: str, filename: str = "", ti
     ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     out_dir = Path(out_dir) if out_dir else Path(load_config().output.dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    path = out_dir / (filename or f"product_{pid}_{ts}.md")
+    from src.config import safe_filename
+    path = out_dir / safe_filename(filename, f"product_{pid}_{ts}.md")
     head = f"> 导出时间: {ts}"
     if title:
         head += f" — {title}"

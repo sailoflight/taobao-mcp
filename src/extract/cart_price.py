@@ -228,7 +228,8 @@ async def export_cart_markdown(max_items: int = 50, exclude_unavailable: bool = 
     data = await list_cart(max_items=max_items, exclude_unavailable=exclude_unavailable)
     md = _cart_markdown(data, with_tag=True)
     ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    fname = filename or f"cart_{ts}.md"
+    from src.config import safe_filename
+    fname = safe_filename(filename, f"cart_{ts}.md")
     out_dir = Path(load_config().output.dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / fname

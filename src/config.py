@@ -210,6 +210,15 @@ def _toml_literal(v) -> str:
     return json.dumps(v)  # str quoted
 
 
+def safe_filename(name: str | None, default: str) -> str:
+    """Containment: reduce any user-supplied filename to its basename so exports
+    never escape the output dir (a '../x' must land inside output/, not above it)."""
+    if not name:
+        return default
+    base = Path(name).name or default
+    return base
+
+
 def _write_toml(data: dict, path: Path) -> None:
     """Write a flat section/key TOML (our config has no nesting beyond [section])."""
     lines: list[str] = []

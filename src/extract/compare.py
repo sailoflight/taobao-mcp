@@ -216,7 +216,8 @@ async def export_compare_xlsx(product_ids: list[str], deep_price: bool = False,
     data = await compare_products(product_ids, deep_price=deep_price, max_items=max_items, sort_by=sort_by, min_review_total=min_review_total)
     rows = data.get("products") or []
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    fname = filename or f"compare_{ts}.xlsx"
+    from src.config import safe_filename
+    fname = safe_filename(filename, f"compare_{ts}.xlsx")
     path = await _write_compare_async(rows, fname, out_dir)
     return {"path": path, "count": data.get("count", 0)}
 

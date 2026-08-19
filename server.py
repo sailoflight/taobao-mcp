@@ -407,7 +407,9 @@ async def taobao_export(
             orders = await track_orders(only_active=only_active, max_drill=max)
         md = _tracking_markdown(orders)
         ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-        fname = filename or f"tracking_{ts}.md"
+        from src.config import safe_filename
+
+        fname = safe_filename(filename, f"tracking_{ts}.md")
         out_dir = Path(load_config().output.dir)
         path = out_dir / fname
         head = f"# {title or '今日物流'}  ({ts})\n\n"

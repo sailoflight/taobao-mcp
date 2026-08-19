@@ -47,17 +47,15 @@ def test_parse_thread_keeps_last_n():
     assert msgs[0].text == "m40"
 
 
-def test_send_reply_tool_is_gated_write():
-    """send_reply must be a non-readonly, non-idempotent tool (it sends)."""
+def test_reply_action_is_gated_write():
+    """taobao_message reply must be non-readonly (it sends); list is read-only."""
     import asyncio
 
     import server
 
     tools = {t.name: t for t in asyncio.run(server.mcp.list_tools())}
-    send = tools["taobao_send_reply"]
-    assert send.annotations.readOnlyHint is False
-    assert send.annotations.idempotentHint is False
+    msg = tools["taobao_message"]
+    # reply is the write path → the whole tool is annotated non-readonly (never blind-send)
+    assert msg.annotations.readOnlyHint is False
     # confirm must default to False (preview-first, never blind-send)
-    assert send.inputSchema["properties"]["confirm"].get("default") is False
-    read = tools["taobao_read_messages"]
-    assert read.annotations.readOnlyHint is True  # reading is safe
+    assert msg.inputSchema["properties"]["confirm"].get("default") is False

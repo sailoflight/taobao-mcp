@@ -516,7 +516,8 @@ async def export_favorites_markdown(limit: int = 30, sort_by: str = "",
     data = await list_favorites(limit=limit, sort_by=sort_by)
     md = _favorites_markdown(data)
     ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    fname = filename or f"favorites_{ts}.md"
+    from src.config import safe_filename
+    fname = safe_filename(filename, f"favorites_{ts}.md")
     out_dir = Path(load_config().output.dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / fname

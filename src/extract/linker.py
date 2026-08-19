@@ -262,7 +262,8 @@ async def export_dossier_markdown(seller: str | None = None, order_id: str | Non
     ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     out_dir = Path(load_config().output.dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    fname = filename or ("dossier_" + (seller or order_id or "all") + f"_{ts}.md")
+    from src.config import safe_filename
+    fname = safe_filename(filename, "dossier_" + (seller or order_id or "all") + f"_{ts}.md")
     parts = [f"> 导出时间: {ts}", ""]
     for d in dossiers:
         parts.append(_dossier_markdown(d))
