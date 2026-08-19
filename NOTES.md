@@ -1438,3 +1438,15 @@ Our deliverables: (i) a price for **every** SKU via `skuBase`/`sku2info` join; (
 - miid 页也有"问大家"条目 → parse_qa(page=...) 就地补齐 Product.qa。
 - 修复: 1f023a7 — parse_reviews/parse_qa 支持 page 就地抽取; fetch_detail 在 miid 页抽评论+问答。
   实机: fine+with_reviews → 9 评论(8 带已购型号)+2 问答+23 详情图(此前仅 3 嵌入式好评)。
+
+### miid/收藏使用审计矩阵(2026-08-19, 用户要求"该用的用,不该用的不用")
+- **不该用(全部普通页, 零 miid/收藏, ✓ 已核对)**: taobao_search(A) / taobao_product coarse(B,
+  parse_product) / taobao_compare(compare_products→parse_product) / taobao_export type=product /
+  taobao_cart add / taobao_tracking。parse_reviews/parse_qa 默认 page=None 也走普通页
+  (粗查评论回退嵌入式, 不碰收藏)。
+- **该用(收藏链路 mi_id 页, ✓)**: taobao_product mode=fine(fetch_detail favorite:
+  详情+评论+问答+图, 一次) / 细查类 debug(probe_miid_price, probe_sku_structure,
+  sweep_variant_prices, probe_reviews)。
+- **修复(5112677)**: save_detail_images 原先在 fine 里二次跑收藏链路(2 配额/次) —
+  现复用已取 detail, 仅下载不重跑 → 一次 fine = 一次收藏(配额+1), cleanup removed 无残留。
+  实机: fine+with_reviews+save_images → 9评论+2问答+23图, 23/23 落盘 detail_imgs/<pid>/。
