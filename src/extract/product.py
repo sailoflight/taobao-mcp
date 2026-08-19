@@ -113,9 +113,14 @@ def _price_from_info(info: dict) -> float | None:
     return None
 
 
-def _pidvid_lookup(sku_base: dict) -> tuple[dict[str, tuple[str, str]], list[int]]:
-    """Build {'pid:vid' -> (groupName, valueName)} and the per-group value counts."""
-    lookup: dict[str, tuple[str, str]] = {}
+def _pidvid_lookup(sku_base: dict) -> tuple[dict[str, dict], list[int]]:
+    """Build {'pid:vid' -> {'name': 档位名, 'image': 选项图URL}} and per-group value counts.
+
+    Image (``v.get("image")``) is the SKU option thumbnail — the 尺寸/规格 chart is
+    usually printed on it, not in the variant text. Keeping it lets downstream
+    (and Claude) read the option image instead of guessing from the label.
+    """
+    lookup: dict[str, dict] = {}
     group_sizes: list[int] = []
     for g in sku_base.get("props", []) or []:
         pid = str(g.get("pid"))
@@ -123,7 +128,12 @@ def _pidvid_lookup(sku_base: dict) -> tuple[dict[str, tuple[str, str]], list[int
         values = g.get("values", []) or []
         group_sizes.append(len(values))
         for v in values:
-            lookup[f"{pid}:{v.get('vid')}"] = (gname, v.get("name") or str(v.get("vid")))
+            key = f"{pid}:{v.get('vid')}"
+            lookup[key] = {
+                "group": gname,
+                "name": v.get("name") or str(v.get("vid")),
+                "image": v.get("image") or v.get("img") or None,
+            }
     return lookup, group_sizes
 
 
@@ -138,14 +148,15 @@ def _stock_and_soldout(info: dict) -> tuple[int | None, bool]:
     return stock, sold_out
 
 
-def _variant_from_info(sku_id: str, props: dict[str, str], info: dict) -> SkuVariant:
+def _variant_from_info(sku_id: str, props: dict[str, str], info: dict, image: str | None = None) -> SkuVariant:
     price = _price_from_info(info)
     if price is not None and price <= 0:   # M2: ¥0 is a placeholder, not a real price
         price = None
     stock, sold_out = _stock_and_soldout(info)
     if sold_out:
         price = None
-    return SkuVariant(sku_id=sku_id, properties=props, price=price, stock=stock, available=price is not None)
+    return SkuVariant(sku_id=sku_id, properties=props, price=price, stock=stock,
+                      available=price is not None, image=image)
 
 
 def build_variants(sku_base: dict, sku2info: dict) -> list[SkuVariant]:
@@ -169,6 +180,7 @@ def build_variants(sku_base: dict, sku2info: dict) -> list[SkuVariant]:
     for sku in skus:
         sku_id = str(sku.get("skuId"))
         props: dict[str, str] = {}
+        image: str | None = None
         for pair in (sku.get("propPath", "") or "").split(";"):
             pair = pair.strip()
             if not pair:
@@ -176,9 +188,10 @@ def build_variants(sku_base: dict, sku2info: dict) -> list[SkuVariant]:
             mapped = lookup.get(pair)
             if mapped is None:
                 continue  # H5: unknown pid:vid (stale cache) — skip, never emit a raw token
-            gname, vname = mapped
-            props[gname] = vname
-        variants.append(_variant_from_info(sku_id, props, sku2info.get(sku_id, {}) or {}))
+            props[mapped["group"]] = mapped["name"]
+            if mapped.get("image") and not image:
+                image = mapped["image"]  # 取该档位选项图(尺寸/规格常印其上)
+        variants.append(_variant_from_info(sku_id, props, sku2info.get(sku_id, {}) or {}, image=image))
 
     if len(variants) != len(skus):
         raise SkuIncompleteError(expected=len(skus), got=len(variants))

@@ -376,16 +376,29 @@ async def probe_sku_structure(product_url_or_id: str, target: str = "特大号�
 
     SKU_STATE_JS = r"""() => {
       const out = { chips: [] };
-      document.querySelectorAll('[class*="valueItem"]').forEach(e => {
-        const t = (e.innerText || '').trim().replace(/\s+/g, ' ').slice(0, 30);
-        if (out.chips.length < 10) {
+      // 只取 SKU 选项根元素(带 data-vid 的 valueItem), 避免把 imgWrap/img/text 子元素算进来;
+      // 去掉 10-chip 上限 — 多档位商品(如 19 档食品袋)也能全量返回。
+      const nodes = document.querySelectorAll('[class*="valueItem"][data-vid]');
+      if (!nodes.length) {
+        document.querySelectorAll('[class*="valueItem"]').forEach(e => {
+          const t = (e.innerText || '').trim().replace(/\s+/g, ' ').slice(0, 30);
           out.chips.push({
             text: t,
             cls: String(e.className || '').slice(0, 60),
             selected: /selected|active|cur|on/i.test(String(e.className || '')),
             html: (e.outerHTML || '').slice(0, 220),
           });
-        }
+        });
+        return out;
+      }
+      nodes.forEach(e => {
+        const t = (e.innerText || '').trim().replace(/\s+/g, ' ').slice(0, 40);
+        out.chips.push({
+          text: t,
+          cls: String(e.className || '').slice(0, 80),
+          selected: /selected|active|cur|on/i.test(String(e.className || '')),
+          html: (e.outerHTML || '').slice(0, 260),
+        });
       });
       return out;
     }"""
@@ -732,6 +745,21 @@ async def recon_detail(product_url_or_id: str) -> dict:
         res = extract_ice_res(html)
         evidence["res_top_keys"] = sorted(res.keys())
         evidence["desc_like"] = find_desc_keys(res)
+        # skuBase props values 的真实字段名采样(诊断选项图 URL 在哪个键, 2026-08-19)
+        try:
+            sb = res.get("skuBase", {}) or {}
+            props = sb.get("props", []) or []
+            sample = []
+            for g in props[:3]:
+                vals = g.get("values", []) or []
+                sample.append({
+                    "group": g.get("name"),
+                    "value_keys": sorted(vals[0].keys()) if vals else [],
+                    "first_value": (vals[0] if vals else {}),
+                })
+            evidence["skuBase_values_sample"] = sample
+        except Exception as exc:
+            evidence["skuBase_sample_error"] = str(exc)
     except Exception as exc:
         evidence["res_error"] = str(exc)
 

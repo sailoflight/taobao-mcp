@@ -21,6 +21,7 @@ class SkuVariant(BaseModel):
     price: float | None             # CNY; None if sold out / unavailable
     stock: int | None
     available: bool
+    image: str | None = None        # 该档位的选项图 URL(尺寸/规格常印在图内) — skuBase value.image
 
 
 class Review(BaseModel):
@@ -71,6 +72,7 @@ class SearchResult(BaseModel):
     monthly_sales: int | None
     shop_name: str | None
     location: str | None
+    spec_text: str | None = None   # 卡片内规格/尺寸片段(如 "规格：30*34cm", 搜索阶段即可按尺寸圈选)
 
 
 class OrderStatus(BaseModel):

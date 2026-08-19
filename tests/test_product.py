@@ -201,3 +201,20 @@ def test_oos_variant_marked():
     variants = {v.sku_id: v for v in build_variants(sku_base, sku2info)}
     assert variants["A"].available is True and variants["A"].price == 100.0
     assert variants["B"].available is False and variants["B"].price is None
+
+
+def test_variant_option_image_kept():
+    """Each variant carries its SKU option image URL (尺寸/规格常印在图内) — 2026-08-19."""
+    sku_base = {
+        "props": [{"pid": "1", "name": "颜色分类", "values": [
+            {"vid": "10", "name": "特大号30*34", "image": "https://gw.alicdn.com/bao/uploaded/i1/a.jpg"},
+            {"vid": "11", "name": "加大号32*45", "image": "https://gw.alicdn.com/bao/uploaded/i3/b.jpg"},
+        ]}],
+        "skus": [{"propPath": "1:10", "skuId": "A"}, {"propPath": "1:11", "skuId": "B"}],
+    }
+    sku2info = {"A": {"price": {"priceText": "11.4"}, "quantity": "200"},
+                "B": {"price": {"priceText": "13.5"}, "quantity": "200"}}
+    variants = {v.sku_id: v for v in build_variants(sku_base, sku2info)}
+    assert variants["A"].image == "https://gw.alicdn.com/bao/uploaded/i1/a.jpg"
+    assert variants["B"].image == "https://gw.alicdn.com/bao/uploaded/i3/b.jpg"
+    assert variants["A"].properties == {"颜色分类": "特大号30*34"}
