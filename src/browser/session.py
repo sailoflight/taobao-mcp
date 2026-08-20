@@ -170,7 +170,24 @@ class BrowserSession:
             ) from exc
 
         await self.context.add_init_script(_STEALTH_JS)
-        self.page = self.context.pages[0] if self.context.pages else await self.context.new_page()
+        # 清理 user_data 恢复的残留标签页(2026-08-20 用户定位): launch_persistent_context
+        # 会恢复上次会话残留的所有标签(如 PETG 搜索页), 干扰足迹/收藏链路的标签管理 —
+        # 脚本开 popup 详情页 + 删旧标签时, 活动页会漂移进残留搜索页(触发验证码)。
+        # 启动即清理: 只保留一个干净工作页, 其余残留标签全部关闭(单标签规则 §7.3)。
+        self.page = None
+        for p in list(self.context.pages or []):
+            try:
+                if self.page is None:
+                    self.page = p
+                else:
+                    await p.close()
+            except Exception:
+                pass
+        if self.page is None or self.page.is_closed():
+            try:
+                self.page = await self.context.new_page()
+            except Exception:
+                self.page = self.context.pages[0] if self.context.pages else None
         try:
             await self.page.bring_to_front()  # make the Chrome window unambiguous/front-most
         except Exception:
