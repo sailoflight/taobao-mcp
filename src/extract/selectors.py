@@ -59,6 +59,40 @@ QA_EXTRACT_JS = r"""() => {
   }).filter(x => x.question);
 }"""
 
+# --- detail-page 同类推荐/看了又看 (近似搜索通道, 2026-08-20) ---
+# 搜索页被验证码风控(每次搜索都弹滑块), 但详情页(coarse/fine)零验证码。详情页底部
+# 通常有 看了又看/猜你喜欢/同类商品 区块, 指向其它同类商品卡。这里从当前详情页 DOM
+# 收集商品卡: 链接(id) + 标题 + ¥价格, 排除当前商品自身 → 作为"近似搜索"的同类候选。
+# 关键: 推荐区块在主文档最底部, 主文档不滚到底则推荐卡未渲染 → 先滚到底触发渲染,
+# 等懒加载, 再收集, 最后滚回顶部。卡片特征: 含标题 + ¥(无需"付款", 不是搜索结果卡)。
+RECOMMEND_JS = r"""async () => {
+  // 1) 主文档滚到底触发推荐区懒加载(推荐区块在页面最底部)
+  window.scrollTo(0, document.documentElement.scrollHeight);
+  await new Promise(r => setTimeout(r, 1200));
+  window.scrollTo(0, document.documentElement.scrollHeight);
+  await new Promise(r => setTimeout(r, 1200));
+
+  // 2) 收集商品卡链接
+  const curId = (location.href.match(/[?&]id=(\d{6,})/) || [])[1] || null;
+  const sels=['a[href*="item.htm"]','a[href*="//item.taobao.com"]','a[href*="detail.tmall.com"]'];
+  let links=[]; sels.forEach(s=>links.push(...document.querySelectorAll(s)));
+  links=[...new Set(links)];
+  const seen=new Set(); const rows=[];
+  for(const a of links){
+    const m=(a.getAttribute('href')||'').match(/[?&]id=(\d{6,})/); const id=m?m[1]:null;
+    if(!id || id===curId || seen.has(id)) continue;
+    let card=a, found=null;
+    for(let i=0;i<8;i++){ if(!card) break; const t=card.innerText||'';
+      if(t.includes('¥') && t.length<300){ found=card; break; } card=card.parentElement; }
+    if(!found) continue; seen.add(id);
+    rows.push({id, text:(found.innerText||'').replace(/\s+/g,' ').trim().slice(0,160)});
+  }
+
+  // 3) 滚回顶部, 不影响后续操作
+  window.scrollTo(0, 0);
+  return rows;
+}"""
+
 
 # --- reviews "view all" drawer (查看全部评价 opens an in-page Drawer, no URL change) ---
 VIEW_ALL_LABELS = ("查看全部评价", "全部评价")

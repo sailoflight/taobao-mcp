@@ -541,6 +541,7 @@ async def fetch_detail(product_url_or_id: str, miid_source: str = "config",
     from src.extract.miid import miid_from_url
     from src.extract.product import _to_product_id
     from src.extract.selectors import DESC_PANEL_JS
+    from src.log import get_logger
 
     pid = _to_product_id(product_url_or_id)
     session = get_session()
@@ -624,6 +625,16 @@ async def fetch_detail(product_url_or_id: str, miid_source: str = "config",
         await session.guard_captcha(page)
         harvest_page = page
 
+    # URL 轨迹诊断(2026-08-20): 用户观察到 足迹→详情→搜索页→详情 的异常导航。
+    # 记录每一步的 URL, 下次实机即可定位搜索页出现在哪个分支(主流程本不应经过搜索页)。
+    try:
+        get_logger().info(
+            "detail url-trace: miid_from=%s harvest=%s popup_closed=%s page=%s",
+            entry.get("miid_from"), (harvest_page.url or "")[:160],
+            (popup.is_closed() if popup else None), (page.url or "")[:160])
+    except Exception:
+        pass
+
     # Bring the SKU panel into view (it sits below the fold). Use the element's own
     # position, NOT window.scrollTo(0, scrollHeight) — the latter also drags the page
     # through the 推广商品 area (2026-08-20 user: "细查会一直下滑到推广区, 浪费时间").
@@ -695,6 +706,24 @@ async def fetch_detail(product_url_or_id: str, miid_source: str = "config",
         except Exception as exc:
             reviews_extra = [{"error": str(exc)[:120]}]
 
+    # 同类推荐/看了又看 (近似搜索通道, 2026-08-20): 搜索页被验证码风控, 但详情页
+    # 零验证码。从当前详情页 DOM 顺带收集同类商品卡(id+标题+¥) → 零额外流量/零验证码
+    # 的"近似搜索", 供选品横向找同类候选。失败静默(不阻塞细查主流程)。
+    recommendations: list = []
+    try:
+        from src.extract.selectors import RECOMMEND_JS
+
+        raw_rec = await harvest_page.evaluate(RECOMMEND_JS)
+        for r in raw_rec or []:
+            if r.get("id") and r.get("text"):
+                recommendations.append({
+                    "product_id": str(r["id"]),
+                    "title": str(r["text"])[:120],
+                    "url": f"https://item.taobao.com/item.htm?id={r['id']}",
+                })
+    except Exception as exc:
+        get_logger().warning("detail: recommend extraction failed: %s", exc)
+
     # Cleanup (user rule): if WE favorited it this round, un-favorite — no residue.
     if entry.get("added_by_us"):
         try:
@@ -753,6 +782,7 @@ async def fetch_detail(product_url_or_id: str, miid_source: str = "config",
         "reviews": reviews_extra if with_reviews else None,
         "review_strata": review_strata,
         "qa": qa_extra,
+        "recommendations": recommendations,
         # Signal to the caller: mi_id is stale/expired → the favorite flow regenerates one.
         "miid_stale": stale,
         "caveat": (None if not stale else
