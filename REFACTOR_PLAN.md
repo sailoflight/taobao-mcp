@@ -71,3 +71,24 @@
 - [ ] config 首次 set 必须二次确认 + 人工提醒文案
 - [ ] 部署后 md5 抽查(防 round96 式未落盘)
 - [ ] 冒烟避开搜索页验证码(当前 s.taobao.com/search 仍被 captcha 拦截,待人工清除)
+
+---
+
+## 模块整理轮(2026-08-20): 常复用代码抽成独立模块
+
+> 用户要求: 结束后整理项目, 将常复用的代码单独提出做成模块, 便于修改。
+> 已分 3 个提交完成, 全量测试 233 passed。
+
+| 提交 | 动作 | 说明 |
+|---|---|---|
+| `1e1480e` | `refactor(quota)` | `fav_quota`+`search_quota`(两份几乎相同的每日配额)合并为 **`src/quota.py` 通用工厂** `make_daily_quota(state_filename, limit_key[, state_dir])`; 两个业务模块变薄封装, 调用点零改动 |
+| `fae6d5a` | `refactor(scroll)` | **`src/browser/scroll.py` 复用 `pacing.human_delay`**, 删掉自己的重复副本(函数体延迟引用, 无循环导入) |
+| `35d1e84` | `refactor(dates)` | 抽 **`src/dates.py`** 统一日期工具: `today_cn()` / `parse_date_iso()` / `days_cutoff_iso()`; reviews/orders/activity 三处改用共享函数 |
+
+**模块地图(常复用核心):**
+- `src/quota.py` — 每日配额工厂(收藏/搜索共用)
+- `src/dates.py` — 日期解析/生成(中国时区)
+- `src/browser/scroll.py` — 类人工滑动(人类节奏 + 到底即停)
+- `src/browser/pacing.py` — 延迟/模拟点击/限速
+- `src/extract/units.py` — "N个装"单价
+- `src/extract/selectors.py` — 全部页面选择器集中(防漂移)
