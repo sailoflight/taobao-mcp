@@ -100,6 +100,57 @@ RECOMMEND_JS = r"""async () => {
 # --- reviews "view all" drawer (查看全部评价 opens an in-page Drawer, no URL change) ---
 VIEW_ALL_LABELS = ("查看全部评价", "全部评价")
 DRAWER_SELECTOR = '[class*="Drawer--"]'
+
+# --- 粗查入口对比实验(2026-08-20): 一次 evaluate 检查 详情/推荐/评论/问答/优惠价 ---
+# 用于判定"某种进入方式进入的详情页具备哪些内容", 决定 A2 游走原语的进入语义。
+ENTRY_PROBE_JS = r"""() => {
+  const out = {
+    url: (location.href || '').slice(0, 240),
+    has_miid: /[?&]mi_id=/.test(location.href),
+    has_spm: /[?&]spm=/.test(location.href),
+    detail: { root: false, imgs: 0, scope: null },
+    recommend: { anchors: 0, cards: 0 },
+    review: { markers: 0, drawer: false },
+    qa: { items: 0 },
+    price: { promo: null, orig: null, seen: [] },
+  };
+  // 详情: .desc-root / #description .content / 详情图
+  const dr = document.querySelector('.desc-root, .content-detail, [class*="desc-"], [class*="detail-"]');
+  if (dr) {
+    out.detail.root = true;
+    out.detail.scope = String(dr.className || dr.id || '').slice(0, 40);
+    out.detail.imgs = dr.querySelectorAll('img').length;
+  }
+  // 推荐: 商品链接数(近似推荐区块是否渲染)
+  const links = document.querySelectorAll('a[href*="item.htm"], a[href*="detail.tmall.com"]');
+  out.recommend.anchors = links.length;
+  const seen = new Set();
+  let cards = 0;
+  links.forEach(a => {
+    const m = (a.getAttribute('href') || '').match(/[?&]id=(\d{6,})/);
+    if (m && !seen.has(m[1])) { seen.add(m[1]); let c = a;
+      for (let i = 0; i < 8; i++) { if (!c) break; const t = c.innerText || '';
+        if (t.includes('¥') && t.length < 300) { cards++; break; } c = c.parentElement; } }
+  });
+  out.recommend.cards = cards;
+  // 评论: 查看全部评价 文案/抽屉
+  const bodyText = document.body ? (document.body.innerText || '') : '';
+  (['查看全部评价', '全部评价', '评论', '评价']).forEach(k => {
+    if (bodyText.includes(k)) out.review.markers++;
+  });
+  out.review.drawer = !!document.querySelector('[class*="Drawer--"]');
+  // 问答: 问大家/ask 容器
+  out.qa.items = document.querySelectorAll('[class*="askAnswerItem"], [class*="qaItem"], [class*="QA"], [class*="question"]').length;
+  // 优惠价: 平台加补后 / 优惠前 / 补贴
+  const m1 = bodyText.match(/平台加补后\s*[¥￥]\s*(\d+(?:\.\d+)?)/);
+  const m2 = bodyText.match(/优惠前\s*[¥￥]\s*(\d+(?:\.\d+)?)/);
+  if (m1) out.price.promo = parseFloat(m1[1]);
+  if (m2) out.price.orig = parseFloat(m2[1]);
+  ['平台加补后', '优惠前', '补贴', '立减', '到手价'].forEach(k => {
+    if (bodyText.includes(k)) out.price.seen.push(k);
+  });
+  return out;
+}"""
 REVIEW_DRAWER_SCROLL_JS = r"""() => {
   const drawer = document.querySelector('[class*="Drawer--"]');
   if(!drawer) return -1;

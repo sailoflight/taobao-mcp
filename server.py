@@ -581,7 +581,7 @@ async def taobao_dossier(
     readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True
 ))
 async def taobao_debug(
-    action: str,                       # detail|sku_structure|sweep_price|miid_price|recommend|home|collect|favorite|watch|activity|probe_reviews|footmark|qa_expand
+    action: str,                       # detail|sku_structure|sweep_price|miid_price|recommend|entry_probe|home|collect|favorite|watch|activity|probe_reviews|footmark|qa_expand
     product_url_or_id: str = "",
     target: str = "特大号白色",         # sku_structure
     target_chip: str = "特大号",        # miid_price
@@ -597,7 +597,8 @@ async def taobao_debug(
     参数: action(必填)=detail|sku_structure|sweep_price|miid_price|home|collect|favorite|watch|activity|probe_reviews|footmark|qa_expand ·
       product_url_or_id(detail/sku_structure/sweep_price/miid_price/favorite/probe_reviews/footmark/qa_expand 时) · target(sku_structure 目标芯片) ·
       target_chip(miid_price 目标变体) · max_chips(sweep_price 扫描上限) · target_pid(collect 可选) ·
-      product_url_or_id(recommend 时: 取该商品详情页同类推荐, A2 游走原语) ·
+      product_url_or_id(recommend/entry_probe 时: recommend=取该商品详情页同类推荐, A2游走原语;
+      entry_probe=一次性诊断三种粗查进入方式(entry=url|recommend|search)的详情/推荐/评论/问答/优惠价) ·
       watch_seconds/start_url(watch 监听器: 人工操作时记录多页/tab URL+mi_id) · limit/days(activity: 事件数/范围 None全部 0今天 1近2天)。
     probe_reviews: 实证评论渲染 — 分别探测 普通页 vs 收藏链路 mi_id 弹窗页 是否渲染评论区(诊断评论抓取路径)。
     footmark: 足迹渠道诊断 — 打开足迹页点第一张卡, 校验打开的 id 是否为目标(双机制第一棒)。
@@ -632,6 +633,11 @@ async def taobao_debug(
         from src.extract.desc import extract_recommendations
 
         return json.dumps(await extract_recommendations(product_url_or_id),
+                          ensure_ascii=False, indent=2)
+    if act == "entry_probe":
+        from src.extract.desc import probe_entry
+
+        return json.dumps(await probe_entry(product_url_or_id, entry=target_chip or "url"),
                           ensure_ascii=False, indent=2)
     if act == "home":
         from src.extract.miid import recon_home_ads

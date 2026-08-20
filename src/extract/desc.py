@@ -964,3 +964,54 @@ async def extract_recommendations(product_url_or_id: str, max_items: int = 12, m
     except Exception:
         pass
     return result
+
+
+async def probe_entry(product_url_or_id: str, entry: str = "url") -> dict:
+    """[一次性诊断] 用指定进入方式访问商品详情页, 捕获 详情/推荐/评论/问答/优惠价.
+
+    2026-08-20 用户设计: 研究三种粗查进入方式(直接输入URL / 推荐goto / 搜索goto)
+    进入的详情页差异。entry 取值:
+      url       = 直接输入 URL(裸 item.htm?id=X, 无 referer)
+      recommend = 从推荐上下文 goto(同 url, 但语义为推荐进入)
+      search    = 模拟搜索进入(带 referer = 搜索页 URL)
+    每种进入方式只跑一次(一次性对比实验, 不重复)。滚动到底触发推荐区懒加载,
+    再 evaluate ENTRY_PROBE_JS 捕获五项信号。零写操作, captcha 仍人工交接。
+    """
+    from urllib.parse import quote
+
+    from src.browser.pacing import human_delay
+    from src.browser.session import get_session
+    from src.extract.product import _to_product_id
+
+    pid = _to_product_id(product_url_or_id)
+    session = get_session()
+    page = await session.start()
+    url = f"https://item.taobao.com/item.htm?id={pid}"
+
+    entry = str(entry or "url").strip().lower()
+    goto_kwargs: dict = {"wait_until": "domcontentloaded"}
+    if entry == "search":
+        # 模拟搜索进入: 带 referer=搜索页(历史经验: referer 影响 SSR 详情渲染)
+        goto_kwargs["referer"] = f"https://s.taobao.com/search?q={quote(pid)}&tab=all"
+    elif entry == "recommend":
+        # 推荐进入: 从推荐上下文 goto(裸 URL, 但语义为推荐来源)
+        pass
+    # entry == "url": 裸 URL 直接进入
+
+    await page.goto(url, **goto_kwargs)
+    await session.guard_captcha(page)
+
+    # 滚动到底触发推荐区懒加载(推荐区块在页面最底部), 再回顶部。
+    from src.browser.scroll import scroll_to_bottom
+
+    await scroll_to_bottom(page)
+    await human_delay(1.0, 1.8)
+    from src.extract.selectors import ENTRY_PROBE_JS
+
+    probe = await page.evaluate(ENTRY_PROBE_JS)
+    probe["entry"] = entry
+    probe["goto_url"] = url
+    probe["referer"] = goto_kwargs.get("referer")
+    # 落地 URL(可能被淘宝 JS 重写注入 mi_id/spm)
+    probe["landed_url"] = (page.url or "")[:240]
+    return probe
