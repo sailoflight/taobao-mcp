@@ -37,6 +37,18 @@ class BatchError(RuntimeError):
     pass
 
 
+def plan_default_timeout(plans_dir: Path) -> float:
+    """--dir 模式: 取各 plan 的最大 timeout_s(默认 300)."""
+    t = 300.0
+    for pf in plans_dir.glob("plan_*.json"):
+        try:
+            p = json.loads(pf.read_text(encoding="utf-8"))
+            t = max(t, float(p.get("timeout_s", 300)))
+        except Exception:
+            pass
+    return t
+
+
 def _wait_readable(fd: int, timeout: float) -> bool:
     try:
         readable, _, _ = select.select([fd], [], [], timeout)
@@ -92,16 +104,57 @@ def _request(proc: subprocess.Popen, obj: dict, timeout: float) -> dict:
 
 
 def main() -> int:
-    if len(sys.argv) != 2:
+    if len(sys.argv) not in (2, 3):
         print(__doc__)
         return 2
-    plan_path = Path(sys.argv[1])
-    plan = json.loads(plan_path.read_text(encoding="utf-8"))
-    default_timeout = float(plan.get("timeout_s", 300))
-    ops = plan["ops"]
-    if not ops:
-        print("empty ops list")
-        return 2
+
+    # 目录合并队列模式(2026-08-20 用户): 把 DIR 下所有 plan_*.json 的 ops 合并成一个
+    # 大 plan, 一次连接跑完 — 浏览器只开一次、关一次, 避免多次手动调用间反复开关
+    # Chrome(反复开关加深风控)。用法: dsh_mcp_batch.py --dir output/plans
+    merged_out_dir: str = ""
+    if sys.argv[1] == "--dir":
+        plans_dir = Path(sys.argv[2])
+        if not plans_dir.is_dir():
+            print(f"plans dir not found: {plans_dir}", file=sys.stderr)
+            return 2
+        merged_out_dir = str(plans_dir / "merged")
+        merged_ops: list[dict] = []
+        for pf in sorted(plans_dir.glob("plan_*.json")):
+            try:
+                p = json.loads(pf.read_text(encoding="utf-8"))
+                ops = p.get("ops") or []
+                for o in ops:
+                    o = dict(o)
+                    # 合并时把 out 改写到统一 merged 目录下, 避免覆盖/散落
+                    if o.get("out"):
+                        o["out"] = str(Path(merged_out_dir) / Path(o["out"]).name)
+                    merged_ops.append(o)
+            except Exception as exc:
+                print(f"  skip {pf.name}: {exc}", file=sys.stderr)
+        if not merged_ops:
+            print(f"no plan_*.json ops found in {plans_dir}", file=sys.stderr)
+            return 2
+        default_timeout = float(plan_default_timeout(plans_dir))
+        ops = merged_ops
+        print(f"[--dir] merged {len(merged_ops)} ops from {plans_dir} "
+              f"(single connection, browser opens once; outs -> {merged_out_dir})", flush=True)
+    else:
+        plan_path = Path(sys.argv[1])
+        plan = json.loads(plan_path.read_text(encoding="utf-8"))
+        default_timeout = float(plan.get("timeout_s", 300))
+        ops = plan["ops"]
+        if not ops:
+            print("empty ops list")
+            return 2
+
+    # 确保首个 op 是 login(合并模式下自动补), 否则 server 未启动 Chrome 会报 not_started
+    first_tool = ops[0].get("tool", "")
+    if first_tool != "taobao_session":
+        login_out = str(Path(merged_out_dir or "output") / "_auto_login.json")
+        ops.insert(0, {
+            "tool": "taobao_session", "args": {"action": "login"},
+            "out": login_out,
+        })
 
     proc = subprocess.Popen(
         [sys.executable, str(BRIDGE), PORT],
