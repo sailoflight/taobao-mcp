@@ -391,9 +391,13 @@ HOME_AD_RECON_JS = r"""() => {
 SUBSIDY_PRICE_JS = r"""() => {
   // 细查(mi_id)页价格结构: "平台加补后￥42.79 | 优惠前￥51" 双价并列(2026-08-20 实证)。
   // 返回 {after, before, raw}: after=平台加补后(真实到手价), before=优惠前, raw=匹配到的文本。
-  const all=[...document.querySelectorAll('*')];
+  // 有界扫描 (CLAUDE.md B.3): 只遍历价格类节点, 绝不扫全 DOM 做 innerText 全量循环
+  // (那会在 SSR 详情页把标签页卡死)。取含 平台加补后 的最短价格节点。
+  const sels = ['[class*="price"]', '[class*="Price"]', '[class*="subsidy"]',
+                '[class*="discount"]', '[class*="promo"]'];
+  const nodes = [...document.querySelectorAll(sels.join(','))];
   let best=null, bestLen=9999;
-  for (const e of all) {
+  for (const e of nodes) {
     const t=(e.innerText||'').replace(/\s+/g,'');
     if (t.includes('平台加补后') && /\d/.test(t) && t.length<60 && t.length<bestLen) { best=t; bestLen=t.length; }
   }

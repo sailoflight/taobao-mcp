@@ -18,10 +18,13 @@ import re
 
 from src.extract.selectors import (
     DEFAULT_REVIEW_MARKERS,
+    DRAWER_SELECTOR,
+    REVIEW_CARD_SELECTOR,
     REVIEW_DRAWER_SCROLL_JS,
     VIEW_ALL_LABELS,
     REVIEW_EXTRACT_JS as _EXTRACT_JS,  # centralized (Phase 6)
 )
+from src.errors import CaptchaError, SelectorDriftError
 from src.models import Review
 from src.dates import parse_date_iso
 
@@ -154,13 +157,67 @@ def stratified_reviews(
 
 
 def group_by_variant(reviews: list[Review]) -> dict[str, list[Review]]:
-    """Roll reviews up into {sku_bought label -> [Review]} for Product.reviews_by_variant."""
+    """Roll reviews up into {sku_bought label -> [Review]} for Product.reviews_by_variant.
+
+    Keys are the buyer's joined variant label (e.g. "黑色 L"); use
+    ``resolve_variant_by_label`` to map a key back to its SkuVariant.
+    """
     groups: dict[str, list[Review]] = {}
     for rv in reviews:
         if not rv.sku_bought:
             continue
         groups.setdefault(rv.sku_bought, []).append(rv)
     return groups
+
+
+def resolve_variant_by_label(variants, sku_bought: str | None):
+    """Map a review's ``sku_bought`` back to the SkuVariant it was bought as (audit MED-4).
+
+    1) Exact match on the variant's canonical joined label (``SkuVariant.label()``) —
+       this is what makes multi-group reviews resolve: "黑色 L" ↔ {颜色:黑色, 尺寸:L}.
+    2) Fallback: ``sku_bought`` equals one of the variant's property values
+       (single-attribute reviews / single-group products, e.g. "P100 质保3年 以换代修").
+
+    Returns the first matching variant or None (never raises).
+    """
+    if not sku_bought:
+        return None
+    wanted = " ".join(str(sku_bought).split())  # normalize internal whitespace
+    for v in variants or []:
+        label = v.label() if hasattr(v, "label") else None
+        if label and " ".join(str(label).split()) == wanted:
+            return v
+    for v in variants or []:
+        for val in (v.properties or {}).values():
+            if " ".join(str(val).split()) == wanted:
+                return v
+    return None
+
+
+async def _verify_drawer_opened(page, clicked: bool, pre_count: int) -> None:
+    """Fail loudly if "查看全部评价" was clicked but the drawer never opened.
+
+    Without this, a silently-failed click would leave parse_reviews returning the
+    ~2-card page preview as if it were the full review set (audit MED-5). We only
+    raise when (a) we actually clicked the view-all button AND (b) neither a
+    ``[class*="Drawer--"]`` container appeared NOR the rendered review-card count
+    grew beyond the pre-click preview. Products with no reviews / no button are
+    unaffected (clicked=False).
+    """
+    if not clicked:
+        return
+    post_count = pre_count
+    try:
+        post_count = await page.locator(REVIEW_CARD_SELECTOR).count()
+    except Exception:
+        pass
+    drawer_present = False
+    try:
+        drawer_present = await page.locator(DRAWER_SELECTOR).count() > 0
+    except Exception:
+        pass
+    if not drawer_present and post_count <= pre_count:
+        raise SelectorDriftError(step="reviews drawer open", selector=DRAWER_SELECTOR)
 
 
 async def parse_reviews(
@@ -202,16 +259,25 @@ async def parse_reviews(
     for _ in range(5):
         await human_scroll(page, 2)
         await human_delay(1.0, 1.5)
+    try:
+        pre_count = await page.locator(REVIEW_CARD_SELECTOR).count()
+    except Exception:
+        pre_count = 0
+    clicked = False
     for label in VIEW_ALL_LABELS:
         try:
             loc = page.get_by_text(label, exact=False).first
             if await loc.count() > 0:
                 await loc.scroll_into_view_if_needed(timeout=3000)
                 await loc.click(timeout=3000)
+                clicked = True
                 break
         except Exception:
             continue
     await human_delay(2.0, 3.0)
+    # 若点了"查看全部评价"但抽屉没开、评论卡也没增多 → 现在只有 ~2 条预览卡,
+    # 不能当完整结果静默返回, 大声抛 SelectorDriftError(audit MED-5)。
+    await _verify_drawer_opened(page, clicked, pre_count)
 
     # Paginate inside the drawer until the set stops growing or cap reached.
     raw: list[dict] = []
@@ -261,12 +327,15 @@ async def parse_reviews_stratified(
         raw = await _pr(product_url_or_id, only_with_images=only_with_images,
                         most_recent_first=most_recent_first, max_reviews=cap, keyword=keyword,
                         page=page)
+    except (CaptchaError, SelectorDriftError):
+        raise  # 风控墙/布局漂移必须上浮给调用方, 绝不吞成空结果 (CLAUDE.md §7.4, audit HIGH-3)
     except Exception:
         raw = []
     if raw:
         return stratified_reviews(raw, max_total=max_reviews)
 
-    # 回退: 嵌入式预览评论(站点漂移)
+    # 回退: 嵌入式预览评论(站点漂移) — 仅容忍"无评论"等良性空结果;
+    # 风控墙(CaptchaError) / 布局漂移(SelectorDriftError)同样上浮, 不吞。
     try:
         from src.extract.product import parse_product
 
@@ -276,6 +345,8 @@ async def parse_reviews_stratified(
         if kw:
             embedded = [r for r in embedded if kw in (r.text or "") or kw in (r.sku_bought or "")]
         return stratified_reviews(embedded, max_total=max_reviews)
+    except (CaptchaError, SelectorDriftError):
+        raise
     except Exception:
         return []
 

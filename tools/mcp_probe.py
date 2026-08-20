@@ -2,8 +2,8 @@
 
 Runs the exact DSH client path without needing DSH or the `mcp` package:
 spawns `tools/mcp_tcp_bridge.py` as a stdio child, performs a real JSON-RPC
-MCP handshake through it, calls `taobao_session_status`, then idles with the
-connection open to prove the persistent link survives quiet periods.
+MCP handshake through it, calls `taobao_session(action="status")`, then idles
+with the connection open to prove the persistent link survives quiet periods.
 
 Exit code 0 = bridge chain healthy.
 """
@@ -136,14 +136,14 @@ def main() -> int:
             "id": 3,
             "method": "tools/call",
             "params": {
-                "name": "taobao_session_status",
-                "arguments": {},
+                "name": "taobao_session",
+                "arguments": {"action": "status"},
             },
         })
         text = status.get("result", {}).get("content", [{}])[0].get("text", "")
-        print(f"tools/call taobao_session_status ok: {text!r}")
+        print(f"tools/call taobao_session(action=status) ok: {text!r}")
         if status.get("result", {}).get("isError"):
-            raise ProbeError("taobao_session_status returned isError=true")
+            raise ProbeError("taobao_session(action=status) returned isError=true")
 
         # The point of the bridge: survive a quiet period with stdin still open.
         idle_seconds = 12

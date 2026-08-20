@@ -6,7 +6,19 @@ Covers: space-separated price tokens, the quantity-concat fix ('￥ 259 1' → �
 
 from __future__ import annotations
 
-from src.extract.cart_price import _cart_markdown, _compute_total, _group_by_shop, _num, _parse_cart_item
+from src.extract.cart_price import (
+    _cart_markdown,
+    _compute_total,
+    _group_by_shop,
+    _match_remove_row,
+    _num,
+    _parse_cart_item,
+    _quantity_from_text,
+    _remove_target_index,
+    _row_matches_variant,
+    cart_quantity_delta,
+    cart_snapshot,
+)
 
 
 def test_num_decimal_point_as_token():
@@ -216,3 +228,341 @@ def test_cart_markdown_with_tag_column():
     assert "| 商品 | 型号 | 到手¥ | 单价¥ | 标价¥ | 店铺 | 海运/空运 |" in md
     assert "42.25 | s |  |" in md
     assert "海运/空运" not in _cart_markdown(data)
+
+
+# ── quantity parsing + qty-weighted totals/shop subtotals ─────────────────────
+def test_quantity_from_text():
+    assert _quantity_from_text("某商品 ￥ 259 3 移入收藏 删除") == 3   # explicit stepper value
+    assert _quantity_from_text("某商品 ￥ 259 1 移入收藏 删除") == 1
+    assert _quantity_from_text("某商品 ￥ 33 . 75 ￥ 42 . 25 移入收藏 删除") == 1  # no stepper → 1
+    assert _quantity_from_text("某商品 ￥ 42 . 25 2 移入收藏 删除") == 2   # qty after last price
+    assert _quantity_from_text("") == 1
+    assert _quantity_from_text("某商品 ￥ 0 移入收藏 删除") == 1   # 0 is not a positive qty
+    assert _quantity_from_text(None) == 1
+
+
+def test_parse_cart_item_exposes_quantity():
+    r = _parse_cart_item("某商品 颜色分类：红色 ￥ 259 3 移入收藏 删除")
+    assert r["quantity"] == 3
+    assert _parse_cart_item("某商品 ￥ 10 移入收藏 删除")["quantity"] == 1
+
+
+def test_compute_total_multiplies_by_quantity():
+    items = [
+        {"title": "收纳箱", "after_price": "33.75", "platform_after": None, "quantity": 3},
+        {"title": "烙铁头", "after_price": "7.76", "platform_after": None, "quantity": 2},
+        {"title": "锡锅", "after_price": None, "platform_after": "15.83", "quantity": 1},
+    ]
+    total, exc = _compute_total(items)
+    assert total == round(33.75 * 3 + 7.76 * 2 + 15.83 * 1, 2)  # 33.75*3 + 7.76*2 + 15.83
+
+
+def test_compute_total_defaults_to_qty_one():
+    items = [{"title": "收纳箱", "after_price": "33.75", "platform_after": None}]  # no quantity key
+    assert _compute_total(items) == (33.75, 0)
+
+
+def test_group_by_shop_multiplies_by_quantity():
+    items = [
+        {"title": "A", "after_price": "10", "platform_after": None, "shop": "店1", "quantity": 5},
+        {"title": "B", "after_price": "20", "platform_after": None, "shop": "店2", "quantity": 3},
+        {"title": "款式缺货 X", "after_price": "999", "platform_after": None, "shop": "店1", "quantity": 2},
+    ]
+    out = {g["shop"]: g for g in _group_by_shop(items)}
+    assert out["店1"]["total"] == 50.0      # 10×5, 缺货行不计入
+    assert out["店1"]["items"] == 2         # 行数不变(件数语义保持为行数)
+    assert out["店1"]["excluded"] == 1
+    assert out["店2"]["total"] == 60.0      # 20×3
+
+
+# ── fail-closed removal matching (cart_atomic safe-restoration primitive) ─────
+def _row(pid, sku, variant_text, has_del=True):
+    return {"pid": str(pid), "sku": sku, "text": f"某商品 颜色分类：{variant_text} ￥ 10 移入收藏 删除",
+            "has_del": has_del}
+
+
+def test_match_remove_row_sku_exact_only_no_fallback():
+    rows = [_row("1", "999", "红色"), _row("1", "888", "红色（10条）")]
+    # exact skuId match wins
+    got, reason = _match_remove_row(rows, "1", variant="", sku_id="888")
+    assert got is not None and got["sku"] == "888" and reason == ""
+    # skuId that exists for the pid but wrong → NOT_FOUND, never falls back to variant/product
+    got, reason = _match_remove_row(rows, "1", variant="红色", sku_id="777")
+    assert got is None and reason == "sku_not_found"
+    # skuId never matches a different pid either
+    got, reason = _match_remove_row(rows, "2", variant="", sku_id="999")
+    assert got is None and reason == "sku_not_found"
+
+
+def test_match_remove_row_variant_exact_only_no_product_fallback():
+    rows = [_row("1", "999", "红色（10条）"), _row("1", "888", "黄色")]
+    # exact normalized variant match
+    got, reason = _match_remove_row(rows, "1", variant="红色（10条）", sku_id=None)
+    assert got is not None and got["sku"] == "999" and reason == ""
+    # substring is NOT a match: "红色" must not hit "红色（10条）"
+    got, reason = _match_remove_row(rows, "1", variant="红色", sku_id=None)
+    assert got is None and reason == "variant_not_found"
+    # product-only fallback is GONE: a row exists for pid but variant doesn't match → refuse
+    got, reason = _match_remove_row(rows, "1", variant="蓝色", sku_id=None)
+    assert got is None and reason == "variant_not_found"
+    # different pid → variant_not_found (no cross-pid guess)
+    got, reason = _match_remove_row(rows, "9", variant="红色（10条）", sku_id=None)
+    assert got is None and reason == "variant_not_found"
+
+
+def test_match_remove_row_needs_explicit_key():
+    rows = [_row("1", "999", "红色")]
+    # neither sku nor variant → refuse even though the product has deletable rows
+    got, reason = _match_remove_row(rows, "1", variant="", sku_id=None)
+    assert got is None and reason == "need_sku_or_variant"
+    # rows without a 删除 action are never candidates
+    rows_nodel = [_row("1", "999", "红色", has_del=False)]
+    got, reason = _match_remove_row(rows_nodel, "1", variant="红色", sku_id=None)
+    assert got is None and reason == "variant_not_found"
+
+
+# ── snapshot proof (+1 landed, restoration) for cart_atomic ──────────────────
+def test_cart_snapshot_and_delta_prove_add_and_restore():
+    pre = [{"product_id": "1", "sku_id": "a", "quantity": 2},
+           {"product_id": "1", "sku_id": "b", "quantity": 1}]
+    post = pre + [{"product_id": "1", "sku_id": "c", "quantity": 1}]   # atomic add of sku c
+    delta = cart_quantity_delta(pre, post)
+    assert delta[("1", "c")] == 1        # exactly +1 on the added sku — proves it landed
+    assert delta[("1", "a")] == 0 and delta[("1", "b")] == 0
+    # removal restores: post → pre ⇒ every delta returns to 0
+    restored = cart_quantity_delta(post, pre)
+    assert restored[("1", "c")] == -1
+    # lines without sku_id key as ("<pid>", "")
+    d = cart_quantity_delta([{"product_id": "7", "sku_id": None, "quantity": 1}], [])
+    assert d == {("7", ""): -1}
+
+
+# ── exact row targeting: never title-prefix first-match (two same-title rows) ──
+def _remove_row(idx, sku, variant_text):
+    """One CART_REMOVE_JS-style row (same product title across both rows)."""
+    return {
+        "idx": idx, "pid": "123", "sku": sku, "has_del": True,
+        "href": f"https://item.taobao.com/item.htm?id=123&skuId={sku}",
+        "text": f"天鼠收纳箱 颜色分类：{variant_text} ￥ 33 . 75 ￥ 42 . 25 移入收藏 删除",
+    }
+
+
+def test_remove_target_index_two_rows_same_title_different_sku():
+    """Two rows share the SAME product-title prefix but differ by SKU/variant — the exact
+    sku/variant row must be targeted, never the first title-prefix row (audit fix)."""
+    rows = [_remove_row(0, "999", "红色"), _remove_row(1, "888", "红色（10条）")]
+    # sku path → exact sku row (index 1), NOT the first row
+    idx, miss = _remove_target_index(rows, "123", sku_id="888")
+    assert idx == 1 and miss == ""
+    idx, miss = _remove_target_index(rows, "123", sku_id="999")
+    assert idx == 0 and miss == ""
+    # variant path → exact normalized-variant row (index 1)
+    idx, miss = _remove_target_index(rows, "123", variant="红色（10条）")
+    assert idx == 1 and miss == ""
+    # fail closed: wrong sku / no explicit key
+    idx, miss = _remove_target_index(rows, "123", sku_id="777")
+    assert idx is None and miss == "sku_not_found"
+    idx, miss = _remove_target_index(rows, "123")
+    assert idx is None and miss == "need_sku_or_variant"
+    # a partial variant must NOT hit the longer sibling (exact normalized only)
+    idx, miss = _remove_target_index(rows, "123", variant="红色")
+    assert idx == 0 and miss == ""   # exact match to row 0 (红色), not 红色（10条）
+
+
+def test_remove_target_index_missing_idx_fails_closed():
+    rows = [{"pid": "1", "sku": "5", "text": "x 颜色分类：红 ￥ 1 移入收藏 删除", "has_del": True}]  # no idx
+    idx, miss = _remove_target_index(rows, "1", sku_id="5")
+    assert idx is None and miss == "no_row_index"
+
+
+def test_row_matches_variant():
+    t = "某商品 颜色分类：红色 ￥ 10 移入收藏 删除"
+    assert _row_matches_variant(t, "红色") is True
+    assert _row_matches_variant(t, "红色（10条）") is False     # normalized-exact, not substring
+    assert _row_matches_variant("", "红色") is False
+    assert _row_matches_variant(t, "") is False
+
+
+
+
+# ── remove_cart_item: captcha guard + propagation (never a generic removal error) ──
+def _fake_page_for_remove():
+    """Minimal Playwright-ish fake: enough of page/locator for the remove click flow."""
+    class _El:
+        async def scroll_into_view_if_needed(self, *a, **k): return None
+        async def click(self, *a, **k): return None
+        def locator(self, sel): return _Loc()
+        def filter(self, **k): return _Loc()
+
+    class _Loc:
+        @property
+        def first(self): return self
+        @property
+        def last(self): return self
+        async def count(self): return 0
+        async def click(self, *a, **k): return None
+        def nth(self, idx): return _El()
+        def filter(self, **k): return self
+        def locator(self, sel): return self
+
+    class _Page:
+        async def goto(self, *a, **k): return None
+        async def wait_for_timeout(self, *a, **k): return None
+        async def evaluate(self, js, *args):
+            # Dispatch by EXPRESSION, never by a shared catch-all: each JS must get the
+            # type remove_cart_item expects. CART_REMOVE_JS is a rows LIST (called first),
+            # _FIND_SKU_ROW_JS / _ROW_AT_INDEX_JS are exact-find/recheck DICTs (later).
+            s = str(js)
+            if "wantSku" in s:                       # _FIND_SKU_ROW_JS → exact pid+sku dict
+                return {"idx": 0, "pid": "123", "sku": "5",
+                        "href": "https://x?id=123&skuId=5"}
+            if "Number(idx)" in s:                   # _ROW_AT_INDEX_JS → row text for variant recheck
+                return {"text": "某商品 颜色分类：红 ￥ 1 移入收藏 删除"}
+            if "has_del" in s:                       # CART_REMOVE_JS → rows LIST
+                return [{"idx": 0, "pid": "123", "sku": "5",
+                         "text": "某商品 颜色分类：红 ￥ 1 移入收藏 删除", "has_del": True}]
+            return None                              # scrollTo etc.
+        def locator(self, sel): return _Loc()
+
+    return _Page()
+
+
+def test_remove_cart_item_propagates_captcha_from_navigation(monkeypatch):
+    """A slider right after cart navigation must PROPAGATE CaptchaError, not return
+    {"removed": False, "reason": "error"}."""
+    import asyncio
+
+    from src.errors import CaptchaError
+    import src.browser.session as S
+    import src.browser.pacing as P
+    from src.extract import cart_price as CP
+
+    class _Session:
+        def __init__(self):
+            self.n = 0
+        async def start(self):
+            return _fake_page_for_remove()
+        async def guard_captcha(self, page=None):
+            self.n += 1
+            if self.n == 1:
+                raise CaptchaError("slider on cart page")
+
+    async def _noop(*a, **k): return None
+    monkeypatch.setattr(S, "get_session", lambda: _Session())
+    monkeypatch.setattr(P, "human_delay", _noop)
+    try:
+        asyncio.run(CP.remove_cart_item("123", sku_id="5"))
+        assert False, "expected CaptchaError to propagate"
+    except CaptchaError:
+        pass
+
+
+def test_remove_cart_item_reraises_captcha_after_delete_confirm(monkeypatch):
+    """A slider AFTER the delete/confirm action must re-raise CaptchaError (the broad
+    except must not swallow it into a generic removal error)."""
+    import asyncio
+
+    from src.errors import CaptchaError
+    import src.browser.session as S
+    import src.browser.pacing as P
+    from src.extract import cart_price as CP
+
+    class _Session:
+        def __init__(self):
+            self.n = 0
+        async def start(self):
+            return _fake_page_for_remove()
+        async def guard_captcha(self, page=None):
+            self.n += 1
+            if self.n == 2:   # navigation guard (1) passed; post-delete guard (2) trips
+                raise CaptchaError("slider after delete")
+
+    async def _noop(*a, **k): return None
+    monkeypatch.setattr(S, "get_session", lambda: _Session())
+    monkeypatch.setattr(P, "human_delay", _noop)
+    try:
+        asyncio.run(CP.remove_cart_item("123", sku_id="5"))
+        assert False, "expected CaptchaError to propagate after delete/confirm"
+    except CaptchaError:
+        pass
+
+
+def test_remove_cart_item_guard_calls_and_reraises_present():
+    """Structural guard: remove_cart_item guards captcha after navigation AND after
+    delete/confirm, and its broad except re-raises CaptchaError/SelectorDriftError."""
+    import inspect
+
+    from src.extract import cart_price as CP
+
+    src = inspect.getsource(CP.remove_cart_item)
+    assert src.count("guard_captcha(page)") >= 2        # nav + post-delete
+    assert "except CaptchaError:" in src and "except SelectorDriftError:" in src
+    # the re-raise must be a bare raise, not a swallowed return
+    i = src.find("except CaptchaError:")
+    j = src.find("except SelectorDriftError:", i)
+    k = src.find("except Exception", j)
+    assert "raise" in src[i:j] and "raise" in src[j:k]
+
+
+def test_remove_cart_item_reraises_captcha_variant_path(monkeypatch):
+    """The VARIANT-keyed removal path also reaches the post-delete captcha guard — the
+    fake's _ROW_AT_INDEX_JS recheck must return the row text (not None), so the flow
+    proceeds past the exact row re-check to the delete → post-delete guard."""
+    import asyncio
+
+    from src.errors import CaptchaError
+    import src.browser.session as S
+    import src.browser.pacing as P
+    from src.extract import cart_price as CP
+
+    class _Session:
+        def __init__(self):
+            self.n = 0
+        async def start(self):
+            return _fake_page_for_remove()
+        async def guard_captcha(self, page=None):
+            self.n += 1
+            if self.n == 2:   # navigation guard (1) passed; post-delete guard (2) trips
+                raise CaptchaError("slider after delete")
+
+    async def _noop(*a, **k): return None
+    monkeypatch.setattr(S, "get_session", lambda: _Session())
+    monkeypatch.setattr(P, "human_delay", _noop)
+    try:
+        asyncio.run(CP.remove_cart_item("123", variant="红"))   # variant path, no sku_id
+        assert False, "expected CaptchaError to propagate after delete/confirm (variant path)"
+    except CaptchaError:
+        pass
+
+
+def test_list_cart_guards_captcha(monkeypatch):
+    """list_cart must hand a slider/punish wall on the cart page to the human (guard_captcha
+    called after navigation) — red before the guard existed, green after."""
+    import asyncio
+
+    import src.browser.session as S
+    from src.extract import cart_price as CP
+
+    class _Page:
+        async def goto(self, *a, **k): return None
+        async def wait_for_timeout(self, *a, **k): return None
+        async def evaluate(self, js, *args):
+            s = str(js)
+            if "cartItemInfo" in s:
+                return []      # no cart rows
+            return None        # scrollTo etc.
+        async def bring_to_front(self): return None
+
+    class _Session:
+        def __init__(self):
+            self.guards = 0
+        async def start(self):
+            return _Page()
+        async def guard_captcha(self, page=None):
+            self.guards += 1
+
+    sess = _Session()
+    monkeypatch.setattr(S, "get_session", lambda: sess)
+    data = asyncio.run(CP.list_cart())
+    assert sess.guards >= 1          # navigation captcha guard was invoked
+    assert data["count"] == 0

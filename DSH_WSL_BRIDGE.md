@@ -1,6 +1,6 @@
 # DSH (WSL) ↔ taobao-mcp (Windows) 桥接部署手册
 
-本手册描述如何在 **Windows 上运行 taobao-mcp server（真实 Chrome + 持久化 profile）**，并从 **WSL 中的 DeepSeek Harness（DSH）** 通过官方 MCP 客户端插件稳定调用它的 12 个工具。
+本手册描述如何在 **Windows 上运行 taobao-mcp server（真实 Chrome + 持久化 profile）**，并从 **WSL 中的 DeepSeek Harness（DSH）** 通过官方 MCP 客户端插件稳定调用它的 13 个工具。
 
 ## 架构
 
@@ -70,19 +70,19 @@ run_mcp_stdio.py → server.py (stdio 模式, 无认证) → Chrome (Windows 桌
            failOnStartupError: false
    ```
 
-3. 重启 DSH TUI（新会话），输入 `/mcp` 应显示 `taobao（12 个工具）: taobao_search, taobao_fetch_product, …`；工具名形如 `mcp__taobao__taobao_search`。
-4. 首次登录：调用 `taobao_initialize_login` → **Chrome/Edge 窗口出现在 Windows 桌面** → 用手机淘宝 App 扫码（180 秒窗口，每 3 秒轮询）。登录态持久化在 Windows 侧 `user_data\chrome_profile`，后续会话免扫码。
+3. 重启 DSH TUI（新会话），输入 `/mcp` 应显示 `taobao（13 个工具）: taobao_session, taobao_search, taobao_product, …`；工具名形如 `mcp__taobao__taobao_search`。
+4. 首次登录：调用 `taobao_session(action="login")` → **Chrome/Edge 窗口出现在 Windows 桌面** → 用手机淘宝 App 扫码（180 秒窗口，每 3 秒轮询）。登录态持久化在 Windows 侧 `user_data\chrome_profile`，后续会话免扫码。
 
 ## 快速验证（不经 DSH 的纯桥接链路）
 
-在 WSL 里执行下面的 Python 探针：它通过 `tools/mcp_tcp_bridge.py` 完成 `initialize` → `notifications/initialized` → `tools/list` → `tools/call taobao_session_status`，并把连接空置 12 秒后确认桥进程仍然存活（验证“持久连接”本身）。
+在 WSL 里执行下面的 Python 探针：它通过 `tools/mcp_tcp_bridge.py` 完成 `initialize` → `notifications/initialized` → `tools/list` → `tools/call taobao_session(action=status)`，并把连接空置 12 秒后确认桥进程仍然存活（验证“持久连接”本身）。
 
 ```bash
 cd /home/<user>/code/taobao-mcp
 python3 tools/mcp_probe.py
 ```
 
-预期输出末尾：`idle-ok`、`session_status reply received`、`bridge stayed alive for >=12s: OK`。
+预期输出末尾：`idle-ok`、`tools/call taobao_session(action=status) ok: ...`、`bridge stayed alive for >= 12s`。
 
 ## 故障排查
 

@@ -51,9 +51,12 @@ acting; the entries give the通用套路 to apply:
   price → E8.
 - **购物车到手价对比** / `source=cart` / `skus` / `price_basis` — compare 用购物车到手价
   (含优惠/补贴)覆盖粗查原价; 可严格指定型号; 购物车没有则回退粗查 → E9.
-- **购物车没有的商品也比到手价** / `cart_atomic` / 加多少退多少 / skuId 精确定位 / 限购错误 —
-  购物车没有的商品自动"加购→读价→退回"(绝不污染购物车); 比价口径默认 ask 提示询问,
-  可 taobao_config 固化 → E10.
+- **购物车没有的商品也比到手价** / `cart_atomic`(安全版, 2026-08-20 重建) — 对不在购物车的
+  目标型号: 加购前 XHR 快照((product_id, sku_id)+数量) → 加购恰好 1 件 → 证明 XHR 差**恰好是
+  目标 (pid, sku) +1 且其余行不变** → 读 DOM 价格 → 按**精确 skuId** 退回(绝不回退到型号/商品)
+  → 退回后再核对完整 XHR 快照与加购前一致; 无法证明不删除并提示人工检查。已在购物车的型号
+  **零写入**直接读到手价。需 `taobao_compare(source="cart_atomic", atomic_confirm=true)`(或
+  `taobao_export(type="compare", ..., atomic_confirm=true)`; false=返回确认门预览) → E10.
 
 ## Hard rules (never break)
 - **Never log in for the human.** Login is a QR scan they do on their phone. If a

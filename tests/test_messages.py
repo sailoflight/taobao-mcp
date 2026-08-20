@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from src.extract.messages import parse_conversations, parse_thread
+from src.extract.messages import _resolve_seller, parse_conversations, parse_thread
 from src.models import Conversation, SellerMessage
 
 
@@ -59,3 +59,46 @@ def test_reply_action_is_gated_write():
     assert msg.annotations.readOnlyHint is False
     # confirm must default to False (preview-first, never blind-send)
     assert msg.inputSchema["properties"]["confirm"].get("default") is False
+
+
+def _convs(*names: str) -> list[Conversation]:
+    return [Conversation(seller=n, last_message="x") for n in names]
+
+
+# ── exact-only seller resolution (audit fix: never pick the first substring match) ──
+def test_resolve_seller_raw_exact():
+    assert _resolve_seller(_convs("好管家旗舰店", "好管家批发店"), "好管家批发店") == ("好管家批发店", [])
+
+
+def test_resolve_seller_normalized_exact():
+    # '好管家' is the suffix-stripped identity of '好管家旗舰店' → exact, not a guess
+    assert _resolve_seller(_convs("好管家旗舰店", "好管家批发店"), "好管家") == ("好管家旗舰店", [])
+
+
+def test_resolve_seller_partial_rejected_never_first_substring():
+    # a partial that is NOT an exact identity must be REJECTED with the candidate list,
+    # not auto-selected as the first substring match (audit fix).
+    got, partials = _resolve_seller(_convs("好管家旗舰店", "好管家批发店"), "好管家批")
+    assert got is None and partials == ["好管家批发店"]
+    got, partials = _resolve_seller(_convs("好管家旗舰店", "好管家批发店"), "好管家旗")
+    assert got is None and partials == ["好管家旗舰店"]
+
+
+def test_resolve_seller_ambiguous_same_normalized_identity():
+    # two conversations sharing the SAME normalized identity → ambiguous, rejected with both
+    convs = _convs("好管家旗舰店", "好管家官方旗舰店")
+    got, partials = _resolve_seller(convs, "好管家")
+    assert got is None and set(partials) == {"好管家旗舰店", "好管家官方旗舰店"}
+
+
+def test_resolve_seller_no_match():
+    assert _resolve_seller(_convs("好管家旗舰店"), "不存在") == (None, [])
+    assert _resolve_seller(_convs("好管家旗舰店"), "") == (None, [])
+
+
+def test_resolve_seller_shop_vs_nick():
+    # full shop name resolves to the short nick via normalized exact (not substring)
+    assert _resolve_seller(_convs("南京海雀显卡"), "南京海雀显卡旗舰店") == ("南京海雀显卡", [])
+    # but a bare partial is rejected
+    got, partials = _resolve_seller(_convs("南京海雀显卡", "南京海雀显卡专营店"), "南京海雀")
+    assert got is None and partials == ["南京海雀显卡", "南京海雀显卡专营店"]

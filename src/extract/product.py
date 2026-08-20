@@ -165,7 +165,15 @@ def build_variants(sku_base: dict, sku2info: dict) -> list[SkuVariant]:
     Produces a variant for EVERY entry in skuBase.skus. If a product has no SKU
     matrix (skus empty — very common for simple items), synthesizes ONE default
     variant from sku2info so the headline price is never lost (C1). Raises
-    SkuIncompleteError if a real sku is dropped (a join bug).
+    SkuIncompleteError (audit HIGH-1):
+    - when a sku listed in skuBase.skus has NO sku2info entry (the join dropped
+      it — a silent 'out of stock' would be a wrong answer, so we fail loudly);
+    - when any propPath pair cannot be mapped to a human-readable option (never
+      returns a partially-labeled purchasable SKU — a stale pid:vid must fail,
+      not be silently dropped, audit HIGH-5);
+    - when the built variant count != the cartesian product of the option groups
+      (the completeness gate that used to compare against len(skus) and so could
+      never fire).
     """
     lookup, _ = _pidvid_lookup(sku_base)
     skus = sku_base.get("skus", []) or []
@@ -175,6 +183,12 @@ def build_variants(sku_base: dict, sku2info: dict) -> list[SkuVariant]:
             return []
         default = sku2info.get("0") or next(iter(sku2info.values()), {}) or {}
         return [_variant_from_info("0", {}, default)]
+
+    # Gate 1: every listed sku must have a price/stock map — a missing entry is a
+    # join bug, not a sold-out variant (fail loudly, never a silent available=False).
+    missing = [sku for sku in skus if not (sku2info.get(str(sku.get("skuId"))) or {})]
+    if missing:
+        raise SkuIncompleteError(expected=len(skus), got=len(skus) - len(missing))
 
     variants: list[SkuVariant] = []
     for sku in skus:
@@ -187,14 +201,22 @@ def build_variants(sku_base: dict, sku2info: dict) -> list[SkuVariant]:
                 continue
             mapped = lookup.get(pair)
             if mapped is None:
-                continue  # H5: unknown pid:vid (stale cache) — skip, never emit a raw token
+                # 任何 propPath 档位无法映射成可读选项 = 页面 SKU 数据漂移/陈旧 pid:vid。
+                # 绝不能静默 drop 该档位: 那样会产出"缺属性"的部分标签 SKU(且计数门仍
+                # 通过)。大声失败 —— 宁缺勿滥, 绝不返回部分标签的可购 SKU(H5 升级)。
+                raise SkuIncompleteError(
+                    detail=f"sku {sku_id}: propPath pair {pair!r} cannot be mapped "
+                           "to a human-readable option (unknown pid:vid in skuBase.props)",
+                )
             props[mapped["group"]] = mapped["name"]
             if mapped.get("image") and not image:
                 image = mapped["image"]  # 取该档位选项图(尺寸/规格常印其上)
-        variants.append(_variant_from_info(sku_id, props, sku2info.get(sku_id, {}) or {}, image=image))
+        variants.append(_variant_from_info(sku_id, props, sku2info[sku_id], image=image))
 
-    if len(variants) != len(skus):
-        raise SkuIncompleteError(expected=len(skus), got=len(variants))
+    # Gate 2: completeness vs the cartesian product of option groups (CLAUDE.md A.1).
+    expected = cartesian_count(sku_base)
+    if expected and len(variants) != expected:
+        raise SkuIncompleteError(expected=expected, got=len(variants))
     return variants
 
 
@@ -356,6 +378,19 @@ def _to_product_id(product_url_or_id: str) -> str:
 _DEEP_PRICE_TIME_BUDGET_S = 40.0
 _DEEP_PRICE_ESTIMATED_PER_SKU_S = 2.5
 
+# Selecting a variant chip appends &skuId=<id> to the tab URL (CLAUDE.md B.6/B.8).
+# This is the "the click registered" signal deep_price verifies before trusting a price.
+_SKU_ID_URL_RE = re.compile(r"[?&]skuId=(\d+)", re.I)
+
+
+def _live_sku_id(url: str) -> str | None:
+    """Extract the &skuId= the page appended after a variant-chip selection.
+
+    None when the URL carries no skuId — i.e. the selection did not register.
+    """
+    m = _SKU_ID_URL_RE.search(url or "")
+    return m.group(1) if m else None
+
 
 def _append_subsidy_note(product: Product, note: str) -> None:
     product.subsidy_caveat = " ".join(
@@ -371,6 +406,14 @@ async def fill_subsidy_prices(page, product, max_skus: int = 24) -> None:
     - otherwise stop when ~40s of click budget is spent and mark the result as
       partial (the caller still gets every SKU; unclicked rows keep the embedded
       优惠前 price).
+
+    Conservative guard (CLAUDE.md B.8): a variant's price is only overwritten when
+    the live URL &skuId= actually equals that variant's sku_id after all option
+    clicks — i.e. the selection provably registered. A missing/mismatched skuId
+    means the click did not take (or hit the wrong chip), so the row keeps the
+    embedded 优惠前 price and the run is marked partial/unverified. Variants with
+    no option properties (single-default product) have nothing to mis-click, so
+    they are updated from the shown price directly.
     """
     from src.browser.pacing import human_delay
     from src.extract.selectors import SUBSIDY_PRICE_JS
@@ -390,7 +433,8 @@ async def fill_subsidy_prices(page, product, max_skus: int = 24) -> None:
 
     deadline = time.monotonic() + _DEEP_PRICE_TIME_BUDGET_S
     got_any = False
-    processed = 0
+    processed = 0      # variants updated with a verified live 平台加补后 price
+    unverified = 0     # clicks executed but URL skuId != expected → embedded price kept
     for v in variants:
         if time.monotonic() + _DEEP_PRICE_ESTIMATED_PER_SKU_S > deadline:
             break
@@ -411,8 +455,19 @@ async def fill_subsidy_prices(page, product, max_skus: int = 24) -> None:
             await human_delay(0.6, 1.2)
         if not ok:
             continue
-        processed += 1
         await human_delay(0.8, 1.4)
+
+        # 只认"点击已注册"的选择: 有多档选项的型号, 实时 URL 必须带 &skuId= 且等于该
+        # 型号的期望 sku_id 才读取实时价; 否则保留嵌入式优惠前价并标记未验证(防串价, B.8)。
+        if v.properties:
+            try:
+                live_sku = _live_sku_id(page.url or "")
+            except Exception:
+                live_sku = None
+            if live_sku is None or str(live_sku) != str(v.sku_id):
+                unverified += 1
+                continue
+
         try:
             shown = await page.evaluate(SUBSIDY_PRICE_JS)
         except Exception:
@@ -422,6 +477,7 @@ async def fill_subsidy_prices(page, product, max_skus: int = 24) -> None:
                 # SUBSIDY_PRICE_JS 现返回 {after, before, raw}; 兼容旧字符串返回值。
                 v.price = float(shown.get("after") if isinstance(shown, dict) else shown)
                 got_any = True
+                processed += 1
             except (TypeError, ValueError, AttributeError):
                 pass
 
@@ -430,6 +486,13 @@ async def fill_subsidy_prices(page, product, max_skus: int = 24) -> None:
             product,
             f"deep_price partial: updated {processed}/{len(clickable)} variants within "
             f"{_DEEP_PRICE_TIME_BUDGET_S:.0f}s; remaining rows keep the embedded 优惠前 price.",
+        )
+    if unverified:
+        _append_subsidy_note(
+            product,
+            f"deep_price unverified: {unverified} clicked variant(s) did not register a "
+            f"matching &skuId= in the URL, so their rows keep the embedded 优惠前 price "
+            f"(selection not confirmed).",
         )
 
     if got_any:

@@ -13,6 +13,7 @@ import asyncio
 import re
 import time
 
+from src.errors import CaptchaError, SelectorDriftError
 from src.extract.selectors import SEARCH_EXTRACT_JS as EXTRACT_JS  # centralized (Phase 6)
 from src.models import SearchResult
 
@@ -273,6 +274,8 @@ async def _goto_search_page(page, url: str, keyword: str):
             await page.goto("https://www.taobao.com", wait_until="domcontentloaded")
             await session.guard_captcha(page)
             await human_delay(1.5, 3.0)
+        except (CaptchaError, SelectorDriftError):
+            raise  # 风控墙/布局漂移必须上浮给调用方, 绝不吞掉后继续直接 URL (CLAUDE.md §7.4, audit HIGH-3)
         except Exception as exc:
             get_logger().warning("search: goto taobao home failed (%s) — falling through to direct URL", exc)
     box = None
@@ -320,6 +323,8 @@ async def _goto_search_page(page, url: str, keyword: str):
             get_logger().warning("search: no NEW results URL after submit (url=%s) — direct-URL fallback", page.url)
             await page.goto(url, wait_until="domcontentloaded")
             return page
+        except (CaptchaError, SelectorDriftError):
+            raise  # 搜索框提交过程中 guard 撞上风控墙/漂移 → 上浮, 不退回直接 URL
         except Exception as exc:
             get_logger().warning("search: search-box submission failed (%s) — falling back to direct URL", exc)
     # 退回: 直接 URL(历史路径, 保底)
@@ -354,7 +359,10 @@ async def parse_search(keyword: str, page_num: int = 1, filters: dict | None = N
         for target in range(2, page_num + 1):
             current = page.url
             if f"page={target}" in current.replace("%2C", ","):
-                break
+                # 已在该 target 页 → 跳过这一次点击, 继续下一个 target。绝不能 break:
+                # 请求 page=3 而 SPA 落在 page=2 时, 旧代码在 target=2 处 break 提前
+                # 退出, 把第 2 页当第 3 页结果返回(audit MED-6 补)。
+                continue
             # A soft 访问太频繁 popup blocks pointer events — close its X first.
             await session.dismiss_frequency_dialog(page)
             try:
@@ -363,9 +371,13 @@ async def parse_search(keyword: str, page_num: int = 1, filters: dict | None = N
                 get_logger().info("search: clicked 下一页 toward page=%s url=%s", target, page.url)
                 await human_delay(1.0, 2.0)
                 await page.wait_for_load_state("domcontentloaded")
+                # 翻页点击也可能弹滑块: 每次点击后先人工交接, 再继续滚动读取。
+                await session.guard_captcha(page)
                 for _ in range(2):
                     await human_scroll(page, 3)
                     await human_delay(0.5, 1.0)
+            except (CaptchaError, SelectorDriftError):
+                raise  # 风控墙/布局漂移不是"点击失败" — 上浮给调用方, 绝不降级成普通日志
             except Exception as exc:
                 get_logger().warning("search: pagination click failed for page=%s: %s", target, exc)
                 # Popup may have appeared between the dismiss and the click.
@@ -375,9 +387,12 @@ async def parse_search(keyword: str, page_num: int = 1, filters: dict | None = N
                         get_logger().info("search: retried 下一页 toward page=%s url=%s", target, page.url)
                         await human_delay(1.0, 2.0)
                         await page.wait_for_load_state("domcontentloaded")
+                        await session.guard_captcha(page)
                         for _ in range(2):
                             await human_scroll(page, 3)
                             await human_delay(0.5, 1.0)
+                    except (CaptchaError, SelectorDriftError):
+                        raise  # 同上: 重试路径的滑块/漂移也必须上浮
                     except Exception as retry_exc:
                         get_logger().warning("search: pagination retry failed for page=%s: %s", target, retry_exc)
                         break
@@ -386,8 +401,34 @@ async def parse_search(keyword: str, page_num: int = 1, filters: dict | None = N
     else:
         get_logger().info("search: loaded page=%s url=%s", page_num, page.url)
 
+    # 翻页点击后再次人工交接: 搜索页是滑块第一触发源, 点"下一页"也可能弹墙 —
+    # 必须在读取结果前再 guard 一次, 不能把墙当"空结果/某页结果"静默返回。
+    await session.guard_captcha(page)
+
+    # 请求的页码必须真正到达: 若 URL 没有 page=N(SPA 重写/翻页点击失败), 现在只会
+    # 拿到另一页的结果 — 绝不能把第 1 页当第 N 页静默返回, 大声抛漂移错误(audit MED-6)。
+    _verify_page_reached(page_num, page.url)
+
     raw = await page.evaluate(EXTRACT_JS)
     return filter_search_results(parse_cards(raw), filters)
+
+
+def _verify_page_reached(page_num: int, url: str) -> None:
+    """Raise SelectorDriftError if the requested results page wasn't actually reached.
+
+    Only meaningful for page_num > 1 (page 1 is the default landing page). The SPA
+    can rewrite a requested page=2 back to page=1 or a pagination click can fail
+    silently — both leave the browser on the wrong page, and returning those rows
+    labelled as page N would be a silently-wrong answer.
+    """
+    if page_num <= 1:
+        return
+    effective = (url or "").replace("%2C", ",")
+    if f"page={page_num}" not in effective:
+        raise SelectorDriftError(
+            step="search pagination",
+            selector=f"page={page_num} in results URL (landed on: {effective[-80:] or 'no-url'})",
+        )
 
 
 def _search_markdown(results, keyword: str = "", max_rows: int = 30, page: int | None = None) -> str:

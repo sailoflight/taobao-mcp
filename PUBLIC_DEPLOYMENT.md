@@ -24,7 +24,7 @@ For this browser-driven implementation, run the MCP process interactively on
 the machine that owns the browser profile. Put a stable HTTPS reverse proxy in
 front of `127.0.0.1:8000`; the proxy may be hosted separately only if it securely
 forwards to this machine. The human must be able to see the browser opened by
-`taobao_initialize_login` and handle QR login or captchas.
+`taobao_session(action="login")` and handle QR login or captchas.
 
 ## 1. Configure OAuth and the public URL
 
@@ -81,7 +81,7 @@ Use MCP Inspector in Streamable HTTP mode against the public `/mcp` URL. Confirm
 
 1. An unauthenticated request receives an OAuth challenge.
 2. OAuth discovery and authorization-code + PKCE complete successfully.
-3. Initialization lists exactly 12 `taobao_*` tools.
+3. Initialization lists exactly 13 `taobao_*` tools.
 4. Read/write/open-world annotations match actual behavior.
 5. Preview calls do not write; `confirm=true` performs only the documented cart
    add or seller reply.

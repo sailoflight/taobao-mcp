@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import re
 
+from src.errors import CaptchaError, SelectorDriftError
 from src.extract.selectors import DESC_RECON_JS
 
 # Substring hints for desc-like keys inside the embedded ICE ``res`` dict.
@@ -507,6 +508,30 @@ async def sweep_variant_prices(product_url_or_id: str, max_chips: int = 12) -> d
     return out
 
 
+async def _cleanup_fetch(entry: dict, page, pid: str, popup) -> None:
+    """User-rule cleanup that MUST run even when a CaptchaError/SelectorDriftError
+    escapes from on-page extraction (audit HIGH-3, cleanup-on-error guarantee):
+    un-favorite what WE favorited this round (no residue) and close the popup tab
+    we opened (single-tab hygiene, CLAUDE.md §7.3). Populates entry['cleanup'] for
+    the success-path return; on the error path it still runs first and then the
+    exception propagates.
+    """
+    if entry.get("added_by_us"):
+        try:
+            from src.extract.favorite import ensure_unfavorited
+
+            entry["cleanup"] = await ensure_unfavorited(page, pid)
+        except Exception as exc:
+            entry["cleanup"] = {"error": str(exc)}
+    else:
+        entry["cleanup"] = {"state": "not_added_by_us", "clicked": False}
+    if popup and not popup.is_closed():
+        try:
+            await popup.close()
+        except Exception:
+            pass
+
+
 async def fetch_detail(product_url_or_id: str, miid_source: str = "config",
                        with_reviews: bool = False, reviews_max: int = 12,
                        reviews_keyword: str = "") -> dict:
@@ -670,70 +695,69 @@ async def fetch_detail(product_url_or_id: str, miid_source: str = "config",
 
     # Price observation (fine-compare): on the mi_id-entered page the personalized
     # channel may show the platform-subsidy / coupon price (e.g. 平台加补后 ¥33.75).
-    price_observed: dict = {}
-    if entry.get("miid_from") in ("footmark_click", "favorite_click"):
-        from src.extract.selectors import PRICE_LINES_JS, SUBSIDY_PRICE_JS
-
-        try:
-            price_observed["platform_subsidy_after"] = await harvest_page.evaluate(SUBSIDY_PRICE_JS)
-        except Exception:
-            price_observed["platform_subsidy_after"] = None
-        try:
-            price_observed["page"] = await harvest_page.evaluate(PRICE_LINES_JS)
-        except Exception:
-            pass
-
-    # On-page 评论/问答 (Tmall 只在 mi_id 详情页渲染): 关闭弹窗前就地一次抽取。
-    # mi_id 每次经 足迹/收藏 点击新建、用完即关, 不存在可复用 URL — 所以必须在这里取。
-    # 先问答后评论: 问答抽屉("查看全部问答")需页面无其它抽屉遮挡; 评论抽屉最后开。
-    reviews_extra: list = []
-    qa_extra: list = []
-    if harvest_page is not None and harvest_page.url and "item.htm" in harvest_page.url:
-        if entry.get("miid_from") in ("footmark_click", "favorite_click"):
-            try:
-                from src.extract.qa import parse_qa
-
-                qa_extra = [q.model_dump() for q in await parse_qa(pid, page=harvest_page)]
-            except Exception as exc:
-                qa_extra = [{"error": str(exc)[:120]}]
-        try:
-            if with_reviews:
-                from src.extract.reviews import parse_reviews_stratified
-
-                revs = await parse_reviews_stratified(pid, max_reviews=reviews_max,
-                                                      keyword=reviews_keyword, page=harvest_page)
-                reviews_extra = [r.model_dump() for r in revs]
-        except Exception as exc:
-            reviews_extra = [{"error": str(exc)[:120]}]
-
-    # 同类推荐/看了又看 (近似搜索通道, 2026-08-20): 搜索页被验证码风控, 但详情页
-    # 零验证码。从当前详情页 DOM 顺带收集同类商品卡(id+标题+¥) → 零额外流量/零验证码
-    # 的"近似搜索"。推荐列表无限长且含泛推荐噪声 → rank_recommendations 排序/过滤/压缩
-    # (按耗材关键词打分, 降序, 截断到上限, 防大量清单冲击上下文)。失败静默。
-    recommendations: dict = {"items": [], "total_raw": 0, "kept": 0, "dropped_noise": 0, "capped": False}
+    # The whole on-page extraction region lives in a try/finally so the user-rule
+    # cleanup (un-favorite + popup close) ALWAYS runs — even when a
+    # CaptchaError/SelectorDriftError escapes from review/QA/recommend extraction
+    # (cleanup-on-error: fail loud WITHOUT leaving account-state residue).
     try:
-        from src.extract.recommend import rank_recommendations
-        from src.extract.selectors import RECOMMEND_JS
+        price_observed: dict = {}
+        if entry.get("miid_from") in ("footmark_click", "favorite_click"):
+            from src.extract.selectors import PRICE_LINES_JS, SUBSIDY_PRICE_JS
 
-        raw_rec = await harvest_page.evaluate(RECOMMEND_JS)
-        recommendations = rank_recommendations(raw_rec or [])
-    except Exception as exc:
-        get_logger().warning("detail: recommend extraction failed: %s", exc)
+            try:
+                price_observed["platform_subsidy_after"] = await harvest_page.evaluate(SUBSIDY_PRICE_JS)
+            except Exception:
+                price_observed["platform_subsidy_after"] = None
+            try:
+                price_observed["page"] = await harvest_page.evaluate(PRICE_LINES_JS)
+            except Exception:
+                pass
 
-    # Cleanup (user rule): if WE favorited it this round, un-favorite — no residue.
-    if entry.get("added_by_us"):
+        # On-page 评论/问答 (Tmall 只在 mi_id 详情页渲染): 关闭弹窗前就地一次抽取。
+        # mi_id 每次经 足迹/收藏 点击新建、用完即关, 不存在可复用 URL — 所以必须在这里取。
+        # 先问答后评论: 问答抽屉("查看全部问答")需页面无其它抽屉遮挡; 评论抽屉最后开。
+        reviews_extra: list = []
+        qa_extra: list = []
+        if harvest_page is not None and harvest_page.url and "item.htm" in harvest_page.url:
+            if entry.get("miid_from") in ("footmark_click", "favorite_click"):
+                try:
+                    from src.extract.qa import parse_qa
+
+                    qa_extra = [q.model_dump() for q in await parse_qa(pid, page=harvest_page)]
+                except (CaptchaError, SelectorDriftError):
+                    raise  # 风控墙/布局漂移必须上浮给调用方 — 问答是 fine 模式必提取项, 不嵌入 error 静默
+                except Exception as exc:
+                    qa_extra = [{"error": str(exc)[:120]}]
+            try:
+                if with_reviews:
+                    from src.extract.reviews import parse_reviews_stratified
+
+                    revs = await parse_reviews_stratified(pid, max_reviews=reviews_max,
+                                                          keyword=reviews_keyword, page=harvest_page)
+                    reviews_extra = [r.model_dump() for r in revs]
+            except (CaptchaError, SelectorDriftError):
+                raise  # 风控墙/布局漂移必须上浮给调用方 — with_reviews=True 时评论是必提取项, 不嵌入 error 静默
+            except Exception as exc:
+                reviews_extra = [{"error": str(exc)[:120]}]
+
+        # 同类推荐/看了又看 (近似搜索通道, 2026-08-20): 搜索页被验证码风控, 但详情页
+        # 零验证码。从当前详情页 DOM 顺带收集同类商品卡(id+标题+¥) → 零额外流量/零验证码
+        # 的"近似搜索"。推荐列表无限长且含泛推荐噪声 → rank_recommendations 排序/过滤/压缩
+        # (按耗材关键词打分, 降序, 截断到上限, 防大量清单冲击上下文)。失败静默。
+        recommendations: dict = {"items": [], "total_raw": 0, "kept": 0, "dropped_noise": 0, "capped": False}
         try:
-            entry["cleanup"] = await ensure_unfavorited(page, pid)
+            from src.extract.recommend import rank_recommendations
+            from src.extract.selectors import RECOMMEND_JS
+
+            raw_rec = await harvest_page.evaluate(RECOMMEND_JS)
+            recommendations = rank_recommendations(raw_rec or [])
+        except CaptchaError:
+            raise  # 撞上风控墙必须上浮 — 推荐虽是可选提取, 墙不能被吞掉后继续
         except Exception as exc:
-            entry["cleanup"] = {"error": str(exc)}
-    else:
-        entry["cleanup"] = {"state": "not_added_by_us", "clicked": False}
-    # Single-tab hygiene (CLAUDE.md §7.3): close the popup tab we opened.
-    if popup and not popup.is_closed():
-        try:
-            await popup.close()
-        except Exception:
-            pass
+            get_logger().warning("detail: recommend extraction failed: %s", exc)
+    finally:
+        # 用户规则清理(必须始终执行, 含异常上浮路径): 本轮收藏的取消收藏 + 关闭弹窗标签页。
+        await _cleanup_fetch(entry, page, pid, popup)
 
     stale = not harvest.get("scope")
     # 分层评价摘要(让"检查分层详细评价"的过程可见, 2026-08-20 用户反馈):

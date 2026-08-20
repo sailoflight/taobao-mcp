@@ -44,6 +44,33 @@ def _cny(ws: Worksheet, col_idx: int) -> None:
             c.number_format = _CNY
 
 
+# Formula-injection prefixes a spreadsheet app parses as a formula (CSV/SSE vector):
+# leading '=', '+', '-', '@' — INCLUDING a leading-whitespace-prefixed variant, since
+# Excel/Sheets trim whitespace before parsing ('  =1+1' is just as risky as '=1+1').
+_FORMULA_PREFIXES = ("=", "+", "-", "@")
+
+
+def _is_formula_risk(value) -> bool:
+    """Pure: a string a spreadsheet app would parse as a formula (= + - @), even when
+    preceded by leading whitespace. Conservative."""
+    return isinstance(value, str) and value.lstrip().startswith(_FORMULA_PREFIXES)
+
+
+def _neutralize_formulas(ws: Worksheet) -> None:
+    """Force every cell a spreadsheet app would parse as a formula to literal TEXT.
+
+    openpyxl auto-turns any string starting with '=' into an executable formula
+    (data_type 'f'); product titles/shops/variant labels/review text are Taobao-controlled,
+    so a value like '=HYPERLINK(...)' would execute when the buyer opens the workbook.
+    We also conservatively force leading '= + - @' (and a whitespace-prefixed variant) to
+    TEXT. These writers contain NO intentional formulas, so a blanket neutralization is safe.
+    """
+    for row in ws.iter_rows():
+        for c in row:
+            if _is_formula_risk(c.value):
+                c.data_type = "s"
+
+
 def _variant_review_count(product: Product, variant) -> int:
     """Reviews tagged to this variant.
 
@@ -115,6 +142,7 @@ def write_xlsx(products: list[Product], filename: str, out_dir: str | None = Non
 
     for sheet in (ws, wsv, wsr):
         _auto_width(sheet)
+        _neutralize_formulas(sheet)   # formula-injection guard: '='-leading text stays text
 
     wb.save(path)
     return str(path.resolve())
@@ -154,5 +182,6 @@ def write_compare_xlsx(rows: list[dict], filename: str, out_dir: str | None = No
     _cny(ws, 4)
     _cny(ws, 5)
     _auto_width(ws)
+    _neutralize_formulas(ws)   # formula-injection guard for untrusted title/shop/caveat text
     wb.save(path)
     return str(path.resolve())

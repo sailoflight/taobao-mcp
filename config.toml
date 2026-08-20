@@ -32,7 +32,6 @@ off_center = 0.15             # aim drift from center (fraction of box)
 max_reviews = 60             # per product, paginated
 review_pages = 4
 fav_flow_per_day = 30            # daily cap on the 收藏链路 (favorite flow)
-review_sample_per_rating = 3     # 评论聚合: 好/中/差评各取 N 条(防被注入好评)
 search_per_day = 30              # 每日 taobao_search 上限(搜索列表页是滑块/风控第一触发源, 超限拒绝并提示休息)
 
 [output]
@@ -55,13 +54,20 @@ search_cooldown_s = 150        # 两次 taobao_search 之间最小间隔(秒, �
 track_cache = true             # 物流/库存每日首次实机+同日缓存(零流量); false=每次实机
 fav_flow = true                # 收藏链路(miid 细查)总开关; false=禁止任何收藏动作
 miid_channel = "auto"          # miid 获取渠道(双机制, 用户设计): auto=足迹→收藏兜底 | footmark 仅足迹 | favorite 仅收藏 | config 静态miid
+review_sample_per_rating = 3   # 评论聚合: 好/中/差评各取 N 条(防被注入好评)
 # 足迹渠道: 不耗收藏配额(30/日), 但列表易受用户手动浏览并发扰动 → 打开后校验 opened_id==pid, 不符即退回收藏
 # 行为不变量(不可配置, 始终执行): 单标签顺序复用不批量开tab · 优先网络拦截少打DOM ·
 # 人类节奏延迟([pacing]) · 人类化模拟点击([click]) · 限速上限(pacing.max_products_per_minute) ·
 # 收藏每日配额(limits.fav_flow_per_day)
 
 [compare]
-# taobao_compare 默认比价口径: ask(每次询问) | cart(购物车到手价优先) | cart_atomic(购物车无则原子加购读价再退回) | coarse(纯原价)
-# 每次调用 compare 会按此在返回头部提示当前口径(配置为 cart/cart_atomic 时明示"即将使用购物车")。
+# taobao_compare 默认比价口径: ask(每次询问) | cart(购物车到手价优先) | coarse(纯原价)
+# cart_atomic(购物车无则原子加购读价再退回) — 安全重建版(2026-08-20): 数量证明用权威 XHR
+# (account.read_cart / mtop.trade.query.bag, 键 (product_id, sku_id)+数量); 加购前快照 →
+# 已在购物车的目标型号零写入直接读到手价 → 加购恰好1件 → 证明 XHR 差恰好是目标 (pid, sku) +1
+# 且其余行不变 → 读 DOM 价格 → 按精确 skuId 退回(绝不回退到型号/商品) → 退回后再核对完整
+# XHR 快照与加购前一致; 任何一步无法证明都不删除并提示人工检查；此时目标精确 SKU 可能保留临时 +1，需手动核对处理。需显式
+# atomic_confirm=true(taobao_compare 与 taobao_export(type=compare) 一致; false=返回确认门预览)。
+# 每次调用 compare 会按此在返回头部提示当前口径(配置为 cart 时明示"即将使用购物车")。
 # 运行时改: taobao_config set compare.source <值> (写入 gitignored output/.config_overrides.toml)。
 source = "ask"

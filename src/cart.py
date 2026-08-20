@@ -35,6 +35,35 @@ def classify_add_error(ret: str) -> dict:
         return {"kind": "ok", "reason": "成功", "raw": s[:160]}
     return {"kind": "unknown", "reason": "未知错误", "raw": s[:160]}
 
+
+def _validate_qty(qty) -> int:
+    """Pure: qty must be a positive whole number (0/negative/non-integral rejected).
+
+    Returns the validated integer. Raises ProductNotFoundError on invalid input.
+    Unit-tested offline (tests/test_tools.py).
+    """
+    try:
+        qty_f = float(qty)
+    except (TypeError, ValueError):
+        raise ProductNotFoundError(f"qty must be a positive whole number, got {qty!r}")
+    if not qty_f.is_integer() or qty_f < 1:
+        raise ProductNotFoundError(f"qty must be a positive whole number (>=1), got {qty!r}")
+    return int(qty_f)
+
+
+def resolve_exact_variant(variants, options: list[str]):
+    """Pure: return the EXACTLY ONE parsed variant whose full property-value set equals the
+    option set (one value per option group). Returns None when 0 or >1 variants match — an
+    ambiguous/incomplete option set must never be used for an add (the caller refuses).
+
+    Unit-tested offline (tests/test_tools.py).
+    """
+    if not options:
+        return None
+    want = set(options)
+    matches = [v for v in variants if set((v.properties or {}).values()) == want]
+    return matches[0] if len(matches) == 1 else None
+
 # Add to cart via the mtop.trade.addBag API using the page's own lib.mtop SDK (it handles
 # signing + the login/ecode token). Robust on both Taobao and Tmall, where the SSR 加入购物车
 # button isn't reliably clickable. Returns {ok, ret} — ret contains "SUCCESS::调用成功" on success.
@@ -62,12 +91,20 @@ async def add_to_cart(
     """Stage one product+variant+qty into the cart. Preview unless confirm=True.
 
     options = one option VALUE per group (e.g. ["P100 质保3年 以换代修"] or ["黑色","L"]).
-    cheapest_available=True 且不给 options 时, 自动选最便宜有货型号(预览可先确认)。
+    cheapest_available=True 且不给 options 时, 自动选最便宜有货型号(预览可先确认).
+    SAFETY (2026-08-20 audit):
+      - qty must be a positive whole number (0/negative/non-integral are rejected).
+      - the FULL `options` set must resolve to exactly ONE parsed variant (ambiguity refused).
+      - the live URL skuId must equal that variant's expected sku_id before confirm=True
+        calls the addBag API — a mismatched/incomplete selection is refused, never staged.
     Reversible (cart only); never buys, never picks an address.
     """
     from src.browser.pacing import human_delay, human_scroll
     from src.browser.session import get_session
     from src.extract.product import _to_product_id, parse_product_html
+
+    # qty must be a positive whole number — reject 0/negative/non-integral before any browser work
+    qty = _validate_qty(qty)
 
     options = options or []
     pid = _to_product_id(product_url_or_id)
@@ -91,6 +128,16 @@ async def add_to_cart(
         choices = sorted({" / ".join(v.properties.values()) for v in product.variants})
         return ("Specify the variant to add via `options` (one value per group). Available: "
                 + "; ".join(choices[:8]))
+
+    # Resolve the FULL option set to EXACTLY ONE parsed variant — the only safe basis for the
+    # addBag skuId. Refuse an ambiguous / unmatched set rather than stage the wrong item.
+    expected_variant = resolve_exact_variant(product.variants, options)
+    if options and expected_variant is None:
+        choices = sorted({" / ".join(v.properties.values()) for v in product.variants})
+        raise ProductNotFoundError(
+            f"options {options!r} do not resolve to exactly one parsed variant of product {pid}. "
+            f"Pass one exact value per option group as shown on the page. Available: "
+            + ("; ".join(choices[:8]) if choices else "(no variants parsed)"))
 
     # select each option (exact chip match → real selection)
     selected: list[str] = []
@@ -136,6 +183,16 @@ async def add_to_cart(
             f"variant {options} did not register on product {pid} (no skuId after clicking — "
             f"the chip selection was not validated). Refusing to add the wrong item; retry."
             + hint
+        )
+
+    # The live URL skuId MUST equal the resolved variant's expected sku_id — either the chips
+    # registered exactly, or the add is refused (never stage a wrong/incomplete item).
+    if sku_id and expected_variant is not None and str(sku_id) != str(expected_variant.sku_id):
+        raise ProductNotFoundError(
+            f"live URL skuId {sku_id} does not match the resolved variant's expected sku_id "
+            f"{expected_variant.sku_id} for options {options!r} on product {pid} — the chip "
+            "selection did not register correctly. Refusing to add; retry with the exact "
+            "option values as shown on the page."
         )
 
     if qty and int(qty) != 1:
@@ -195,9 +252,9 @@ async def add_to_cart_batch(
     """Stage MANY variants of ONE product in a SINGLE page visit (anti-burst).
 
     INTERNAL/script-only helper — deliberately NOT registered as an MCP tool: the MCP
-    surface stays one gated line per taobao_add_to_cart call so the human confirms each
-    line. (If ever promoted to a tool, keep the confirm gate and reconcile against the
-    cart data XHR afterwards.)
+    surface stays one gated line per taobao_cart(action="add") call so the human confirms
+    each line. (If ever promoted to a tool, keep the confirm gate and reconcile against
+    the cart data XHR afterwards.)
 
     items = [{"options": [v1, v2, ...], "qty": packs}, ...] — one entry per cart line.
     Preview-validates every chip exists (confirm=False, no writes); confirm=True selects

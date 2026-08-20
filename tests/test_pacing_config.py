@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import os
 
+from src.browser import pacing as pacing_mod
 from src.browser.pacing import RateLimiter, human_delay
 from src.config import load_config
 
@@ -50,6 +52,114 @@ def test_rate_limiter_disabled():
     rl = RateLimiter(max_per_minute=0)
     asyncio.run(rl.acquire())         # disabled → returns immediately
     assert rl._timestamps == []
+
+
+def test_config_backed_limiter_reflects_live_config(tmp_path, monkeypatch):
+    """无参构造的 RateLimiter 每次 acquire/usage 实时读配置, 不冻结在 __init__。"""
+    from src import config as cfg_mod
+
+    p = tmp_path / "config.toml"
+    p.write_text("[pacing]\nmax_products_per_minute = 3\n", encoding="utf-8")
+    monkeypatch.setattr(pacing_mod, "load_config", lambda: cfg_mod.load_config(str(p)))
+
+    rl = RateLimiter()  # config-backed
+    asyncio.run(rl.acquire())
+    asyncio.run(rl.acquire())
+    assert rl.usage()["max_per_minute"] == 3
+
+    # 改配置 + bump mtime → 同一实例实时反映新上限 (值须在安全边界 [1,6] 内,
+    # load_config 会把越界值 clamp 到边界)
+    p.write_text("[pacing]\nmax_products_per_minute = 5\n", encoding="utf-8")
+    os.utime(p, (3000, 3000))
+    assert rl.usage()["max_per_minute"] == 5
+    asyncio.run(rl.acquire())
+    assert rl.usage()["max_per_minute"] == 5
+
+    # 显式构造的实例保持冻结, 不受配置变化影响
+    rl2 = RateLimiter(max_per_minute=5)
+    asyncio.run(rl2.acquire())
+    assert rl2.usage()["max_per_minute"] == 5
+
+
+def test_acquire_reprunes_after_live_cap_decrease(monkeypatch, tmp_path):
+    """Live cap decrease cannot leave more than `cap` recent timestamps in the window.
+
+    6 个时间戳已在窗内, 运行中把上限从 6 降到 2 → acquire 必须重新修剪, 最终
+    窗口内不超过 2 个(修复: 睡醒后重新读 cap + 重新 prune, 而非无条件 append)。
+    """
+    from src import config as cfg_mod
+
+    state = {"clock": 0.0}
+    real_sleep = asyncio.sleep
+
+    def fake_monotonic():
+        return state["clock"]
+
+    async def fake_sleep(delay):
+        await real_sleep(0)
+        state["clock"] += delay
+
+    monkeypatch.setattr(pacing_mod.time, "monotonic", fake_monotonic)
+    monkeypatch.setattr(pacing_mod.asyncio, "sleep", fake_sleep)
+
+    p = tmp_path / "config.toml"
+    p.write_text(f'[output]\ndir = "{tmp_path}"\n[pacing]\nmax_products_per_minute = 6\n',
+                 encoding="utf-8")
+    monkeypatch.setattr(pacing_mod, "load_config", lambda: cfg_mod.load_config(str(p)))
+
+    rl = RateLimiter()  # config-backed
+    rl._timestamps = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0]  # 6 within the 60s window
+
+    # live cap decrease 6 -> 2 while those 6 are already recorded
+    p.write_text(f'[output]\ndir = "{tmp_path}"\n[pacing]\nmax_products_per_minute = 2\n',
+                 encoding="utf-8")
+    os.utime(p, (9999, 9999))
+    asyncio.run(rl.acquire())
+
+    now = fake_monotonic()
+    recent = [t for t in rl._timestamps if now - t < 60.0]
+    assert len(recent) <= 2  # never more than the (new, lower) cap
+
+
+def test_concurrent_acquire_serializes_and_respects_cap(monkeypatch):
+    """并发 acquire 被串行化: 全部调用无死锁完成, 60s 窗口内永不超过上限。
+
+    用可控时钟 + 会让出事件循环的假 sleep 建模真实时间流逝, 避免 60s 真睡。
+    """
+    state = {"clock": 0.0}
+    real_sleep = asyncio.sleep
+
+    def fake_monotonic():
+        return state["clock"]
+
+    async def fake_sleep(delay):
+        await real_sleep(0)          # yield so gather can interleave
+        state["clock"] += delay      # sleeping advances time, as in reality
+
+    monkeypatch.setattr(pacing_mod.time, "monotonic", fake_monotonic)
+    monkeypatch.setattr(pacing_mod.asyncio, "sleep", fake_sleep)
+
+    cap = 3
+    rl = RateLimiter(max_per_minute=cap)
+
+    async def go():
+        start = asyncio.Event()
+        done = 0
+        async def one():
+            nonlocal done
+            await start.wait()
+            await rl.acquire()
+            done += 1
+        tasks = [asyncio.create_task(one()) for _ in range(8)]
+        start.set()
+        await asyncio.gather(*tasks)
+        return done
+
+    completed = asyncio.run(go())
+    now = fake_monotonic()
+    recent = [t for t in rl._timestamps if now - t < 60.0]
+    assert completed == 8     # every call got through — no deadlock, no lost slot
+    assert len(recent) <= cap  # rolling 60s window never exceeds the cap
 
 
 def test_human_delay_swaps_min_max():

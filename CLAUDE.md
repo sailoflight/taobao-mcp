@@ -6,13 +6,13 @@
 
 ## 0. Current Status & Operating Mode  *(updated 2026-06-30)*
 
-> **✅ STATUS: v1.0 — built, audited, locked (2026-06-04).** All 7 phases are implemented and tagged (`phase-0-done … phase-6-done`); the base repo `JeremyDong22/taobao_mcp` was cloned to `_base_repo/` for recon (see `NOTES.md`). **Two forensic-audit rounds (5 detectives)** then found and FIXED **4 CRITICAL + 9 HIGH + ~25 MEDIUM/LOW** bugs — including: single-SKU pricing, `¥1,299`→`1.0`, the search price-pick (was grabbing the struck-through `优惠前` price), variant↔review cross-contamination, and the big one — **reading 参数 specs + variant-linked reviews straight from the embedded HTML** (`componentsVO`), which removed a redundant second navigation, an empty-specs gap, and a swallowed-captcha. **80 tests pass; live e2e green.** What exists: the FastMCP server (**12 tools** — login, session_status, search, fetch_product[+deep_price], fetch_reviews, **track_orders** [+取件码 digest], **add_to_cart** [gated], export_xlsx, **read_messages**, **send_reply** [confirm-then-send], **full_picture** [cart+orders+tracking+chats joined by vendor], **export_inventory** [full-history visual inventory with landed cost]), extraction (per-SKU prices, variant-linked reviews, search), xlsx/markdown output, the sourcing Skill + supplier templates, hardening + evals. The "live co-browse" mode (below) remains a manual fallback.
+> **✅ STATUS: v1.0 — built, audited, locked (2026-06-04).** All 7 phases are implemented and tagged (`phase-0-done … phase-6-done`); the base repo `JeremyDong22/taobao_mcp` was cloned to `_base_repo/` for recon (see `NOTES.md`). **Two forensic-audit rounds (5 detectives)** then found and FIXED **4 CRITICAL + 9 HIGH + ~25 MEDIUM/LOW** bugs — including: single-SKU pricing, `¥1,299`→`1.0`, the search price-pick (was grabbing the struck-through `优惠前` price), variant↔review cross-contamination, and the big one — **reading 参数 specs + variant-linked reviews straight from the embedded HTML** (`componentsVO`), which removed a redundant second navigation, an empty-specs gap, and a swallowed-captcha. **80 tests pass; live e2e green.** What exists: the FastMCP server (**13 parameterized tools** — taobao_session, taobao_search, taobao_product, taobao_compare, taobao_cart, taobao_favorites, taobao_tracking, taobao_dossier, taobao_message, taobao_inventory, taobao_config, taobao_debug, taobao_export), extraction (per-SKU prices, variant-linked reviews, search), xlsx/markdown output, the sourcing Skill + supplier templates, hardening + evals. The "live co-browse" mode (below) remains a manual fallback.
 >
-> **Built since v1.0 (2026-06-04):** **(a) `taobao_track_orders`** — read-only daily digest: reads 已买到的宝贝, drills each active order's logistics page (dinamic frame) for status + carrier/tracking# + **取件码 pickup OTP** + station, and emits a forward-to-agent Chinese message (live-validated). **Anti-block:** it uses **ONE reused logistics tab** navigated sequentially with `human_delay` between orders — it must **never open a fresh tab per order** (rapid repeated tab-opening is a flag/block risk); the tab is recreated at most once, only if it wedges, spaced by the delay. It is also **capped to ONE live run per day** — the first call each day fetches + caches (gitignored `output/.track_state.json`, holds order PII so local-only); same-day re-calls serve the cache with **zero Taobao traffic**, unless `force=True`. **(b) `taobao_add_to_cart`** — gated, reversible cart staging: preview by default, clicks 加入购物车 only on `confirm=True`, selects the variant by exact-chip-click; **never checks out, pays, or picks an address** (the China agent does). Live-validated on the P100 (added 质保3年 tier, success toast confirmed). **⚠️ For the BUY flow, physically CLICK each variant button and VALIDATE the selection registered (price/skuId/stock update) — never trust extracted skuBase labels for price/qty; quantity is per-PACK not per-piece (see Appendix B.8). The add itself then goes through the **`mtop.trade.addBag` API** (called via the page's own `lib.mtop`, which signs + carries the login/ecode token) — robust on **both Taobao and Tmall** (the SSR `detail.tmall.com` 加入购物车 button isn't reliably clickable). This API path also made `add_to_cart_batch` reliable (no success-dialog blocking). Still validate the skuId per variant and reconcile a multi-line order against the cart data XHR.**
+> **Built since v1.0 (2026-06-04):** **(a) `taobao_tracking`** — read-only daily digest: reads 已买到的宝贝, drills each active order's logistics page (dinamic frame) for status + carrier/tracking# + **取件码 pickup OTP** + station, and emits a forward-to-agent Chinese message (live-validated). **Anti-block:** it uses **ONE reused logistics tab** navigated sequentially with `human_delay` between orders — it must **never open a fresh tab per order** (rapid repeated tab-opening is a flag/block risk); the tab is recreated at most once, only if it wedges, spaced by the delay. It is also **capped to ONE live run per day** — the first call each day fetches + caches (gitignored `output/.track_state.json`, holds order PII so local-only); same-day re-calls serve the cache with **zero Taobao traffic**, unless `force=True`. **(b) `taobao_cart(action="add")`** — gated, reversible cart staging: preview by default, clicks 加入购物车 only on `confirm=True`, selects the variant by exact-chip-click; **never checks out, pays, or picks an address** (the China agent does). Live-validated on the P100 (added 质保3年 tier, success toast confirmed). **⚠️ For the BUY flow, physically CLICK each variant button and VALIDATE the selection registered (price/skuId/stock update) — never trust extracted skuBase labels for price/qty; quantity is per-PACK not per-piece (see Appendix B.8). The add itself then goes through the **`mtop.trade.addBag` API** (called via the page's own `lib.mtop`, which signs + carries the login/ecode token) — robust on **both Taobao and Tmall** (the SSR `detail.tmall.com` 加入购物车 button isn't reliably clickable). This API path also made `add_to_cart_batch` reliable (no success-dialog blocking). Still validate the skuId per variant and reconcile a multi-line order against the cart data XHR.** **(2026-08-20 audit hardening)** `taobao_cart action=remove` stays **disabled (server-rejected)** — an unconfirmed destructive write. `add_to_cart` now rejects non-positive/non-integral `qty`, resolves the **full option set to exactly one parsed variant**, and requires the live URL `skuId` to equal that variant's expected `sku_id` before `confirm=True` calls addBag — an ambiguous/mismatched selection is refused, never staged. `cart_atomic` was **rebuilt safely** (not disabled): snapshot cart lines (product_id+sku_id+qty) before any write → already-in-cart skus are read with **zero mutation** → otherwise add exactly one expected SKU, **prove** the cart delta is exactly target `sku +1` and nothing else changed → rollback by **exact skuId only** (fail-closed, no variant/product fallback) → verify the final cart equals the snapshot; any unprovable step refuses to delete, warns that the exact SKU may retain a temporary +1 line, and requires a manual cart check. It requires `taobao_compare(source='cart_atomic', atomic_confirm=true)` (explicit atomic_confirm gate; false = preview/gate message) and `taobao_export(type='compare', source='cart_atomic', atomic_confirm=true)` is supported the same way.
 >
-> **Seller comms (2026-06-04):** **`taobao_read_messages`** (read-only) lists IM-center (消息) conversations — seller/time/last-message — and opens any thread (`.message-item` bubbles, tagged `is_self`); **`taobao_send_reply`** is confirm-then-send — `confirm=False` previews, `confirm=True` types into the chat composer (`.biz-expression-editor`) and clicks 发送. Surface = `market.m.taobao.com/app/im/chat` (nested `chat-core` iframe; conversations sync a few seconds after load — poll). Read + preview paths live-validated (12 conversations, P100 thread read); the `confirm=True` send is **also live-validated end-to-end** — one buyer-approved message was sent to the P100 seller (composer focused, typed, 发送 clicked, self-bubble confirmed). The send stays gated on the buyer's per-message OK (never blind-send). Note: the composer's `pre.edit`/`.biz-expression-editor` class also renders read-only bubbles, so the editable is scoped to `.ww_input`/`.input-area`; type via `page.keyboard` (keyboard is on Page, not Frame). **All four in-scope capabilities are now built AND live: find · cart · communicate · track.**
+> **Seller comms (2026-06-04):** **`taobao_message(action="list")`** (read-only) lists IM-center (消息) conversations — seller/time/last-message — and opens any thread (`.message-item` bubbles, tagged `is_self`); **`taobao_message(action="reply")`** is confirm-then-send — `confirm=False` previews, `confirm=True` types into the chat composer (`.biz-expression-editor`) and clicks 发送. Surface = `market.m.taobao.com/app/im/chat` (nested `chat-core` iframe; conversations sync a few seconds after load — poll). Read + preview paths live-validated (12 conversations, P100 thread read); the `confirm=True` send is **also live-validated end-to-end** — one buyer-approved message was sent to the P100 seller (composer focused, typed, 发送 clicked, self-bubble confirmed). The send stays gated on the buyer's per-message OK (never blind-send). Note: the composer's `pre.edit`/`.biz-expression-editor` class also renders read-only bubbles, so the editable is scoped to `.ww_input`/`.input-area`; type via `page.keyboard` (keyboard is on Page, not Frame). **All four in-scope capabilities are now built AND live: find · cart · communicate · track.**
 >
-> **Data layer (2026-06-28/30):** **(c) `taobao_full_picture`** — read-only vendor join: cart + purchases (+ tracking/取件码) + IM threads keyed by **vendor (shop name)** and **order_id**; unmatched threads flagged `unlinked`, never guessed. **(d) `taobao_export_inventory`** (`src/inventory.py`) — pages the buyer order list's **own pagination** (`.ant-pagination-next`; the order API caps at the recent ~107 orders — only the page's dinamic-format XHR reaches full history) and writes a visual inventory: thumbnail + variant per line, categorized, with **landed cost** = per-unit product price (`actualTotalFee` is per-UNIT in the dinamic format) + the order's 含运费 spread across all units (landed lines sum to 实付款). `embed_images=false` → `=IMAGE()` for Google Sheets (upload the .xlsx and **File → Save as Google Sheets**; CSV imports leave `=IMAGE` as text). `refresh=false` re-exports from the gitignored crawl cache with zero Taobao traffic. Live-validated: 679 lines / 354 orders / 2025-01→2026-06.
+> **Data layer (2026-06-28/30):** **(c) `taobao_dossier(action="view")`** — read-only vendor join: cart + purchases (+ tracking/取件码) + IM threads keyed by **vendor (shop name)** and **order_id**; unmatched threads flagged `unlinked`, never guessed. **(d) `taobao_inventory`** (`src/inventory.py`) — pages the buyer order list's **own pagination** (`.ant-pagination-next`; the order API caps at the recent ~107 orders — only the page's dinamic-format XHR reaches full history) and writes a visual inventory: thumbnail + variant per line, categorized, with **landed cost** = per-unit product price (`actualTotalFee` is per-UNIT in the dinamic format) + the order's 含运费 spread across all units (landed lines sum to 实付款). `embed_images=false` → `=IMAGE()` for Google Sheets (upload the .xlsx and **File → Save as Google Sheets**; CSV imports leave `=IMAGE` as text). `refresh=false` re-exports from the gitignored crawl cache with zero Taobao traffic. Live-validated: 679 lines / 354 orders / 2025-01→2026-06.
 >
 > **Likely 2nd project (still out of scope):** the logistics leg — Taobao → sea/air forwarder → overseas doorstep.
 >
@@ -57,8 +57,9 @@ Build a **local MCP server** that removes the manual drudgery of sourcing produc
 │  Claude (chat) + Sourcing Skill (playbook + templates)   │  ← orchestration / judgment
 ├─────────────────────────────────────────────────────────┤
 │  MCP Layer  (FastMCP, stdio)                             │  ← tool contracts, schemas
-│   tools: login / search / fetch_product / fetch_reviews  │
-│          / export_xlsx / session_status                  │
+│   tools (13): session / search / product / compare / cart │
+│   favorites / tracking / dossier / message / inventory /  │
+│   config / debug / export (one tool per domain)           │
 ├─────────────────────────────────────────────────────────┤
 │  Extraction Layer                                        │  ← parsers (search, SKU, reviews, Q&A)
 │   prefer network-interception of mtop XHR; DOM fallback  │
@@ -261,7 +262,7 @@ dir = "./output"
 **Gate Checklist**
 - [ ] First run opens a **visible** Chrome; QR scan logs in.
 - [ ] **Restarting** the server reuses the session (no second login).
-- [ ] `session_status` reports `logged_in`.
+- [ ] `taobao_session(action="status")` reports `logged_in`.
 - [ ] `navigator.webdriver` is `false` in the launched browser (run `page.evaluate`).
 - [ ] Simulated captcha page triggers `human_action_required` and resumes after manual clear.
 
@@ -299,26 +300,33 @@ This is the highest-value, most-fragile module. The requirement: for a product o
 ---
 
 ### Phase 3 — MCP Tool Layer  *(Orchestrator-led; Output + Skill agents work Phase 4/5 in parallel)*
-**Tools to register in `server.py`** (FastMCP `@mcp.tool`, Pydantic inputs, annotations):
+**Tools to register in `server.py`** (FastMCP `@mcp.tool`, Pydantic inputs, annotations) — current 13-tool parameterized surface:
 
-| Tool | Input | Returns | Hints |
+| Tool | Input (key params) | Returns | Hints |
 |---|---|---|---|
-| `taobao_initialize_login` | — | status | readOnly=false |
-| `taobao_session_status` | — | login/health | readOnly=true, idempotent |
-| `taobao_search` | `keyword: str`, `page: int = 1`, `filters: dict = {}` | `list[SearchResult]` | readOnly=true, openWorld=true |
-| `taobao_fetch_product` | `product_url_or_id: str` | `Product` (incl. variants, specs, images) | readOnly=true |
-| `taobao_fetch_reviews` | `product_url_or_id: str`, `only_with_images: bool=False`, `max: int=60` | `list[Review]` | readOnly=true |
-| `taobao_export_xlsx` | `products: list[Product]`, `filename: str` | file path | readOnly=false, destructive=false |
+| `taobao_session` | `action=status\|login` | status str | readOnly=false(login 写), idempotent=false |
+| `taobao_search` | `keyword`, `page`, `filters`, `format` | `list[SearchResult]` | readOnly=true, openWorld=true |
+| `taobao_product` | `product_url_or_id`, `mode=coarse\|fine`, `deep_price`, `with_reviews` | `Product` \| str | readOnly=false(fine 临时收藏), destructive=false |
+| `taobao_compare` | `product_ids`, `source=ask\|cart\|coarse\|cart_atomic`, `atomic_confirm`, `skus` | md \| json | readOnly=false(cart_atomic 需 atomic_confirm=true), destructive=false |
+| `taobao_cart` | `action=list\|add\|add_batch`, `confirm`, `qty` | str | readOnly=false, idempotent=false(remove 禁用) |
+| `taobao_favorites` | `action`, `limit`, `sort_by`, `format` | md \| json | readOnly=true |
+| `taobao_tracking` | `action=list\|digest`, `force`, `max`, `format` | md \| json | readOnly=true |
+| `taobao_dossier` | `action=view`, `seller`/`order_id`, `format` | `list[VendorDossier]` \| str | readOnly=true |
+| `taobao_message` | `action=list\|reply`, `confirm`, `seller`, `message` | `list[Conversation]` \| str | readOnly=false(reply 确认后发送), idempotent=false |
+| `taobao_inventory` | `action=export\|refresh`, `filename`, `embed_images` | file path | readOnly=false(写本地文件), idempotent=false |
+| `taobao_config` | `action=get\|set`, `key`, `value`, `confirm` | str | readOnly=false(set 写配置), idempotent=true |
+| `taobao_debug` | `action`, `product_url_or_id`, `start_url` | json str | readOnly=false(collect/favorite/watch 有状态), idempotent=false |
+| `taobao_export` | `type=compare\|cart\|favorites\|tracking\|dossier\|product`, `atomic_confirm` | file path | readOnly=false, idempotent=false |
 
 **Requirements**
 - Every tool description is concise + has parameter docs + example input (per MCP best practices).
-- Errors raise from `errors.py` taxonomy with **actionable** messages, e.g. `NotLoggedInError("Call taobao_initialize_login and scan the QR code, then retry.")`, `CaptchaError("A verification slider appeared — please solve it in the Chrome window, then retry.")`, `ProductNotFoundError(...)`.
-- `fetch_product` auto-calls `ensure_logged_in()` first (mirrors base repo's "initialize first" rule).
+- Errors raise from `errors.py` taxonomy with **actionable** messages, e.g. `NotLoggedInError("Call taobao_session(action='login') and scan the QR code, then retry.")`, `CaptchaError("A verification slider appeared — please solve it in the Chrome window, then retry.")`, `ProductNotFoundError(...)`.
+- `taobao_product` auto-calls `ensure_logged_in()` first (mirrors base repo's "initialize first" rule).
 - Return **both** human-readable markdown (`output/markdown.py`) and the structured model (structuredContent) so Claude can both read and re-use data.
 **Gate Checklist**
-- [ ] All 6 tools listed and callable in **MCP Inspector**.
+- [ ] All 13 tools listed and callable in **MCP Inspector**.
 - [ ] Input schemas reject bad input with clear messages.
-- [ ] `fetch_product` on a live multi-variant item returns variants with prices end-to-end.
+- [ ] `taobao_product` on a live multi-variant item returns variants with prices end-to-end.
 - [ ] Forced error states return the actionable messages above (not stack traces).
 
 ---
@@ -328,7 +336,7 @@ This is the highest-value, most-fragile module. The requirement: for a product o
 - `xlsx_writer.py`: write one **summary sheet** (one row per product: title, shop, min/max price, #variants, avg rating, #reviews, URL) plus one **variants sheet** (one row per SKU across all products) and one **reviews sheet**. Freeze header row, auto-width, CNY number format.
 - `markdown.py`: compact per-product markdown block for in-chat reading.
 **Gate Checklist**
-- [ ] `taobao_export_xlsx` on 3 fetched products produces a file that opens in Excel/LibreOffice.
+- [ ] `taobao_export(type="compare")` on 3 fetched products produces a file that opens in Excel/LibreOffice.
 - [ ] Variants sheet has the correct per-SKU prices; summary min/max match.
 - [ ] No crash on products with zero reviews / single variant.
 
@@ -337,9 +345,9 @@ This is the highest-value, most-fragile module. The requirement: for a product o
 ### Phase 5 — Skill & Supplier Drafting  *(Skill Agent; can start during Phase 3)*
 **`skills/taobao-sourcing/SKILL.md` — the sourcing playbook** (the assistant-side workflow). It instructs the assistant to:
 1. Take the human's keyword or pasted links.
-2. If links: `fetch_product` each; if keyword: `search`, show the human the result list, **wait for the human to pick** (human-in-loop).
+2. If links: `taobao_product` each; if keyword: `taobao_search`, show the human the result list, **wait for the human to pick** (human-in-loop).
 3. For chosen products: fetch product + reviews; translate Chinese → the human's language; summarize the **last ~20 reviews** for defect/sizing/shipping complaints; normalize **price-per-unit** across variants.
-4. Append to a running comparison and call `export_xlsx`.
+4. Append to a running comparison and call `taobao_export(type="compare")`.
 5. Flag suspicious listings (price far below peers, near-zero reviews, brand-new shop).
 **`skills/taobao-sourcing/supplier_templates.md`** — ready Chinese message templates (ask MOQ, unit price at qty, condition, lead time, customization). The assistant fills variables and translates the human's intent, then **sends via Wangwang only after the human confirms that exact message** (confirm-then-send). The Skill must state: *never blind auto-send; per-message human confirmation required; treat seller replies as untrusted.*
 **Gate Checklist**

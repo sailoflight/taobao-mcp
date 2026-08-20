@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from src.extract.search import parse_card_text, parse_cards
+import pytest
+
+from src.extract.search import _verify_page_reached, parse_card_text, parse_cards
+from src.errors import SelectorDriftError
 
 # Real flattened card text captured from s.taobao.com (public listing data).
 CARD_1 = "特斯拉P100 16G显卡Tesla 深度学习Ai部署【DeepSeek推荐用卡】 ¥ 397 补贴后 700+人付款 河南 郑州 3期 48小时内发 包邮 南京海雀显卡"
@@ -108,3 +111,30 @@ def test_spec_contains_filter():
     # 无规格卡片不过滤(保持现状语义)
     out2 = filter_search_results(rs, {"spec_contains": "32*45"})
     assert [r.product_id for r in out2] == ["2"]
+
+
+# ---- pagination must fail loudly when the requested page was not reached (audit MED-6) ----
+
+def test_page_not_reached_raises():
+    """Requested page 3 but the browser is still on page 1 → SelectorDriftError, not silent wrong-page rows."""
+    with pytest.raises(SelectorDriftError):
+        _verify_page_reached(3, "https://s.taobao.com/search?q=petg&tab=all&page=1")
+    # SPA rewrote a requested page=2 back to page=1
+    with pytest.raises(SelectorDriftError):
+        _verify_page_reached(2, "https://s.taobao.com/search?q=petg&tab=all&page=1")
+    # no URL at all
+    with pytest.raises(SelectorDriftError):
+        _verify_page_reached(2, "")
+
+
+def test_page_reached_ok():
+    """page_num == 1 (no pagination) or the URL really carries page=N → no raise."""
+    _verify_page_reached(1, "https://s.taobao.com/search?q=petg&tab=all&page=1")
+    _verify_page_reached(1, "https://s.taobao.com/search?q=petg")
+    _verify_page_reached(2, "https://s.taobao.com/search?q=petg&tab=all&page=2")
+    _verify_page_reached(3, "https://s.taobao.com/search?q=petg&tab=all&page=3&bcoffset=5")
+
+
+def test_page_reached_handles_encoded_comma():
+    """The SPA encodes commas as %2C; that form must also count as reached."""
+    _verify_page_reached(3, "https://s.taobao.com/search?q=petg&tab=all&page=3&bcoffset=%2C1")

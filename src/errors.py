@@ -15,7 +15,7 @@ class NotLoggedInError(SourcingError):
     def __init__(
         self,
         message: str = (
-            "Not logged in. Call taobao_initialize_login and scan the QR code "
+            "Not logged in. Call taobao_session(action='login') and scan the QR code "
             "in the Chrome window, then retry."
         ),
     ) -> None:
@@ -54,18 +54,23 @@ class ProductNotFoundError(SourcingError):
 
 
 class SkuIncompleteError(SourcingError):
-    """Raised when the built variant count != cartesian product of option groups."""
+    """Raised when SKU extraction cannot produce a complete, fully-labeled variant list
+    (count != cartesian product, a listed sku missing from the price map, or a propPath
+    pair that cannot be mapped to a human-readable option)."""
 
-    def __init__(self, expected: int | None = None, got: int | None = None) -> None:
-        detail = ""
+    def __init__(self, expected: int | None = None, got: int | None = None,
+                 detail: str | None = None) -> None:
+        msg = "SKU extraction incomplete."
         if expected is not None and got is not None:
-            detail = (
+            msg += (
                 f" Expected {expected} variants (cartesian product of option "
                 f"groups) but built {got}."
             )
+        if detail:
+            msg += f" {detail}"
         super().__init__(
-            "SKU extraction incomplete." + detail + " The mtop SKU map may have "
-            "changed — re-capture the fixture and check the join (Appendix A.1)."
+            msg + " The mtop SKU map may have changed — re-capture the fixture "
+            "and check the join (Appendix A.1)."
         )
 
 
@@ -77,4 +82,33 @@ class SelectorDriftError(SourcingError):
         super().__init__(
             f"Layout may have changed at {step}{sel}; the DOM selector no longer "
             "matches. Update the centralized selector module (Phase 6)."
+        )
+
+
+class CartSnapshotError(SourcingError):
+    """Raised when an authoritative query.bag cart snapshot cannot be proven."""
+
+    def __init__(self, detail: str = "no valid mtop.trade.query.bag response was captured") -> None:
+        super().__init__(
+            "Authoritative cart snapshot unavailable: " + detail + ". No cart mutation was "
+            "performed from this unproven state. Check the visible cart page/login/captcha, "
+            "then retry."
+        )
+
+
+class CacheCoverageError(SourcingError):
+    """The once-per-day tracking cache cannot satisfy the requested drill depth.
+
+    Raised (instead of silently under-serving or auto-refetching) so the one-live-run/day
+    cap is preserved and the caller gets an explicit next action.
+    """
+
+    def __init__(self, cached_drilled: int | None, requested: int) -> None:
+        covered = "unknown" if cached_drilled is None else str(cached_drilled)
+        super().__init__(
+            f"Today's tracking cache only drilled {covered} order(s), but you asked for "
+            f"max_drill={requested} — the cache cannot satisfy that depth without silently "
+            "missing parcels (取件码). No live refetch was performed (one-live-run/day). "
+            f"Pass force=True to explicitly allow an extra live run today, or lower "
+            f"max_drill to <= {covered}."
         )

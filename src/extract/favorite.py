@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 from src.browser.pacing import human_click, human_delay
+from src.errors import CaptchaError, SelectorDriftError
 
 
 # 商品页"收藏/已收藏"按钮定位(限 button/span/div/i/a,非全 DOM)
@@ -435,18 +436,26 @@ async def list_favorites(limit: int = 30, sort_by: str = "") -> dict:
     session = get_session()
     page = await session.start()
     await page.goto(COLLECT_URL, wait_until="domcontentloaded")
+    # 风控墙人工交接 — 绝不能把滑块/登录墙当"空收藏夹"静默返回 (audit HIGH-3 gap).
+    await session.guard_captcha(page)
     first = page.locator('[class*="goodsItem"]').first
     try:
         await first.wait_for(state="visible", timeout=18000)
+    except (CaptchaError, SelectorDriftError):
+        raise  # 墙/漂移必须上浮, 不转成"空列表"数据
     except Exception:
         try:
             await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
             await human_delay(1.8, 3.0)
             await first.wait_for(state="visible", timeout=10000)
+        except (CaptchaError, SelectorDriftError):
+            raise
         except Exception:
             return {"count": 0, "favorites": [], "error": "收藏夹列表未渲染"}
     try:
         items = await page.evaluate(FAV_ITEMS_JS)
+    except (CaptchaError, SelectorDriftError):
+        raise
     except Exception as exc:
         return {"count": 0, "favorites": [], "error": str(exc)[:120]}
     items = _sort_favorites(items, sort_by)

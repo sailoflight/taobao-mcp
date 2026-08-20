@@ -3,13 +3,37 @@
 fav_quota(收藏链路) 与 search_quota(搜索列表) 结构完全一致: 每日配额 + JSON
 持久化 + quota_status()/check_and_record()。合并为工厂 `make_daily_quota`,
 两个业务模块(fav_quota/search_quota)变薄封装, 调用点零改动。
+
+硬化(2026-08-20): ① 状态写盘前自动创建父目录(状态目录可不存在); ② 用同目录
+临时文件 + ``os.replace`` 原子替换, 任何时刻读到的都是完整 JSON, 不留半截文件;
+③ 同进程并发 check_and_record 用 per-state-file 的 threading.Lock 串行化整个
+read→decide→write 段 —— 并发调用永不因 read-modify-write 竞态双双越过每日上限;
+④ "今天" 用 src.dates.today_cn()(中国时区 UTC+8), 而非宿主本地日期 —— 每日配额
+与配置的淘宝时区对齐, 跨时区部署下收藏/搜索配额按中国日期重置。
 """
 
 from __future__ import annotations
 
 import json
-from datetime import date
+import os
+import threading
 from pathlib import Path
+
+from src.dates import today_cn
+
+# Same-process concurrency guard, keyed by the resolved state-file path so that
+# several make_daily_quota(...) instances bound to the SAME file share ONE lock.
+_LOCK_GUARD = threading.Lock()
+_FILE_LOCKS: dict[str, threading.Lock] = {}
+
+
+def _file_lock(path: Path) -> threading.Lock:
+    with _LOCK_GUARD:
+        lock = _FILE_LOCKS.get(str(path))
+        if lock is None:
+            lock = threading.Lock()
+            _FILE_LOCKS[str(path)] = lock
+        return lock
 
 
 def make_daily_quota(state_filename: str, limit_key: str, state_dir=None):
@@ -34,16 +58,21 @@ def make_daily_quota(state_filename: str, limit_key: str, state_dir=None):
             return {}
 
     def _write_state(state: dict) -> None:
+        path = _state_path()
         try:
-            _state_path().write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(path.suffix + ".tmp")
+            tmp.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+            os.replace(tmp, path)  # atomic: readers never see a half-written file
         except OSError:
             pass
 
     def quota_status() -> dict:
         """Current daily quota usage (does NOT consume)."""
         limit = max(0, getattr(load_config().limits, limit_key))
-        today = date.today().isoformat()
-        state = _read_state()
+        today = today_cn()  # China timezone (UTC+8), not host-local date
+        with _file_lock(_state_path()):
+            state = _read_state()
         count = state.get("count", 0) if state.get("date") == today else 0
         return {
             "date": today,
@@ -54,22 +83,28 @@ def make_daily_quota(state_filename: str, limit_key: str, state_dir=None):
         }
 
     def check_and_record() -> dict:
-        """Check the quota and consume one slot. Returns status after recording."""
+        """Check the quota and consume one slot. Returns status after recording.
+
+        The whole read→decide→write sequence runs under a per-state-file lock, so
+        same-process concurrent calls can never both observe a not-yet-full window
+        and push the recorded count past the daily limit.
+        """
         limit = max(0, getattr(load_config().limits, limit_key))
-        today = date.today().isoformat()
-        state = _read_state()
-        count = state.get("count", 0) if state.get("date") == today else 0
-        if count >= limit:
+        today = today_cn()  # China timezone (UTC+8), not host-local date
+        with _file_lock(_state_path()):
+            state = _read_state()
+            count = state.get("count", 0) if state.get("date") == today else 0
+            if count >= limit:
+                _write_state({"date": today, "count": count})
+                return {
+                    "date": today, "count": count, "limit": limit,
+                    "remaining": 0, "allowed": False,
+                }
+            count += 1
             _write_state({"date": today, "count": count})
             return {
                 "date": today, "count": count, "limit": limit,
-                "remaining": 0, "allowed": False,
+                "remaining": max(0, limit - count), "allowed": True,
             }
-        count += 1
-        _write_state({"date": today, "count": count})
-        return {
-            "date": today, "count": count, "limit": limit,
-            "remaining": max(0, limit - count), "allowed": True,
-        }
 
     return {"quota_status": quota_status, "check_and_record": check_and_record}

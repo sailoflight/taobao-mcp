@@ -130,10 +130,22 @@ class BrowserSession:
         self.human_action_required = False
         self.login_confirmed: bool | None = None
         self.login_confirmed_at: float = 0.0
+        # Guards the launch section so two concurrent start() calls can never
+        # spin up two persistent contexts at once (only ONE context per process).
+        self._start_lock = asyncio.Lock()
 
     # ---- lifecycle ---------------------------------------------------------
     async def start(self):
-        """Launch (or reuse) the persistent headed real-Chrome context; return the page."""
+        """Launch (or reuse) the persistent headed real-Chrome context; return the page.
+
+        Concurrent start() calls are serialized: the second caller waits for the
+        first and then REUSES its launched context instead of launching a second
+        one. Headed mode is enforced fail-closed BEFORE any launch.
+        """
+        async with self._start_lock:
+            return await self._start_locked()
+
+    async def _start_locked(self):
         # Reuse a live page if the browser is still responsive.
         if self.page is not None and not self.page.is_closed():
             try:
@@ -143,6 +155,14 @@ class BrowserSession:
                 await self.close()
 
         b = self.config.browser
+        if b.headless:
+            # Fail-closed (§7.1): never launch a headless browser. The human must
+            # watch the window and solve captchas; headless would fly blind.
+            raise BrowserLaunchError(
+                "browser.headless must be false — this project runs HEADED only "
+                "(the human watches the window and solves captchas). Refusing to "
+                "launch a headless browser."
+            )
         user_dir = _resolve_project_user_data_dir(b.user_data_dir)
         user_dir.mkdir(parents=True, exist_ok=True)
 

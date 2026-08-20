@@ -33,10 +33,11 @@ never commit/publish). `output/` is local-only unless you share a specific expor
 - `[browser]` — executable_path / user_data_dir / locale / timezone / headless(false, 恒假).
 - `[pacing]` — random delays + `max_products_per_minute` (rate cap).
 - `[click]` — human-like simulated click tuning (enabled/path/hover/hold/jitter).
-- `[limits]` — max_reviews, review_pages, fav_flow_per_day(收藏链路每日配额), review_sample_per_rating(评论分层抽样).
+- `[limits]` — max_reviews, review_pages, fav_flow_per_day(收藏链路每日配额), search_per_day(搜索每日配额).
 - `[detail]` — mi_id (account-specific; usually runtime-captured).
 - `[anti_risk]` — **every anti-block step**: captcha_timeout_s(人工清验证码有界等待) / captcha_poll_s /
-  login_timeout_s(QR扫码等待) / track_cache(物流库存每日缓存开关) / fav_flow(收藏链路总开关).
+  login_timeout_s(QR扫码等待) / track_cache(物流库存每日缓存开关) / fav_flow(收藏链路总开关) /
+  review_sample_per_rating(评论分层抽样).
   Behavioral invariants (单标签顺序复用 / 网络拦截优先 / 人类节奏 / 配额) documented as comments.
 - Runtime edits: `taobao_config(action=set, key="section.key", value=…)` → confirm=false 预览,
   人工核对后 confirm=true 写入 gitignored `output/.config_overrides.toml`, mtime 检测自动生效。

@@ -194,26 +194,33 @@ OCR 各档选项图确认 大号/超大号=26cm(25×28)、特大号=30cm(30×34)
 
 ## E10 原子购物车比价(cart_atomic): 购物车没有的商品也能用到手价
 
+> **🛒 安全版(2026-08-20 重建)**: `source=cart_atomic` 现在按可证明的协议执行 —
+> 加购前 XHR 快照购物车行((product_id, sku_id)+数量, account.read_cart/query.bag) →
+> 已在购物车的目标型号**零写入**直接读到手价 → 加购恰好 1 件 → 证明 XHR 差**恰好是目标
+> (pid, sku) +1 且其余行不变** → 读 DOM 价格 → 按**精确 skuId** 退回(fail-closed,
+> 绝不回退到型号/商品) → 退回后再核对完整 XHR 快照与加购前一致; 任何一步无法证明都**不删除**并提示
+> 人工检查。需 `taobao_compare(source="cart_atomic", atomic_confirm=true)`(或
+> `taobao_export(type="compare", ..., atomic_confirm=true)`); `atomic_confirm=false` 返回确认门预览。
+
 **触发场景**: 想比价的商品**不在购物车**里,但购物车才有"到手价(含优惠/补贴)"。
 
 **怎么做**:
-- `taobao_compare(product_ids, source="cart_atomic", skus=["型号文本", ...])` —
-  对购物车没有的商品/型号,自动"加购指定型号 → 读购物车到手价 → 退回"。
-- **必须指定 sku**(`skus`): 加购论型号,用户搜商品必然指定型号;不指定则不写购物车。
-- **加多少退多少**: 删除按 (product_id + skuId) 精确定位刚加的行, try/finally 兜底;
-  返回 atomic_note 如实报告退回结果 — 若某件没退掉会明示"请人工检查购物车手动删除",
-  绝不谎报。
-- 加购失败会返回**错误原因**(限购/无货/商品失效/风控), 而不是一串 ret 码。
+- `taobao_compare(product_ids, source="cart_atomic", skus=["型号文本", ...], atomic_confirm=true)` —
+  对购物车没有的目标型号,安全"加购1件 → 读购物车到手价 → 按精确 skuId 退回"。
+  - 第一次调用(未 atomic_confirm)返回确认门文案, 说明安全保证; 二次 `atomic_confirm=true` 才执行。
+- **必须指定 sku**(`skus`): 加购论型号,用户搜商品必然指定型号;不指定则默认第一个有货型号。
+- **无法证明就不删**: 加购后核对 XHR 快照差恰好是目标 +1 且其余不变; 退回后核对完整 XHR 快照与
+  加购前一致; 任何一步对不上都不删除, 返回 atomic_note 提示人工检查, 绝不谎报。
 
 **关键点**:
-- 购物车行链接带 `skuId`(list_cart 已提取) → 删除精确定位, 不碰用户原有行。
-- 已在购物车的商品: cart_atomic 直接用手价, 零写入(购物车不被碰)。
+- 数量证明只信权威 XHR(account.read_cart / query.bag, 键 (product_id, sku_id)); DOM(list_cart)
+  只用于读到手价。删除按精确 skuId, 不碰用户原有行; 已在购物车的型号零写入直接读到手价。
 - **比价口径默认 ask**: 每次 taobao_compare 提示询问用户用哪种口径;
-  可 `taobao_config set compare.source cart_atomic` 固化, 之后每次调用明示"即将使用购物车"。
+  可 `taobao_config set compare.source cart` 固化, 之后每次调用明示"即将使用购物车"。
 - 纯原价对比用 `source="coarse"`。
 
-**实测(2026-08-19)**: 胜将 `1057127186623` 不在购物车 → cart_atomic 加购读价 ¥12.5 →
-自动退回; 购物车前 15 件、后 15 件完全一致(未污染)。
+**实测(2026-08-19, 供参考)**: 胜将 `1057127186623` 不在购物车 → cart_atomic 加购读价 ¥12.5 →
+自动退回; 购物车前 15 件、后 15 件完全一致(未污染)。(2026-08-20 起为安全版 + atomic_confirm 门。)
 
 ## E11 细查(mi_id)页真实到手价: upStreamPrice URL 参数 + 双价结构
 

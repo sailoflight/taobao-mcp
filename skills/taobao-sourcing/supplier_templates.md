@@ -70,6 +70,6 @@ domestically only; the buyer's forwarder address is given at checkout.*
 - Combine asks (1+3+4) into one message when first contacting — fewer round-trips.
 - Mirror the human's intent; don't invent commitments (quantities, prices, dates)
   the human hasn't stated.
-- After drafting, offer to send it via `taobao_send_reply` — preview with
+- After drafting, offer to send it via `taobao_message(action="reply")` — preview with
   `confirm=False`, then send **only after the human OKs that exact message**
   (`confirm=True`). Never send a message the human hasn't approved verbatim.

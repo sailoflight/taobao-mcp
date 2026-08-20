@@ -114,36 +114,59 @@ class RateLimiter:
 
     Call ``await limiter.acquire()`` before each product fetch; it sleeps as
     needed so the rolling rate never exceeds the cap. Never bursts (§7.2).
+
+    Config-backed instances (constructed without an explicit ``max_per_minute``)
+    re-read ``pacing.max_products_per_minute`` on EVERY acquire/usage, so a
+    long-running server picks up live ``taobao_config`` edits immediately. An
+    explicitly constructed ``RateLimiter(max_per_minute=0)`` stays disabled for
+    unit tests (0 means "no cap").
     """
 
     def __init__(self, max_per_minute: int | None = None) -> None:
-        # `is None` (not `or`) so an explicit 0 genuinely disables the cap.
-        self.max_per_minute = _pacing().max_products_per_minute if max_per_minute is None else max_per_minute
+        # `None` (not `or`) means config-backed; an explicit 0 genuinely disables.
+        self._explicit = max_per_minute
+        self._lock = asyncio.Lock()  # serializes concurrent acquire() calls
         self._timestamps: list[float] = []
 
+    @property
+    def max_per_minute(self) -> int:
+        if self._explicit is not None:
+            return int(self._explicit)
+        return int(_pacing().max_products_per_minute)
+
     async def acquire(self) -> None:
-        if self.max_per_minute <= 0:
-            return
-        now = time.monotonic()
-        # drop timestamps older than 60s
-        self._timestamps = [t for t in self._timestamps if now - t < 60.0]
-        if len(self._timestamps) >= self.max_per_minute:
-            sleep_for = 60.0 - (now - self._timestamps[0])
-            if sleep_for > 0:
-                await asyncio.sleep(sleep_for)
-        self._timestamps.append(time.monotonic())
+        # The whole check→pace→record sequence runs under one lock so two
+        # concurrent callers can never both see a non-full window and append
+        # together (bursting past the cap). The loop re-reads the (live) cap and
+        # re-prunes after every sleep, so a live cap DECREASE can never leave
+        # more than `cap` recent timestamps in the 60s window.
+        async with self._lock:
+            while True:
+                cap = self.max_per_minute
+                if cap <= 0:
+                    return
+                now = time.monotonic()
+                # drop timestamps older than 60s
+                self._timestamps = [t for t in self._timestamps if now - t < 60.0]
+                if len(self._timestamps) < cap:
+                    break
+                sleep_for = 60.0 - (now - self._timestamps[0])
+                if sleep_for > 0:
+                    await asyncio.sleep(sleep_for)
+            self._timestamps.append(time.monotonic())
 
     def usage(self) -> dict:
         """Anti-risk pacing telemetry: actions in the last 60s vs the per-minute cap."""
+        cap = self.max_per_minute  # live for config-backed instances
         now = time.monotonic()
         recent = [t for t in self._timestamps if now - t < 60.0]
         n = len(recent)
         next_in = None
-        if n >= self.max_per_minute > 0:
+        if n >= cap > 0:
             next_in = round(max(0.0, 60.0 - (now - recent[0])), 1)
         return {
             "actions_last_60s": n,
-            "max_per_minute": self.max_per_minute,
-            "slots_left": max(0, self.max_per_minute - n) if self.max_per_minute > 0 else None,
+            "max_per_minute": cap,
+            "slots_left": max(0, cap - n) if cap > 0 else None,
             "next_slot_in_s": next_in,
         }

@@ -18,6 +18,7 @@ import io
 import json
 import os
 import re
+import urllib.parse
 import urllib.request
 
 from openpyxl import Workbook, load_workbook
@@ -26,9 +27,163 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
 _BOUGHT_URL = "https://buyertrade.taobao.com/trade/itemlist/list_bought_items.htm"
-_OUT_DIR = "output"
-_CACHE = os.path.join(_OUT_DIR, ".inventory_orders.json")   # by_oid cache (gitignored)
 THUMB = 60
+
+
+def _out_dir() -> str:
+    """Configured output dir (output/ default). All cache + export paths live here."""
+    from src.config import load_config
+
+    return load_config().output.dir
+
+
+def _cache_path() -> str:
+    return os.path.join(_out_dir(), ".inventory_orders.json")   # by_oid cache (gitignored)
+
+
+def _resolve_out_path(filename: str, out_dir: str | None = None) -> str:
+    """Containment: ANY user-supplied filename (absolute, `..`, subdir) lands inside out_dir.
+
+    Mirrors safe_filename elsewhere: only the basename is used, always joined under the
+    configured output dir, so an export can never escape output/ (e.g. `/tmp/x.xlsx` or
+    `../x.xlsx` becomes `<out_dir>/x.xlsx`).
+    """
+    base = os.path.basename(str(filename or "")) or "inventory.xlsx"
+    return os.path.join(out_dir or _out_dir(), base)
+
+
+def _formula_arg(url: str) -> str:
+    """Validate/sanitize a URL embedded inside an intentional =IMAGE()/=HYPERLINK() literal.
+
+    Drops quotes/backslashes/control chars so a hostile pic/itemUrl cannot break out of
+    the formula string or inject further formula content. Empty after sanitization → the
+    caller emits no formula.
+    """
+    return re.sub(r'["\\\n\r\t]', "", url or "")
+
+
+# ── URL policy (SSRF / formula-injection hardening) ────────────────────────────
+# Only these Alibaba CDN hosts may be fetched for thumbnails or embedded as =IMAGE().
+# Product-link (=HYPERLINK) targets must be Taobao/Tmall item pages.
+_IMAGE_CDN_DOMAINS = ("alicdn.com", "taobaocdn.com")
+_PRODUCT_LINK_DOMAINS = ("taobao.com", "tmall.com")
+
+
+class _UrlPolicyError(Exception):
+    """Raised when a URL (or a redirect target) fails the allowlist policy."""
+
+
+def _host_allowed(host: str, domains: tuple[str, ...]) -> bool:
+    """Pure: exact host or a subdomain of one of `domains` is allowed."""
+    h = (host or "").strip().lower().rstrip(".")
+    return any(h == d or h.endswith("." + d) for d in domains)
+
+
+def _clean_http_url(url: str, domains: tuple[str, ...]) -> str | None:
+    """Pure: normalize a URL to a clean **https** URL satisfying the URL policy, else None.
+
+    HTTPS-ONLY (no cleartext, no port-80 SSRF surface): only ``https`` is accepted and
+    only the default 443 port (or no explicit port). Rejects: http / other schemes
+    (file/ftp/data/javascript/…), hosts outside `domains`, embedded credentials
+    (user:pass@), and nonstandard ports. Protocol-relative `//…` is normalized to
+    https://. The returned URL is what the downloader may fetch (redirect targets are
+    re-checked against this same policy).
+    """
+    u = (url or "").strip()
+    if not u:
+        return None
+    if u.startswith("//"):
+        u = "https:" + u
+    try:
+        p = urllib.parse.urlparse(u)
+        if p.scheme != "https":           # HTTPS-only — reject http and every other scheme
+            return None
+        if not _host_allowed(p.hostname or "", domains):
+            return None
+        if p.username is not None or p.password is not None:
+            return None
+        if p.port is not None and p.port != 443:   # only the default HTTPS port
+            return None
+    except ValueError:
+        return None  # malformed port etc.
+    return u
+
+
+def _image_url_policy(url: str) -> str | None:
+    """SSRF policy for downloading product thumbnails.
+
+    Only http(s) URLs on the Alibaba CDN allowlist (alicdn.com / taobaocdn.com +
+    subdomains), no credentials, standard ports. Returns the URL to fetch, or None to
+    skip the image entirely (never fetch an off-CDN / internal host).
+    """
+    return _clean_http_url(url, _IMAGE_CDN_DOMAINS)
+
+
+def _formula_image_url(url: str) -> str:
+    """Validated + escaped URL for the intentional =IMAGE() cell.
+
+    Only CDN-allowlisted http(s) URLs are emitted; untrusted quotes/control chars are
+    stripped so the formula literal cannot be broken out of.
+    """
+    clean = _image_url_policy(url)
+    return _formula_arg(clean) if clean else ""
+
+
+def _formula_link_url(url: str) -> str:
+    """Validated + escaped URL for the intentional =HYPERLINK() cell.
+
+    Only Taobao/Tmall item-page http(s) URLs are emitted; untrusted quotes are stripped.
+    """
+    clean = _clean_http_url(url, _PRODUCT_LINK_DOMAINS)
+    return _formula_arg(clean) if clean else ""
+
+
+class _AllowedRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Refuse any redirect that leaves the CDN allowlist (SSRF via redirect).
+
+    HTTPRedirectHandler handles 30x responses for BOTH http and https URLs in modern
+    urllib, so a single subclass covers every hop.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        newurl = urllib.parse.urljoin(req.full_url, newurl or "")
+        if _image_url_policy(newurl) is None:
+            raise _UrlPolicyError(f"redirect to disallowed host/url: {newurl!r}")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _image_opener() -> urllib.request.OpenerDirector:
+    """An opener whose every redirect target is re-checked against the image URL policy."""
+    return urllib.request.build_opener(_AllowedRedirectHandler())
+
+
+# Spreadsheet-formula injection prefixes: Excel/Sheets parse a leading = + - @ as a
+# formula (CSV/SSE injection vector), not just '='. Every untrusted Taobao-controlled
+# cell starting with any of these — INCLUDING a leading-whitespace-prefixed variant, since
+# Excel/Sheets trim whitespace before parsing — is forced to literal TEXT (conservative).
+_FORMULA_PREFIXES = ("=", "+", "-", "@")
+
+
+def _is_formula_prefix(value) -> bool:
+    """Pure: a string a spreadsheet app would parse as a formula (= + - @), even when
+    preceded by leading whitespace ('  =1+1' is just as risky as '=1+1'). Conservative."""
+    return isinstance(value, str) and value.lstrip().startswith(_FORMULA_PREFIXES)
+
+
+def _neutralize_formulas(ws) -> None:
+    """Force every cell whose text starts with = + - @ to TEXT (not formula).
+
+    openpyxl turns any string beginning with '=' into an executable formula
+    (data_type 'f'); a Taobao-controlled title/shop/review/category starting with
+    '=', '+', '-' or '@' would otherwise execute (or be re-parsed as a formula) when
+    the buyer opens the workbook. Use only on sheets with NO intentional formulas.
+    For sheets that DO carry =IMAGE()/=HYPERLINK(), sanitize the untrusted columns
+    explicitly instead.
+    """
+    for row in ws.iter_rows():
+        for c in row:
+            if _is_formula_prefix(c.value):
+                c.data_type = "s"
 
 # Click the footer 下一页 (Ant Design pager); returns whether it clicked + the active page number.
 _NEXT_JS = r"""() => {
@@ -234,23 +389,29 @@ def categorize(rows: list[dict], prior_xlsx: str) -> None:
 
 # ── images ──────────────────────────────────────────────────────────────────
 def _img_path(url: str) -> str:
-    return os.path.join(_OUT_DIR, ".inv_images", hashlib.md5(url.encode()).hexdigest()[:16] + ".png")
+    return os.path.join(_out_dir(), ".inv_images", hashlib.md5(url.encode()).hexdigest()[:16] + ".png")
 
 
 def _download_one(url: str):
     if not url:
         return None
+    # SSRF policy first: only http(s) CDN-allowlisted URLs are ever fetched (even if a
+    # previously-downloaded thumbnail exists for this URL — a now-disallowed host is skipped).
+    full = _image_url_policy(url)
+    if full is None:
+        return None
     path = _img_path(url)
     if os.path.exists(path):
         return path
-    full = ("https:" + url) if url.startswith("//") else url
     try:
         from PIL import Image as PILImage
         req = urllib.request.Request(full, headers={
             "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
             "Referer": "https://buyertrade.taobao.com/",
         })
-        data = urllib.request.urlopen(req, timeout=20).read()
+        # redirect-guarded opener: any hop to a disallowed host raises _UrlPolicyError
+        # (caught below → None), so a CDN URL can't be bounced to an internal host.
+        data = _image_opener().open(req, timeout=20).read()
         im = PILImage.open(io.BytesIO(data)).convert("RGB")
         im.thumbnail((THUMB, THUMB))
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -300,18 +461,34 @@ def build_xlsx(rows: list[dict], path: str, embed_images: bool) -> dict:
         ws.cell(1, c).alignment = Alignment(vertical="center", horizontal="center")
 
     n_img = 0
+    # Intentional formula columns: Image (1) and Product link (only when embed_images=False).
+    # Their =IMAGE()/=HYPERLINK() cells must stay formulas; every other '='-leading cell
+    # comes from Taobao-controlled text and is forced to TEXT to block formula injection.
+    formula_cols: set[int] = set()
+    if not embed_images:
+        formula_cols = {1, cols.index("Product link") + 1}
     for r in rows:
-        url = (("https:" + r["pic"]) if r.get("pic", "").startswith("//") else r.get("pic", ""))
-        image_cell = "" if embed_images else (f'=IMAGE("{url}")' if url else "")
+        # =IMAGE()/embed thumbnails: CDN-allowlisted + escaped URL only (SSRF + formula guard).
+        safe_pic = _formula_image_url(r.get("pic", ""))
+        image_cell = "" if embed_images else (f'=IMAGE("{safe_pic}")' if safe_pic else "")
         row = ["" if embed_images else image_cell, r["date"], r.get("category", ""), r["seller"],
                r["title"], r["variant"], r["qty"], r["unit"], r["line_total"], r["ship"],
                r["landed_unit"], r["landed_line"], r["status"], str(r["order_no"])]
         if not embed_images:
-            link = r.get("item_url") or ""
+            # =HYPERLINK(): only Taobao/Tmall item-page URLs, escaped against quote breakout.
+            link = _formula_link_url(r.get("item_url") or "")
             row.append(f'=HYPERLINK("{link}","open")' if link else "")
         row.append("custom-link — decode from vendor chat" if r["custom"] else "")
         ws.append(row)
         rn = ws.max_row
+        # Formula-injection guard: flip untrusted text cells back to literal text; leave
+        # only the intentional IMAGE/HYPERLINK formula cells as real formulas.
+        for i, v in enumerate(row, start=1):
+            if i in formula_cols:
+                continue
+            cell = ws.cell(rn, i)
+            if _is_formula_prefix(cell.value):
+                cell.data_type = "s"
         ws.row_dimensions[rn].height = 46
         for ci in money_idx:
             ws.cell(rn, ci).number_format = _MONEY
@@ -328,8 +505,8 @@ def build_xlsx(rows: list[dict], path: str, embed_images: bool) -> dict:
                 img.width = img.height = THUMB
                 ws.add_image(img, f"A{rn}")
                 n_img += 1
-        elif url:
-            n_img += 1
+        elif safe_pic:
+            n_img += 1   # only count image cells actually emitted (policy-allowed URLs)
 
     widths = [13, 11, 22, 24, 42, 24, 5, 9, 10, 9, 11, 11, 12, 22] + ([14] if not embed_images else []) + [24]
     for i, w in enumerate(widths, 1):
@@ -357,6 +534,7 @@ def build_xlsx(rows: list[dict], path: str, embed_images: bool) -> dict:
     sm.cell(sm.max_row, 3).number_format = _MONEY
     sm.column_dimensions["A"].width = 32
     sm.column_dimensions["C"].width = 16
+    _neutralize_formulas(sm)   # category text recovered from a prior workbook could start with '='
 
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     wb.save(path)
@@ -439,10 +617,11 @@ async def crawl_orders(since: str, max_clicks: int = 64) -> dict:
 
 def needs_live_crawl(since: str = "2025-01-01", refresh: bool = True) -> bool:
     """True when this export will hit Taobao (used by the server to gate login + pacing)."""
-    if refresh or not os.path.exists(_CACHE):
+    cache = _cache_path()
+    if refresh or not os.path.exists(cache):
         return True
     try:
-        cached = json.load(open(_CACHE))
+        cached = json.load(open(cache))
         cached_since = cached.get("since") if isinstance(cached, dict) and "orders" in cached else None
     except Exception:
         return True
@@ -454,19 +633,20 @@ async def export_inventory(since: str = "2025-01-01", filename: str = "inventory
                            embed_images: bool = True, refresh: bool = True) -> dict:
     """Crawl (or reuse cache) → landed-cost rows → categorize → write workbook. Returns a summary.
     refresh=False reuses the last crawl cache (output/.inventory_orders.json) — no Taobao traffic —
-    unless the cache doesn't reach back to `since`, in which case it re-crawls."""
-    os.makedirs(_OUT_DIR, exist_ok=True)
+    unless the cache doesn't reach back to `since`, in which case it re-crawls.
+    filename is CONTAINED under the configured output dir (absolute / ../ input is basename'd)."""
+    os.makedirs(_out_dir(), exist_ok=True)
+    cache = _cache_path()
     if not needs_live_crawl(since, refresh):
-        cached = json.load(open(_CACHE))
+        cached = json.load(open(cache))
         by_oid = cached["orders"] if isinstance(cached, dict) and "orders" in cached else cached
     else:
         by_oid = await crawl_orders(since)
-        with open(_CACHE, "w") as f:  # store coverage so a deeper `since` later forces a re-crawl
+        with open(cache, "w") as f:  # store coverage so a deeper `since` later forces a re-crawl
             json.dump({"since": since, "orders": by_oid}, f, ensure_ascii=False)
 
     rows = inventory_rows(by_oid, since)
-    base = os.path.basename(filename) if not os.path.isabs(filename) else filename
-    out_path = filename if os.path.isabs(filename) else os.path.join(_OUT_DIR, base)
+    out_path = _resolve_out_path(filename)   # never escapes the configured output dir
     categorize(rows, prior_xlsx=out_path)   # recover categories from a prior run if present
     import anyio
     return await anyio.to_thread.run_sync(build_xlsx, rows, out_path, embed_images)

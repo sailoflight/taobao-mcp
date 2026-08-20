@@ -9,6 +9,8 @@ Inspect:      npx @modelcontextprotocol/inspector .venv/bin/python server.py
 
 from __future__ import annotations
 
+import asyncio
+import functools
 import json
 import os
 
@@ -61,6 +63,114 @@ mcp = FastMCP(
 )
 _rate_limiter = RateLimiter()  # §7.2 hard cap — never burst past max_products_per_minute
 
+# ── process-wide browser lock (2026-08-20) ────────────────────────────────────
+# All top-level tools that drive the shared BrowserSession/page share ONE asyncio
+# lock, so parallel MCP calls from one client cannot interleave cart_atomic
+# snapshots or navigate the singleton tab (transaction integrity). Pure
+# taobao_config (get/set) is intentionally NOT locked. No tool calls another
+# server tool (verified), so the non-reentrant lock cannot deadlock.
+_browser_lock = asyncio.Lock()
+
+
+def _serialized(func):
+    """Signature-preserving decorator: run the async tool under _browser_lock.
+
+    Applied UNDER @mcp.tool so FastMCP registers the wrapped callable; functools.wraps
+    keeps the original signature/annotations, so tool JSON schemas are unchanged
+    (FastMCP builds schemas via inspect.signature, which follows __wrapped__).
+    """
+
+    @functools.wraps(func)
+    async def _wrapper(*args, **kwargs):
+        async with _browser_lock:
+            return await func(*args, **kwargs)
+
+    return _wrapper
+
+
+def _is_taobao_host(host: str) -> bool:
+    """True when host is taobao.com / tmall.com or a subdomain of either (case-insensitive).
+
+    The taobao_debug watch start_url allowlist — prevents navigating the shared tab to
+    arbitrary hosts / local files. Pure — unit-tested offline.
+    """
+    h = str(host or "").strip().lower()
+    return (h == "taobao.com" or h == "tmall.com"
+            or h.endswith(".taobao.com") or h.endswith(".tmall.com"))
+
+
+def _check_watch_start_url(start_url: str) -> str | None:
+    """Validate watch navigation: HTTPS Taobao/Tmall, no credentials or custom port."""
+    from urllib.parse import urlparse
+
+    u = urlparse(str(start_url or "").strip())
+    if u.scheme.lower() != "https":
+        return f"watch start_url 仅允许 HTTPS 地址 — 拒绝 {start_url!r}。"
+    if u.username is not None or u.password is not None:
+        return f"watch start_url 禁止 URL 凭据 — 拒绝 {start_url!r}。"
+    try:
+        port = u.port
+    except ValueError:
+        return f"watch start_url 端口无效 — 拒绝 {start_url!r}。"
+    if port not in (None, 443):
+        return f"watch start_url 仅允许 HTTPS 默认端口 443 — 拒绝 {start_url!r}。"
+    if not _is_taobao_host(u.hostname or ""):
+        return (f"watch start_url 仅允许 taobao.com/tmall.com 及子域的 HTTPS 地址 — "
+                f"拒绝 {start_url!r}(防导航到任意站/本地文件)。")
+    return None
+
+
+# ── safety gates (2026-08-20 audit): unconfirmed / lossy cart writes are rejected at
+# the tool boundary, before any browser or cart side-effect.
+
+_CART_REMOVE_REJECTED = (
+    "taobao_cart action=remove 已禁用: 购物车删除是非确认的破坏性写操作, 且无法在不影响"
+    "购物车原有行/数量的前提下安全实现。请不要通过本工具删除购物车行 — 需整理购物车时请"
+    "直接在淘宝网页端手动处理(购物车是交接代购的交接面)。"
+)
+
+_CART_ATOMIC_GATE = (
+    "比价口径 cart_atomic 需要显式确认(atomic_confirm=true): 对**不在购物车**的目标型号, 将 "
+    "加购恰好 1 件 → 读取购物车到手价 → 按精确 skuId 退回。安全保证(2026-08-20 重建): "
+    "加购前快照购物车行(XHR query.bag, 按 product_id+sku_id+数量) → 已在购物车的型号零写入"
+    "直接读到手价 → 加购后核对 XHR 快照差恰好是目标 (product_id, sku_id) +1 且其余行不变 → "
+    "按精确 skuId 退回(绝不回退到型号/商品) → 退回后再核对完整 XHR 快照与加购前一致; 任何一步"
+    "无法证明都不删除并提示人工检查；此时目标精确 SKU 可能保留临时 +1，需手动核对处理。"
+    "未指定 skus 时自动选每个商品的最低有货价型号(确定性, 结果中会注明所选型号)。"
+    "确认请以 atomic_confirm=true 再次调用; 也可改用 "
+    "source=cart(只读)或 source=coarse(纯原价)。"
+)
+
+
+def _reject_cart_remove(act: str) -> str | None:
+    """Public taobao_cart action=remove is disabled — return the rejection message or None."""
+    return _CART_REMOVE_REJECTED if str(act or "").strip().lower() == "remove" else None
+
+
+def _resolve_compare_source(source: str, cfg_src: str) -> tuple[str, str]:
+    """Resolve the compare price source to a valid effective value.
+
+    Returns (src, warning). Valid sources: cart | coarse | ask | cart_atomic. cart_atomic
+    is safe now (provable add→read→rollback) but is additionally gated by an explicit
+    atomic_confirm at the call site. Unknown inputs fall back to cfg_src (if valid) else ask.
+    Pure — unit-tested offline.
+    """
+    valid = ("cart", "coarse", "ask", "cart_atomic")
+    want = str(source or "").strip().lower()
+    cfg = str(cfg_src or "ask").strip().lower()
+    src = want or cfg
+    if src not in valid:
+        src = cfg if cfg in valid else "ask"
+    return src, ""
+
+
+def _atomic_gate_needed(src: str, atomic_confirm: bool) -> bool:
+    """True when cart_atomic is requested but not yet explicitly confirmed (atomic_confirm=true).
+
+    Pure — unit-tested offline.
+    """
+    return str(src or "").strip().lower() == "cart_atomic" and not atomic_confirm
+
 
 @mcp.custom_route("/healthz", methods=["GET"], include_in_schema=False)
 async def healthz(_: Request) -> JSONResponse:
@@ -80,6 +190,7 @@ async def openai_apps_challenge(_: Request) -> PlainTextResponse:
 @mcp.tool(annotations=ToolAnnotations(
     readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=True
 ))
+@_serialized
 async def taobao_session(action: str = "status") -> str:
     """会话(一个工具 + action 参数)。status 只读报告登录/会话健康 + 防风控限速遥测;
     login 打开可见 Chrome 窗口并确保登录(人工手机扫码 QR, 每次会话首次调用)。
@@ -133,6 +244,7 @@ async def taobao_session(action: str = "status") -> str:
 @mcp.tool(annotations=ToolAnnotations(
     readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True
 ))
+@_serialized
 async def taobao_search(
     keyword: str,
     page: int = 1,
@@ -195,8 +307,10 @@ async def taobao_search(
 
 
 @mcp.tool(annotations=ToolAnnotations(
-    readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True
+    # fine 细查走 足迹→收藏 双机制进入(miid 内建, 会临时收藏再取消) — 非纯只读
+    readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=True
 ))
+@_serialized
 async def taobao_product(
     product_url_or_id: str,
     mode: str = "coarse",        # coarse(B类粗查) | fine(C类细查, 收藏线路mi_id内建)
@@ -269,8 +383,10 @@ async def taobao_product(
 
 
 @mcp.tool(annotations=ToolAnnotations(
-    readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True
+    # 可经确认的 cart_atomic 会写购物车(加购→读价→按精确 skuId 退回) — 非只读、非幂等
+    readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=True
 ))
+@_serialized
 async def taobao_compare(
     product_ids: list[str],
     format: str = "md",          # md(默认, 可读对比表+JSON明细) | json
@@ -278,57 +394,62 @@ async def taobao_compare(
     max_items: int = 10,
     sort_by: str = "",
     min_review_total: int = 0,
-    source: str = "",            # ''=用配置 compare.source(ask|cart|cart_atomic|coarse); 显式传则覆盖
+    source: str = "",            # ''=用配置 compare.source(ask|cart|coarse|cart_atomic); 显式传则覆盖
     skus: list[str] | None = None,  # 严格指定型号文本(与 product_ids 一一对应); 缺省自动匹配购物车
+    atomic_confirm: bool = False,  # source=cart_atomic 时: false=预览(返回确认门), true 才执行
 ) -> str:
     """批量对比(买家挑选常用): 输入最小化 — 仅商品 id/URL 列表(自动提取 id)。
 
     参数: product_ids(必填, 商品ID或URL列表, 自动提取 id) · format=md(默认, 可读对比表+JSON明细)|json ·
       deep_price(bool, true 读实时"平台加补后"价, 较慢) · max_items(默认10, 上限20) ·
       sort_by(''输入序/'price'有货最低价升/'unit'最低单价升) · min_review_total(过滤低评价) ·
-      source(''=用配置 compare.source | ask|cart|cart_atomic|coarse 显式覆盖) · skus(可选, 严格型号)。
+      source(''=用配置 compare.source | ask|cart|coarse|cart_atomic 显式覆盖) · skus(可选, 严格型号) ·
+      atomic_confirm(cart_atomic 时 false=预览/确认门, true 才执行; 其余口径忽略)。
     ⚠️ 比价口径: 默认按 config 的 compare.source。为 ask(默认)时, 每次调用都会在返回头部
       提示"请选择比价口径", 请询问用户用哪种并/或用 taobao_config set compare.source 固化;
-      为 cart/cart_atomic 时, 每次调用都会明示"即将使用购物车到手价"(让用户知情)。
+      为 cart 时, 每次调用都会明示"即将使用购物车到手价"(让用户知情)。
+      🛒 cart_atomic(安全版, 需 atomic_confirm=true): 对不在购物车的目标型号, 加购恰好 1 件 →
+      读到手价 → 按精确 skuId 退回(加购前 XHR 快照(product_id+sku_id+数量) + 加购后证明目标
+      (pid, sku) 恰好 +1 且其余行不变 + 退回后再核对完整 XHR 快照与加购前一致; 无法证明不删除
+      并提示人工检查)。已在购物车的型号零写入直接读到手价。
     source 语义:
       cart: 先读购物车到手价(含平台加补后/优惠), 按型号文本匹配变体 → 命中型号用购物车价覆盖
         原价(粗查只有原价, 会漏长期优惠/补贴) → price_basis 标 cart|mixed|coarse;
         购物车没有该商品时自动退回粗查原价(零成本兜底)。
-      cart_atomic: 在 cart 基础上, 购物车没有的商品/型号 → 自动"加购指定型号 → 读到手价 →
-        退回"(加了多少退多少, 绝不污染用户购物车); 加购失败抛带原因的错(限购/无货/失效)。
       coarse: 纯粗查原价。
+      cart_atomic: cart + 对购物车没有的目标型号自动加购→读价→退回(需 atomic_confirm=true 确认)。
     skus: 严格指定要比的型号文本(如 ["10个袋子30*34cm+2夹子", ...]), 与 product_ids 一一对应;
       传了则只对该型号取价(购物车价优先, 无则粗查价/原子加购价); 不传则自动匹配购物车全部型号。
     format=md(默认): 一屏对比行(标题/店铺/价区间/型号数/价格示例/评论/补贴提示/价格口径) + JSON 明细;
     format=json: 仅结构化 JSON(供后续复用)。
-    只读(cart/coarse) / 原子写后自退(cart_atomic) — 不收藏/不重新生成 mi_id/不发消息。
-    留档导出请用 taobao_export(type=compare)。
+    cart/coarse 只读; cart_atomic 仅在 atomic_confirm=true 时写入(加购后即按精确 skuId 退回)。
+    不收藏/不重新生成 mi_id/不发消息。留档导出请用 taobao_export(type=compare)。
     Example: {"product_ids": ["1039147294809"], "source": "cart"} /
-      {"product_ids": ["1039147294809"], "skus": ["10个袋子30*34cm+2夹子"], "sort_by": "unit"} /
-      {"product_ids": ["1039147294809"], "source": "cart_atomic", "skus": ["10个袋子30*34cm+2夹子"]}
+      {"product_ids": ["1039147294809"], "source": "cart_atomic", "skus": ["10个袋子30*34cm+2夹子"], "atomic_confirm": true}
     """
+    from src.config import load_config
+
+    # 比价口径: 显式 source 优先; 否则用配置 compare.source(ask=每次提示询问)。
+    cfg_src = (load_config().compare.source or "ask").strip().lower()
+    src, _ = _resolve_compare_source(source, cfg_src)
+    if _atomic_gate_needed(src, atomic_confirm):
+        # ⛔ 原子购物车模式需要显式确认 — 在任何浏览器/购物车动作之前返回确认门(预览)
+        return _CART_ATOMIC_GATE
     if await ensure_logged_in() != "logged_in":
         raise NotLoggedInError()
     await _rate_limiter.acquire()
     max_items = max(1, min(int(max_items or 10), 20))  # 1..20 硬上限
-    from src.config import load_config
     from src.extract.compare import _to_markdown, compare_products
 
-    # 比价口径: 显式 source 优先; 否则用配置 compare.source(ask=每次提示询问)
-    cfg_src = (load_config().compare.source or "ask").strip().lower()
-    src = str(source).strip().lower() if str(source).strip() else cfg_src
-    if src not in ("cart", "cart_atomic", "coarse"):
-        src = cfg_src if cfg_src in ("cart", "cart_atomic", "coarse") else "ask"
     data = await compare_products(product_ids, deep_price=deep_price, max_items=max_items,
                                   sort_by=sort_by, min_review_total=min_review_total,
                                   source=src, skus=skus)
     # 每次调用提示当前口径(ask 时提醒询问用户; cart/cart_atomic 时明示即将用购物车)
     _SRC_PROMPT = {
         "ask": "⚠️ 比价口径=ask(配置默认): 请先询问用户用哪种口径(cart 购物车到手价 / "
-               "cart_atomic 购物车无则原子加购 / coarse 纯原价), 或 taobao_config set compare.source 固化。",
+               "coarse 纯原价 / cart_atomic 加购读价退回), 或 taobao_config set compare.source 固化。",
         "cart": "🛒 比价口径=cart: 即将使用购物车到手价(含优惠/补贴)对比, 购物车没有的商品退回原价。",
-        "cart_atomic": "🛒 比价口径=cart_atomic: 即将使用购物车到手价; 购物车没有的商品将自动"
-                       "加购指定型号→读价→退回(加多少退多少, 购物车不受影响)。",
+        "cart_atomic": "🛒 比价口径=cart_atomic(已确认): 购物车没有的目标型号将加购1件→读到手价→按精确 skuId 退回(购物车不受影响)。",
         "coarse": "比价口径=coarse: 纯粗查原价(不含优惠/补贴)。",
     }
     if str(format).strip().lower() == "json":
@@ -348,6 +469,7 @@ async def taobao_compare(
 @mcp.tool(annotations=ToolAnnotations(
     readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True
 ))
+@_serialized
 async def taobao_tracking(
     action: str = "list",        # list
     only_active: bool = True,
@@ -382,6 +504,7 @@ async def taobao_tracking(
 @mcp.tool(annotations=ToolAnnotations(
     readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False
 ))
+@_serialized
 async def taobao_export(
     type: str,                            # compare|cart|favorites|tracking|dossier|product
     product_ids: list[str] | None = None, # compare 时: 商品ID/URL 短名单
@@ -401,25 +524,39 @@ async def taobao_export(
     seller: str = "",                     # dossier
     order_id: str = "",                   # dossier
     with_reviews: bool = False,           # product
-    source: str = "cart",                 # compare: cart(购物车到手价优先)|coarse(原价)
+    source: str = "cart",                 # compare: cart(购物车到手价优先)|coarse(原价)|cart_atomic(需确认)
     skus: list[str] | None = None,        # compare: 严格指定型号(与 product_ids 一一对应)
+    atomic_confirm: bool = False,         # compare+cart_atomic 时: false=预览(返回确认门), true 才执行
 ) -> str:
     """通用导出(一个工具 + type 参数): 把各域结果导出为 md/xlsx 文件(output/)留档/交接代购.
 
     参数: type(必填)=compare|cart|favorites|tracking|dossier|product · format=md(默认)|xlsx(仅 compare) ·
       filename/title(可选) · product_ids(compare 必填) · deep_price/sort_by/with_variants/min_review_total/max_items(compare) ·
-      source/skus(compare: 购物车到手价优先 / 严格型号) · limit/sort_by(favorites) ·
+      source/skus/atomic_confirm(compare: 购物车到手价优先 / 严格型号 / cart_atomic 确认门) · limit/sort_by(favorites) ·
       exclude_unavailable/max_items(cart) · only_active/max(tracking) · seller/order_id(dossier) ·
       product_url_or_id/with_reviews(product)。
     只读浏览 + 落盘本地文件(gitignored); 不写入购物车/收藏, 不发消息。
+    compare 用 source=cart_atomic 时: atomic_confirm=false 返回确认门(预览), true 才执行
+    (加购恰好1件→读到手价→按精确 skuId 退回, 全程 XHR 快照证明; 无法证明不删并提示人工检查)。
     tracking: 读今日缓存(零流量)否则每日一次抓取(限速); 含取件码📦摘要。
     ⚠️ 本部署环境 .xlsx 会被外部机制约 12 秒后加密成 %TSD-Header blob, 无法使用 — 留档请用 md。
     Example: {"type": "compare", "product_ids": ["862892097837"], "title": "收纳箱对比"} / {"type": "tracking", "title": "今日物流"} / {"type": "product", "product_url_or_id": "862892097837", "with_reviews": true}
     """
+    typ = str(type).strip().lower()
+
+    # compare 导出也支持 cart_atomic, 但需显式 atomic_confirm(在任何浏览器/购物车动作前返回确认门)
+    _cmp_src = "cart"
+    if typ == "compare":
+        from src.config import load_config
+
+        cfg_src = (load_config().compare.source or "ask").strip().lower()
+        _cmp_src, _ = _resolve_compare_source(source, cfg_src)
+        if _atomic_gate_needed(_cmp_src, atomic_confirm):
+            return _CART_ATOMIC_GATE
+
     if await ensure_logged_in() != "logged_in":
         raise NotLoggedInError()
     await _rate_limiter.acquire()
-    typ = str(type).strip().lower()
 
     if typ == "compare":
         from src.extract.compare import export_compare_markdown, export_compare_xlsx
@@ -427,14 +564,15 @@ async def taobao_export(
         if str(format).strip().lower() == "xlsx":
             res = await export_compare_xlsx(product_ids or [], deep_price=deep_price,
                                             max_items=max_items, sort_by=sort_by,
-                                            min_review_total=min_review_total, filename=filename)
+                                            min_review_total=min_review_total, filename=filename,
+                                            source=_cmp_src, skus=skus)
             return (f"已导出对比 xlsx 到 {res['path']} ({res['count']} 件)\n"
                     "⚠️ 本环境 .xlsx 约12秒后被外部加密成 %TSD-Header blob, 无法使用 — 留档请用 format=md.")
         res = await export_compare_markdown(product_ids or [], deep_price=deep_price,
                                             max_items=max_items, sort_by=sort_by,
                                             with_variants=with_variants,
                                             min_review_total=min_review_total, title=title,
-                                            source=source, skus=skus)
+                                            source=_cmp_src, skus=skus)
         return f"已导出对比到 {res['path']} ({res['count']} 件)\n\n{res['markdown']}"
 
     if typ == "cart":
@@ -493,8 +631,10 @@ async def taobao_export(
 
 
 @mcp.tool(annotations=ToolAnnotations(
-    readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=True
+    # reply(confirm=true) 会真正发送消息 — 非只读、非幂等(重发会重发); 不破坏数据
+    readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=True
 ))
+@_serialized
 async def taobao_message(
     action: str = "list",        # list | reply
     max_conversations: int = 20,
@@ -551,6 +691,7 @@ async def taobao_message(
 @mcp.tool(annotations=ToolAnnotations(
     readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True
 ))
+@_serialized
 async def taobao_dossier(
     action: str = "view",        # view
     seller: str | None = None,
@@ -578,8 +719,10 @@ async def taobao_dossier(
 
 
 @mcp.tool(annotations=ToolAnnotations(
-    readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True
+    # collect/favorite/watch 是状态动作(收藏/加购/持续监听) — 非只读、非幂等
+    readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=True
 ))
+@_serialized
 async def taobao_debug(
     action: str,                       # detail|sku_structure|sweep_price|miid_price|recommend|entry_probe|home|collect|favorite|watch|activity|probe_reviews|footmark|qa_expand
     product_url_or_id: str = "",
@@ -592,14 +735,16 @@ async def taobao_debug(
     limit: int = 12,                   # activity
     days: int | None = None,           # activity (None=全部/0=今天/1=近2天)
 ) -> str:
-    """调试诊断(一个工具 + action 参数, [DEBUG] 只读/观测用, 不改变账号状态).
+    """调试诊断(一个工具 + action 参数, [DEBUG] 观测/诊断为主; collect/favorite 会临时收藏再取消
+    无残留, watch 持续监听 — 有状态, 非纯只读).
 
     参数: action(必填)=detail|sku_structure|sweep_price|miid_price|home|collect|favorite|watch|activity|probe_reviews|footmark|qa_expand ·
       product_url_or_id(detail/sku_structure/sweep_price/miid_price/favorite/probe_reviews/footmark/qa_expand 时) · target(sku_structure 目标芯片) ·
       target_chip(miid_price 目标变体) · max_chips(sweep_price 扫描上限) · target_pid(collect 可选) ·
       product_url_or_id(recommend/entry_probe 时: recommend=取该商品详情页同类推荐, A2游走原语;
       entry_probe=一次性诊断三种粗查进入方式(entry=url|recommend|search)的详情/推荐/评论/问答/优惠价) ·
-      watch_seconds/start_url(watch 监听器: 人工操作时记录多页/tab URL+mi_id) · limit/days(activity: 事件数/范围 None全部 0今天 1近2天)。
+      watch_seconds/start_url(watch 监听器: 人工操作时记录多页/tab URL+mi_id; start_url 仅允许
+      taobao.com/tmall.com 及子域的 HTTPS — 其它一律拒绝) · limit/days(activity: 事件数/范围 None全部 0今天 1近2天)。
     probe_reviews: 实证评论渲染 — 分别探测 普通页 vs 收藏链路 mi_id 弹窗页 是否渲染评论区(诊断评论抓取路径)。
     footmark: 足迹渠道诊断 — 打开足迹页点第一张卡, 校验打开的 id 是否为目标(双机制第一棒)。
     qa_expand: 问答展开机制诊断 — 数问答卡, 点"查看全部问答", 报告是否开新页/更多卡/抽屉。
@@ -654,6 +799,10 @@ async def taobao_debug(
     if act == "watch":
         from src.extract.miid import watch_pages
 
+        # 安全: start_url 仅允许 taobao.com/tmall.com 及子域的 HTTPS — 防导航到任意站/本地文件
+        _watch_err = _check_watch_start_url(start_url)
+        if _watch_err:
+            return _watch_err
         return json.dumps(await watch_pages(watch_seconds=watch_seconds, start_url=start_url),
                           ensure_ascii=False, indent=2)
     if act == "activity":
@@ -730,10 +879,12 @@ async def taobao_debug(
 
 
 @mcp.tool(annotations=ToolAnnotations(
-    readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=True
+    # add 会写购物车且非幂等(重复加购会重复加) — 非只读、非幂等
+    readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=True
 ))
+@_serialized
 async def taobao_cart(
-    action: str = "list",              # list | add | add_batch | remove
+    action: str = "list",              # list | add | add_batch (remove 已禁用)
     max_items: int = 50,
     exclude_unavailable: bool = False,
     format: str = "md",                # list 时: md | json
@@ -747,12 +898,11 @@ async def taobao_cart(
     """购物车(一个工具 + action 参数)。list 只读列出每件(标题/型号/优惠/实际到手价/标价);
     add 加购(预览/确认两段式: confirm=false 验证芯片+skuId+预览, confirm=true 才写购物车);
     add_batch 批量预览(全部只走 confirm=false, 不实际加购);
-    remove 删除购物车中"商品id+型号文本"匹配的那一行(只删匹配行, 绝不碰其他; 供原子模式回退)。
+    remove 已禁用(拒绝): 删除是非确认的破坏性写操作, 本工具不再提供购物车删除。
 
-    参数: action=list|add|add_batch|remove(默认list) · max_items(list 最大件数, 默认50) ·
+    参数: action=list|add|add_batch(默认list) · max_items(list 最大件数, 默认50) ·
       exclude_unavailable(list 时过滤缺货/下架, 采购清单) · format(list 时 md(默认)|json) ·
       product_url_or_id/options/qty/confirm/cheapest_available(add 时) · items(add_batch 时)。
-      remove 时: product_url_or_id=要删的商品id, options=[型号文本](可选, 不给则删该商品第一匹配行)。
     add 永不下单/付款/选地址 — 仅入购物车交接给代购(经 mtop.trade.addBag API)。
     add: cheapest_available=True 且不给 options 时自动选最便宜有货型号。
     add_batch: items=[{"product_url_or_id": "...", "options": [...], "qty": 1, "cheapest_available": true}, ...],
@@ -760,10 +910,13 @@ async def taobao_cart(
     只读浏览不写购物车; 导出采购清单请用 taobao_export(type=cart)。
     Example: {"action": "list"} / {"action": "add", "product_url_or_id": "862892097837", "options": ["特大号白色","1个装"], "confirm": true}
     """
+    act = str(action).strip().lower()
+    _rem_rej = _reject_cart_remove(act)
+    if _rem_rej:  # ⛔ remove 已禁用 — 在任何浏览器动作之前拒绝
+        return _rem_rej
     if await ensure_logged_in() != "logged_in":
         raise NotLoggedInError()
     await _rate_limiter.acquire()
-    act = str(action).strip().lower()
 
     if act == "list":
         from src.extract.cart_price import _cart_markdown, list_cart
@@ -777,13 +930,6 @@ async def taobao_cart(
     if act == "add":
         return await add_to_cart(product_url_or_id, options=options, qty=qty, confirm=confirm,
                                  cheapest_available=cheapest_available)
-
-    if act == "remove":
-        from src.extract.cart_price import remove_cart_item
-
-        variant = "; ".join(options or [])
-        res = await remove_cart_item(product_url_or_id, variant=variant, qty=qty)
-        return json.dumps(res, ensure_ascii=False, indent=2)
 
     if act == "add_batch":
         import asyncio
@@ -819,6 +965,7 @@ async def taobao_cart(
 @mcp.tool(annotations=ToolAnnotations(
     readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True
 ))
+@_serialized
 async def taobao_favorites(
     action: str = "list",        # list
     limit: int = 30,
@@ -850,6 +997,7 @@ async def taobao_favorites(
 @mcp.tool(annotations=ToolAnnotations(
     readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=True
 ))
+@_serialized
 async def taobao_inventory(
     action: str = "export",      # export(用缓存) | refresh(实机重抓+导出)
     since: str = "2025-01-01",

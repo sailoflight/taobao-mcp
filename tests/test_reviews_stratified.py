@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
-from src.extract.reviews import stratified_reviews
+import asyncio
+
+import pytest
+
+from src.extract.reviews import parse_reviews_stratified, stratified_reviews
+from src.errors import CaptchaError, SelectorDriftError
 from src.models import Review
 
 
@@ -43,3 +48,64 @@ def test_rating_majority_threshold():
     out = stratified_reviews(mixed, max_total=6, per_rating=2)
     bad = sum(1 for r in out if r.rating == 1)
     assert bad >= 2   # 差评保留, 未被 7 条好评淹没
+
+
+# ---- CaptchaError / SelectorDriftError must NOT be swallowed (audit HIGH-3) ----
+
+def test_stratified_propagates_captcha_from_drawer(monkeypatch):
+    """风控墙出现在评论抽屉抓取时 → CaptchaError 上浮, 不吞成空结果。"""
+    import src.extract.reviews as reviews_mod
+
+    async def boom(*a, **k):
+        raise CaptchaError()
+
+    monkeypatch.setattr(reviews_mod, "parse_reviews", boom)
+    with pytest.raises(CaptchaError):
+        asyncio.run(parse_reviews_stratified("12345678901", max_reviews=4))
+
+
+def test_stratified_propagates_selector_drift_from_drawer(monkeypatch):
+    """评论抽屉选择器漂移 → SelectorDriftError 上浮, 不吞成空结果。"""
+    import src.extract.reviews as reviews_mod
+
+    async def boom(*a, **k):
+        raise SelectorDriftError(step="reviews drawer")
+
+    monkeypatch.setattr(reviews_mod, "parse_reviews", boom)
+    with pytest.raises(SelectorDriftError):
+        asyncio.run(parse_reviews_stratified("12345678901", max_reviews=4))
+
+
+def test_stratified_propagates_captcha_from_embedded_fallback(monkeypatch):
+    """主抓取空 → 嵌入式回退重导航撞上风控墙 → CaptchaError 同样上浮。"""
+    import src.extract.product as product_mod
+    import src.extract.reviews as reviews_mod
+
+    async def no_reviews(*a, **k):
+        return []
+
+    async def boom(*a, **k):
+        raise CaptchaError()
+
+    monkeypatch.setattr(reviews_mod, "parse_reviews", no_reviews)
+    monkeypatch.setattr(product_mod, "parse_product", boom)
+    with pytest.raises(CaptchaError):
+        asyncio.run(parse_reviews_stratified("12345678901", max_reviews=4))
+
+
+def test_stratified_still_falls_back_on_benign_empty(monkeypatch):
+    """主抓取空、无风控/漂移 → 仍回退到嵌入式预览评论(行为不变, 仅不吞真实错误)。"""
+    import src.extract.product as product_mod
+    import src.extract.reviews as reviews_mod
+
+    async def no_reviews(*a, **k):
+        return []
+
+    async def embedded(*a, **k):
+        p = type("P", (), {"reviews": [_mk(None, "嵌入好评")]})()
+        return p
+
+    monkeypatch.setattr(reviews_mod, "parse_reviews", no_reviews)
+    monkeypatch.setattr(product_mod, "parse_product", embedded)
+    out = asyncio.run(parse_reviews_stratified("12345678901", max_reviews=4))
+    assert [r.text for r in out] == ["嵌入好评"]

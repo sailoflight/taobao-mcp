@@ -135,3 +135,59 @@ def test_variant_review_count_no_cross_contamination(tmp_path):
     counts = {wsv[f"{cc}{r}"].value: wsv[f"{rc}{r}"].value for r in range(2, 4)}
     assert counts["黑"] == 0            # must NOT count the 黑色升级版 review
     assert counts["黑色升级版"] == 1
+
+
+def test_write_xlsx_neutralizes_formula_injection(tmp_path):
+    """Taobao-controlled text starting with '=' must be written as TEXT, never a formula."""
+    from openpyxl import load_workbook
+
+    p = Product(
+        product_id="1", url="https://item.taobao.com/item.htm?id=1",
+        title='=HYPERLINK("http://evil","buy")', shop_name="=1+1",
+        price_range=(1.0, 2.0),
+        variants=[SkuVariant(sku_id="s", properties={"颜色": "=2+2"}, price=1.0, stock=1, available=True)],
+        reviews=[Review(rating=5, text="=cmd|' /C calc", has_images=False, sku_bought="黑", date="2026-01-01")],
+        scraped_at="2026-06-03T00:00:00Z",
+    )
+    path = write_xlsx([p], "inj.xlsx", out_dir=str(tmp_path))
+    wb = load_workbook(path)
+    for sheet in wb.sheetnames:
+        ws = wb[sheet]
+        assert not any(c.data_type == "f" for row in ws.iter_rows() for c in row), \
+            f"{sheet} still contains an executable formula cell"
+    # values are preserved as literal text (nothing silently dropped)
+    ws = wb["Summary"]
+    assert ws[f"{_col(ws, 'Title')}2"].value == '=HYPERLINK("http://evil","buy")'
+    assert ws[f"{_col(ws, 'Shop')}2"].value == "=1+1"
+    ws = wb["Variants"]
+    assert ws[f"{_col(ws, '颜色')}2"].value == "=2+2"
+    ws = wb["Reviews"]
+    assert ws[f"{_col(ws, 'Text (raw 中文)')}2"].value == "=cmd|' /C calc"
+
+
+def test_write_xlsx_neutralizes_plus_minus_at_and_whitespace_prefixes(tmp_path):
+    """Leading + - @ (and a whitespace-prefixed formula) in untrusted text must be TEXT —
+    no executable formula cells, values preserved."""
+    from openpyxl import load_workbook
+
+    p = Product(
+        product_id="1", url="https://item.taobao.com/item.htm?id=1",
+        title="  =1+1", shop_name="+1+1",
+        price_range=(1.0, 2.0),
+        variants=[SkuVariant(sku_id="s", properties={"颜色": "@SUM(1,2)"}, price=1.0, stock=1, available=True)],
+        reviews=[Review(rating=5, text="-1", has_images=False, sku_bought="黑", date="2026-01-01")],
+        scraped_at="2026-06-03T00:00:00Z",
+    )
+    path = write_xlsx([p], "inj2.xlsx", out_dir=str(tmp_path))
+    wb = load_workbook(path)
+    for sheet in wb.sheetnames:
+        ws = wb[sheet]
+        assert not any(c.data_type == "f" for row in ws.iter_rows() for c in row), \
+            f"{sheet} still contains an executable formula cell"
+    ws = wb["Summary"]
+    assert ws[f"{_col(ws, 'Title')}2"].value == "  =1+1"
+    assert ws[f"{_col(ws, 'Shop')}2"].value == "+1+1"
+    ws = wb["Variants"]
+    assert ws[f"{_col(ws, '颜色')}2"].value == "@SUM(1,2)"
+    ws = wb["Reviews"]
+    assert ws[f"{_col(ws, 'Text (raw 中文)')}2"].value == "-1"

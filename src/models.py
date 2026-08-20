@@ -23,6 +23,15 @@ class SkuVariant(BaseModel):
     available: bool
     image: str | None = None        # 该档位的选项图 URL(尺寸/规格常印在图内) — skuBase value.image
 
+    def label(self) -> str | None:
+        """Canonical joined variant label, e.g. {"颜色":"黑色","尺寸":"L"} → "黑色 L".
+
+        Mirrors ``reviews.parse_sku_info`` so a review's ``sku_bought`` can be
+        resolved back to its SkuVariant even on multi-group products (audit MED-4).
+        """
+        vals = [str(x) for x in (self.properties or {}).values() if str(x)]
+        return " ".join(vals) or None
+
 
 class Review(BaseModel):
     """A single customer review, kept in raw Chinese (Claude translates later)."""
@@ -119,6 +128,7 @@ class CartItem(BaseModel):
 
     seller: str                          # shopTitle — the vendor join key
     title: str
+    product_id: str | None = None        # itemId from the query.bag XHR (cart_atomic snapshot key)
     sku_id: str | None = None
     quantity: int = 1
 

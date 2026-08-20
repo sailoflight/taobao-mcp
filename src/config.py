@@ -137,6 +137,93 @@ _SECTIONS: tuple[tuple[str, type], ...] = (
     ("compare", CompareCfg),
 )
 
+# ---------------------------------------------------------------------------
+# Hard-safety bounds (config.toml / config.local.toml / taobao_config overrides).
+# The project is fail-closed: a typo or hostile file edit must NOT be able to
+# disable an anti-risk gate or balloon daily Taobao traffic.
+#
+# _BOUNDED_KEYS: numeric keys whose value is CLAMPED on load (file edits) and
+# REJECTED on taobao_config set. Ceilings are deliberately LOW — rates are kept
+# far under anything that could flag the account (§7.2, §8). NOTE: the review
+# sampler lives under [anti_risk] — review_sample_per_rating, NOT limits.
+# ---------------------------------------------------------------------------
+_BOUNDED_KEYS: dict[str, tuple[float, float]] = {
+    "pacing.max_products_per_minute": (1, 6),   # documented safe ceiling is 6/min
+    "limits.max_reviews": (1, 200),
+    "limits.review_pages": (1, 20),
+    "limits.fav_flow_per_day": (1, 100),
+    "limits.search_per_day": (1, 100),
+    "anti_risk.review_sample_per_rating": (1, 20),
+    "anti_risk.search_cooldown_s": (30, 3600),  # conservative min 30s between searches
+    "anti_risk.captcha_timeout_s": (1, 3600),
+    "anti_risk.login_timeout_s": (1, 3600),
+    "anti_risk.captcha_poll_s": (0.5, 120),
+}
+# Delay/pause parameters: negative is nonsense (a negative wait would busy-loop
+# the pacing layer). No upper bound — a larger delay is merely slower, never
+# unsafe for the account.
+_NONNEGATIVE_DELAYS = frozenset({
+    "pacing.min_delay_s",
+    "pacing.max_delay_s",
+    "click.move_pause_min",
+    "click.move_pause_max",
+    "click.hover_pause_min",
+    "click.hover_pause_max",
+    "click.hold_min",
+    "click.hold_max",
+})
+
+
+def _validate_runtime_override(section: str, name: str, value) -> str | None:
+    """Return a human-facing rejection message if the override is unsafe, else None."""
+    key = f"{section}.{name}"
+    if key == "browser.headless" and value is True:
+        return (
+            "browser.headless 必须为 false: 本项目必须**有头**运行(人工观看窗口、"
+            "人工解验证码, §7), 禁止运行时开启 headless。"
+        )
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return None  # non-numeric keys carry no numeric rule
+    if key in _BOUNDED_KEYS:
+        lo, hi = _BOUNDED_KEYS[key]
+        if not lo <= num <= hi:
+            return f"{key} 必须在 [{lo}, {hi}] 区间内(防风控硬安全边界), 不能为 {value}。"
+    elif key in _NONNEGATIVE_DELAYS and num < 0:
+        return f"{key} 是延迟参数, 不能为负(不能为 {value})。"
+    return None
+
+
+def _validate_merged(path, section: str, values: dict) -> None:
+    """Fail closed: raise ValueError if any MERGED bounded key is out of bounds.
+
+    Called during load_config on the merged config.toml + config.local.toml +
+    overrides data, so a direct file edit cannot bypass the hard-safety bounds
+    the way a taobao_config override is rejected. Non-dict section data is
+    ignored (the same way unknown keys are ignored).
+    """
+    if not isinstance(values, dict):
+        return
+    prefix = section + "."
+    for key, (lo, hi) in _BOUNDED_KEYS.items():
+        if not key.startswith(prefix):
+            continue
+        name = key[len(prefix):]
+        if name not in values or isinstance(values[name], bool):
+            continue
+        try:
+            v = float(values[name])
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"配置 {key} 必须是数字, 得到 {values[name]!r}(源 {path})。"
+            ) from None
+        if not lo <= v <= hi:
+            raise ValueError(
+                f"配置 {key} 超出安全边界 [{lo}, {hi}]: 得到 {values[name]}(源 {path})。"
+                "直接编辑配置文件不能绕过防风控上限, 请修正后重试。"
+            )
+
 
 def known_keys() -> list[str]:
     """All known config keys as 'section.key', for taobao_config key validation."""
@@ -168,7 +255,10 @@ def load_config(path: str | Path = "config.toml") -> Config:
     """Parse config.toml into a typed Config. Cached, but RE-READ when the file's mtime
     changes, so a long-running server picks up runtime edits. Merge priority (low→high):
     config.toml < config.local.toml (gitignored, per-machine) < output/.config_overrides.toml
-    (written by taobao_config set; gitignored, machine-local). Unknown keys are ignored."""
+    (written by taobao_config set; gitignored, machine-local). Unknown keys are ignored.
+    Hard-safety bounds (_BOUNDED_KEYS) are VALIDATED here on the merged values; an
+    out-of-bounds value raises ValueError (fail closed), so a direct file edit
+    cannot bypass the ceilings the way a taobao_config override is rejected."""
     p = Path(path)
     local_override = os.environ.get("TAOBAO_CONFIG_LOCAL", "").strip()
     local_p = Path(local_override).expanduser() if local_override else p.with_name("config.local.toml")
@@ -205,6 +295,11 @@ def load_config(path: str | Path = "config.toml") -> Config:
         for section, values in ov_data.items():
             if isinstance(values, dict):
                 data.setdefault(section, {}).update(values)
+
+    # Fail closed on the MERGED values (base + local + overrides): an out-of-bounds
+    # hard-safety key raises ValueError here, before any dataclass is built.
+    for section, _ in _SECTIONS:
+        _validate_merged(str(p), section, data.get(section, {}))
 
     def _filter(cls, section: str) -> dict:
         allowed = cls.__dataclass_fields__.keys()
@@ -260,7 +355,14 @@ def _write_toml(data: dict, path: Path) -> None:
 
 def _coerce(raw: str, hint):
     if hint is bool:
-        return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+        v = str(raw).strip().lower()
+        if v in {"1", "true", "yes", "on"}:
+            return True
+        if v in {"0", "false", "no", "off"}:
+            return False
+        # Unknown string must be REJECTED, not silently coerced to False — a typo
+        # like "fales" must never disable a safety flag by accident.
+        raise ValueError(f"invalid boolean value: {raw!r}")
     if hint is int:
         return int(str(raw).strip())
     if hint is float:
@@ -294,6 +396,10 @@ def apply_override(key: str, value: str = "", confirm: bool = False) -> dict:
         coerced = _coerce(value, hint)
     except (TypeError, ValueError):
         return {"ok": False, "message": f"值 '{value}' 无法转换为 {getattr(hint, '__name__', hint)}"}
+
+    bad = _validate_runtime_override(section, name, coerced)
+    if bad:
+        return {"ok": False, "message": bad}
 
     from src.config import load_config as _lc  # fresh, to keep cache key current
     _ = _lc()

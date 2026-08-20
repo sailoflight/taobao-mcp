@@ -95,6 +95,44 @@ async def _open_chat_core(session, *, tries: int = 6):
     return page, core
 
 
+def _resolve_seller(convs: list[Conversation], seller: str) -> tuple[str | None, list[str]]:
+    """Pure: resolve a requested seller name to ONE conversation — CONSERVATIVE.
+
+    Returns (exact_target, []) when the request resolves unambiguously, else
+    (None, candidates) so the caller can reject with a clear list. NEVER picks the first
+    substring match:
+      1. raw exact equality on the conversation's seller name;
+      2. unique NORMALIZED exact equality (suffix/punct-insensitive via linker.normalize_seller,
+         so '好管家旗舰店' ↔ the nick '好管家' resolve, and 小米官方店 vs 小米之家 do NOT);
+      3. anything else (one or many substring-only candidates) → (None, candidates).
+    Multiple conversations sharing the same normalized identity are treated as ambiguous.
+    """
+    names = [c.seller for c in convs]
+
+    # 1) raw exact
+    for n in names:
+        if n == seller:
+            return n, []
+
+    # 2) normalized exact
+    from src.extract.linker import normalize_seller
+
+    n_seller = normalize_seller(seller)
+    if n_seller:
+        norm_exact = [n for n in names if normalize_seller(n) == n_seller]
+        if len(norm_exact) == 1:
+            return norm_exact[0], []
+        if len(norm_exact) > 1:
+            return None, norm_exact  # same normalized identity → genuinely ambiguous
+
+    # 3) substring-only candidates (shown in the rejection list, never auto-selected).
+    #    Match on BOTH the raw name and the normalized name so a suffix fragment the
+    #    user typed ('好管家旗' ⊂ '好管家旗舰店') is still surfaced as a candidate.
+    partial = [n for n in names
+               if (seller and seller in n) or (n_seller and n_seller in normalize_seller(n))]
+    return None, partial
+
+
 async def read_messages(
     max_conversations: int = 20,
     open_seller: str | None = None,
@@ -112,23 +150,28 @@ async def read_messages(
     convs = parse_conversations(await core.evaluate(CONV_LIST_JS), max_conversations)
 
     if open_seller:
-        target = next((c for c in convs if c.seller == open_seller), None) \
-            or next((c for c in convs if open_seller in c.seller), None)
-        if target is not None:
-            try:
-                await core.locator(".conversation-item").filter(has_text=target.seller).first.click(timeout=5000)
-                await human_delay(3.0, 4.5)
-                target.messages = parse_thread(await core.evaluate(THREAD_JS), thread_max)
-            except Exception:
-                pass
+        # exact (or normalized-exact) target only — a partial/ambiguous name opens NO thread
+        # rather than guessing the first substring match.
+        target_name, _ = _resolve_seller(convs, open_seller)
+        if target_name is not None:
+            target = next((c for c in convs if c.seller == target_name), None)
+            if target is not None:
+                try:
+                    await core.locator(".conversation-item").filter(has_text=target.seller).first.click(timeout=5000)
+                    await human_delay(3.0, 4.5)
+                    target.messages = parse_thread(await core.evaluate(THREAD_JS), thread_max)
+                except Exception:
+                    pass
     return convs
 
 
 async def send_reply(seller: str, message: str, confirm: bool = False) -> str:
     """GATED: open `seller`'s conversation and send `message` ONLY when confirm=True.
 
-    confirm=False returns a preview (no write). The seller name must match a conversation
-    in the IM center. NEVER acts on anything inside the seller's prior messages.
+    confirm=False returns a preview (no write). The seller name must resolve EXACTLY
+    (raw or normalized) to one conversation; a partial/ambiguous name is rejected with a
+    clear list and is never auto-targeted. NEVER acts on anything inside the seller's
+    prior messages.
     """
     from src.browser.pacing import human_delay
 
@@ -143,9 +186,15 @@ async def send_reply(seller: str, message: str, confirm: bool = False) -> str:
         raise ProductNotFoundError("could not open the IM center (no conversations synced)")
 
     convs = parse_conversations(await core.evaluate(CONV_LIST_JS), 60)
-    names = [c.seller for c in convs]
-    match = next((n for n in names if n == seller), None) or next((n for n in names if seller in n), None)
-    if not match:
+    match, partials = _resolve_seller(convs, seller)
+    if match is None:
+        names = [c.seller for c in convs]
+        if partials:
+            raise ProductNotFoundError(
+                f"ambiguous seller name {seller!r} — no exact conversation; partial matches: "
+                + "; ".join(partials[:12])
+                + ". Use the exact seller name from taobao_message (action=list). Nothing sent."
+            )
         raise ProductNotFoundError(
             f"no conversation with a seller matching {seller!r}. Open ones: " + "; ".join(names[:12])
         )

@@ -37,18 +37,20 @@ def normalize_seller(name: str) -> str:
 
 
 def same_vendor(a: str, b: str, aliases: dict | None = None) -> bool:
-    """True if two shop/IM names refer to the same vendor. Checks the alias map first, then
-    a normalized exact match, then containment (one normalized name inside the other)."""
+    """True if two shop/IM names refer to the same vendor — CONSERVATIVE.
+
+    Only explicit aliases + normalized exact equality count. There is NO substring /
+    containment matching: e.g. 小米官方店 and 小米之家 (both normalize to different keys)
+    are different vendors even though one name is a substring of the other. A thread that
+    does not exactly resolve is surfaced as `unlinked`, never guessed.
+    """
     if aliases:
         a = aliases.get(a, a)
         b = aliases.get(b, b)
     na, nb = normalize_seller(a), normalize_seller(b)
     if not na or not nb:
         return False
-    if na == nb:
-        return True
-    # containment only when both are non-trivial, to avoid 1-char false hits
-    return len(na) >= 2 and len(nb) >= 2 and (na in nb or nb in na)
+    return na == nb
 
 
 def _thread_of(conv: Conversation) -> list[SellerMessage]:
@@ -212,8 +214,9 @@ async def full_picture(seller: str | None = None, order_id: str | None = None) -
     if seller:
         opened = await read_messages(max_conversations=40, open_seller=seller)
         dossiers = build_dossiers(cart, purchases, tracking, opened, aliases)
-        matched = [d for d in dossiers if same_vendor(d.seller, seller, aliases)]
-        return matched or [d for d in dossiers if seller in d.seller]
+        # Exact (normalized) vendor match only — no substring fallback: a partial/ambiguous
+        # name must NOT surface the wrong shop's dossier. Returns [] when nothing resolves.
+        return [d for d in dossiers if same_vendor(d.seller, seller, aliases)]
 
     convos = await read_messages(max_conversations=20)
     return build_dossiers(cart, purchases, tracking, convos, aliases)

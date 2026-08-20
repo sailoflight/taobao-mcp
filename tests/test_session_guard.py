@@ -146,3 +146,112 @@ def test_captcha_inside_iframe_is_detected():
     # iframe 内验证码被人工通过后隐藏 → 不再阻塞。
     page._frame._visible_sels = set()
     assert _looks_blocked(sess, page) is False
+
+
+# ---- launch hardening: headed fail-closed + single persistent context ----------
+
+class _FakePage:
+    def __init__(self):
+        self._closed = False
+
+    def is_closed(self) -> bool:
+        return self._closed
+
+    async def evaluate(self, expr) -> int:
+        return 2
+
+    async def bring_to_front(self) -> None:
+        pass
+
+    async def close(self) -> None:
+        self._closed = True
+
+
+class _FakeContext:
+    def __init__(self):
+        self.pages = [_FakePage()]
+
+    async def add_init_script(self, *a, **k) -> None:
+        pass
+
+    async def new_page(self) -> _FakePage:
+        return _FakePage()
+
+    async def close(self) -> None:
+        pass
+
+
+class _FakeChromium:
+    def __init__(self):
+        self.launch_calls = 0
+        self.context = _FakeContext()
+
+    async def launch_persistent_context(self, **kwargs) -> _FakeContext:
+        self.launch_calls += 1
+        return self.context
+
+
+class _FakePlaywright:
+    def __init__(self):
+        self.started = 0
+        self.chromium = _FakeChromium()
+
+    async def start(self) -> "_FakePlaywright":
+        self.started += 1
+        return self
+
+    async def stop(self) -> None:
+        pass
+
+
+def test_start_refuses_headless(tmp_path, monkeypatch):
+    """Headless 模式在启动前 fail-closed: 绝不 launch 无头浏览器(§7.1)。"""
+    from dataclasses import replace
+
+    import pytest
+
+    from src.browser import session as sess_mod
+    from src.config import load_config
+    from src.errors import BrowserLaunchError
+
+    cfg = load_config()
+    headless_cfg = replace(cfg, browser=replace(cfg.browser, headless=True))
+    sess = BrowserSession(config=headless_cfg)
+    monkeypatch.setattr(sess_mod, "async_playwright", lambda: _FakePlaywright())
+    monkeypatch.setattr(sess_mod, "_resolve_project_user_data_dir", lambda p: tmp_path / "profile")
+
+    with pytest.raises(BrowserLaunchError, match="headless"):
+        asyncio.run(sess.start())
+    # 没发生任何 launch: playwright 从未启动、上下文从未创建
+    assert sess.playwright is None and sess.context is None and sess.page is None
+
+
+def test_start_cannot_launch_two_contexts_concurrently(tmp_path, monkeypatch):
+    """并发 start() 串行化: 两次同时调用只 launch 一个 persistent context。"""
+    from src.browser import session as sess_mod
+
+    fake_pw = _FakePlaywright()
+    monkeypatch.setattr(sess_mod, "async_playwright", lambda: fake_pw)
+    monkeypatch.setattr(sess_mod, "_resolve_project_user_data_dir", lambda p: tmp_path / "profile")
+
+    sess = BrowserSession()
+
+    async def go():
+        start = asyncio.Event()
+        results = []
+
+        async def one():
+            await start.wait()
+            results.append(await sess.start())
+
+        tasks = [asyncio.create_task(one()) for _ in range(2)]
+        start.set()
+        await asyncio.gather(*tasks)
+        return results
+
+    pages = asyncio.run(go())
+    assert fake_pw.chromium.launch_calls == 1   # exactly ONE persistent context
+    assert fake_pw.started == 1                 # playwright started once
+    assert len(pages) == 2
+    assert all(p is sess.page for p in pages)   # both callers reuse the same page
+    assert sess.status == "started"
