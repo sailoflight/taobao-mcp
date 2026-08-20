@@ -10,10 +10,10 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from src.config import load_config
+from src.dates import today_cn
 from src.models import OrderStatus
 
 CARRIERS = ("顺丰", "中通", "圆通", "韵达", "申通", "邮政", "京东", "极兔", "德邦", "百世", "菜鸟")
@@ -23,11 +23,6 @@ _LOGISTICS_URL = "https://market.m.taobao.com/app/dinamic/pc-trade-logistics/hom
 # Once-per-day cap (anti-detection): the first run each day fetches live and caches the
 # result; same-day re-calls serve the cache (zero extra Taobao traffic) unless force=True.
 # Stored under the gitignored output dir — it holds order PII (tracking#/取件码), local only.
-_CN_TZ = timezone(timedelta(hours=8))  # China is UTC+8 year-round (no DST); no tzdata needed
-
-
-def _today_cn() -> str:
-    return datetime.now(_CN_TZ).strftime("%Y-%m-%d")
 
 
 def _state_file() -> Path:
@@ -38,7 +33,7 @@ def _load_cached_today() -> list[OrderStatus] | None:
     """Return today's cached orders if the digest already ran today, else None."""
     try:
         data = json.loads(_state_file().read_text(encoding="utf-8"))
-        if data.get("date") == _today_cn():
+        if data.get("date") == today_cn():
             return [OrderStatus(**o) for o in data.get("orders", [])]
     except Exception:
         pass
@@ -55,7 +50,7 @@ def _save_cache(orders: list[OrderStatus]) -> None:
         p = _state_file()
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(
-            json.dumps({"date": _today_cn(), "orders": [o.model_dump() for o in orders]},
+            json.dumps({"date": today_cn(), "orders": [o.model_dump() for o in orders]},
                        ensure_ascii=False),
             encoding="utf-8",
         )

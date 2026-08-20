@@ -23,9 +23,8 @@ from src.extract.selectors import (
     REVIEW_EXTRACT_JS as _EXTRACT_JS,  # centralized (Phase 6)
 )
 from src.models import Review
+from src.dates import parse_date_iso
 
-_DATE_RE = re.compile(r"(\d{4})-(\d{1,2})-(\d{1,2})")
-_DATE_CN_RE = re.compile(r"(\d{4})年(\d{1,2})月(\d{1,2})日")
 _BOUGHT_RE = re.compile(r"已购[:：]\s*(.+?)\s*$")
 
 
@@ -34,10 +33,7 @@ def parse_meta(meta: str) -> tuple[str | None, str | None]:
 
     Both formats normalize to ISO so dedupe collapses the preview/drawer duplicates.
     """
-    date = None
-    m = _DATE_RE.search(meta or "") or _DATE_CN_RE.search(meta or "")
-    if m:
-        date = f"{int(m.group(1)):04d}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
+    date = parse_date_iso(meta or "")
     sku = None
     m2 = _BOUGHT_RE.search(meta or "")
     if m2:

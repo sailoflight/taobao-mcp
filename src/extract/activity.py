@@ -16,9 +16,9 @@ _LINE_RE = re.compile(
 
 def _summarize_log(lines: list[str], max_events: int = 12, days: int | None = None) -> dict:
     """Pure: 统计 run.log 事件(按类型/级别) + 最近事件; days>0 只看最近 N 天."""
-    from datetime import date, timedelta
+    from src.dates import days_cutoff_iso
 
-    cutoff = (date.today() - timedelta(days=days)).isoformat() if days is not None else None
+    cutoff = days_cutoff_iso(days)
     events: list[dict] = []
     by_type: dict[str, int] = {}
     by_level: dict[str, int] = {}
