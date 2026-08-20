@@ -29,11 +29,14 @@ async def human_delay(min_s: float | None = None, max_s: float | None = None) ->
 
 
 async def human_scroll(page, steps: int | None = None) -> None:
-    """Scroll down in `steps` increments with small pauses to trigger lazy loading."""
-    n = _pacing().scroll_steps if steps is None else steps
-    for _ in range(max(1, n)):
-        await page.mouse.wheel(0, random.randint(300, 750))
-        await asyncio.sleep(random.uniform(0.4, 1.2))
+    """Scroll down in `steps` increments with small pauses to trigger lazy loading.
+
+    Implementation lives in src/browser/scroll.py (single global scrolling module,
+    class-human slide). Forward here so existing call sites keep working.
+    """
+    from src.browser.scroll import human_scroll as _human_scroll
+
+    await _human_scroll(page, steps=steps)
 
 
 async def move_mouse_randomly(page) -> None:
