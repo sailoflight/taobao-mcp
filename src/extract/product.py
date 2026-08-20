@@ -468,6 +468,15 @@ async def parse_product(
     await human_scroll(page, 3)
     await human_delay(1.5, 3.0)
     product = parse_product_html(await page.content(), pid, url)
+    # URL 诊断(2026-08-20 用户疑点): 粗查 goto 的 item.htm 是否被淘宝注入 mi_id?
+    # 用 p.url 记录实际落地 URL — 判断"URL 拼接 vs 模拟点击"的语义差异。
+    try:
+        from src.extract.miid import miid_from_url
+
+        product.miid_present = bool(miid_from_url(page.url or ""))
+        product.landed_url = (page.url or "")[:220]
+    except Exception:
+        pass
 
     if deep_price:  # click each variant for its live after-subsidy price (before any re-nav)
         await fill_subsidy_prices(page, product)

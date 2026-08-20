@@ -60,6 +60,8 @@ class Product(BaseModel):
     subsidy_caveat: str | None = None   # set when the live "平台加补后" price differs from 优惠前
     review_total: str | None = None     # 页面声明的总评价数(如 "2000+"), 非实际抓取条数
     favorable_rate: str | None = None   # 好评率文本(如 "98%"), 信任信号
+    miid_present: bool | None = None    # 粗查诊断(2026-08-20): goto 落地 URL 是否被淘宝注入 mi_id
+    landed_url: str | None = None       # 粗查诊断: 实际落地 URL(判断 URL拼接 vs 模拟点击语义)
 
 
 class SearchResult(BaseModel):

@@ -952,4 +952,15 @@ async def extract_recommendations(product_url_or_id: str, max_items: int = 12, m
     from src.extract.selectors import RECOMMEND_JS
 
     raw_rec = await page.evaluate(RECOMMEND_JS)
-    return rank_recommendations(raw_rec or [], max_items=max_items, min_score=min_score)
+    result = rank_recommendations(raw_rec or [], max_items=max_items, min_score=min_score)
+    # URL 诊断(2026-08-20 用户疑点): 粗查是 URL 拼接 goto item.htm(无 mi_id 参数),
+    # 但实测页面 URL 可能被淘宝 JS 注入 mi_id(登录态/SPA 重写)。记录实际落地 URL,
+    # 判断"URL 拼接是否真的进入无 mi_id 页面" — 这决定 A2 游走原语的语义。
+    try:
+        result["landed_url"] = (page.url or "")[:220]
+        from src.extract.miid import miid_from_url
+
+        result["landed_has_miid"] = bool(miid_from_url(page.url or ""))
+    except Exception:
+        pass
+    return result
