@@ -18,21 +18,12 @@ from __future__ import annotations
 import asyncio
 import random
 
+from src.browser.pacing import human_delay  # 复用 pacing 的实现, 不重复定义
 from src.config import PacingCfg, load_config
 
 
 def _pacing() -> PacingCfg:
     return load_config().pacing
-
-
-async def human_delay(min_s: float | None = None, max_s: float | None = None) -> None:
-    """Sleep a random duration in [min_s, max_s] (defaults from config.toml)."""
-    p = _pacing()
-    lo = p.min_delay_s if min_s is None else min_s
-    hi = p.max_delay_s if max_s is None else max_s
-    if hi < lo:
-        lo, hi = hi, lo
-    await asyncio.sleep(random.uniform(lo, hi))
 
 
 async def human_scroll(page, steps: int | None = None, stop_at_end: bool = False,
