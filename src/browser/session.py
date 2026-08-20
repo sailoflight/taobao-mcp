@@ -380,16 +380,37 @@ class BrowserSession:
             await asyncio.sleep(1.5)
         return False
 
-    async def _looks_blocked(self, page) -> bool:
-        url = (page.url or "").lower()
-        if any(hint in url for hint in _BLOCK_URL_HINTS):
-            return True
+    async def _any_visible_selector(self, page) -> bool:
+        """True when a *visible* captcha/punish widget is on screen.
+
+        ``query_selector`` alone is NOT enough: Taobao leaves solved captcha
+        widgets in the DOM (hidden via ``display:none`` / zero-size / off-screen)
+        for a while, and query_selector matches hidden elements too. A hidden
+        leftover must not keep us "blocked" after the human already solved it —
+        only a widget the human can actually still see counts.
+        """
         for sel in _SLIDER_SELECTORS:
             try:
-                if await page.query_selector(sel):
+                el = await page.query_selector(sel)
+                if el is None:
+                    continue
+                if await el.is_visible():
                     return True
             except Exception:
                 pass
+        return False
+
+    async def _looks_blocked(self, page) -> bool:
+        url = (page.url or "").lower()
+        # A login wall is authoritative on its own (the QR page IS the block).
+        if any(h in url for h in ("login.taobao.com", "login.tmall.com", "//login.")):
+            return True
+        # Other block URL hints (punish / sec.taobao.com / _____tmd_____) only
+        # count while a visible widget confirms the wall. After the human solves
+        # an image-select captcha the tab can stay on sec.taobao.com for a beat
+        # with the widget already gone — a bare URL match would keep us stuck.
+        if await self._any_visible_selector(page):
+            return True
         return False
 
     async def _alert_human(self, page=None) -> None:
@@ -455,6 +476,14 @@ class BrowserSession:
             # 再试阻塞对话框的 X(滑块常可点X关闭, 用户明确可点X或滑动) — 不自动滑
             await self._dismiss_block_x(page)
         if not await self._looks_blocked(page):
+            # 没有阻塞了: 若上一轮 guard 因工具调用被中止(ABORTED)而留下陈旧的
+            # human_action_required=True, 这里要主动清零 — 否则会话一直显示需人工,
+            # 且下一次调用不会重新进入轮询(用户已通过也无人检测)。
+            if self.human_action_required or self.status == "human_action_required":
+                get_logger().info("captcha already cleared since the last (possibly aborted) guard — resetting human_action_required")
+            self.human_action_required = False
+            if self.status == "human_action_required":
+                self.status = "resumed"
             return
         self.human_action_required = True
         self.status = "human_action_required"
