@@ -9,10 +9,26 @@ pure and unit-tested. Respect pacing; default to page 1 only unless asked.
 
 from __future__ import annotations
 
+import asyncio
 import re
+import time
 
 from src.extract.selectors import SEARCH_EXTRACT_JS as EXTRACT_JS  # centralized (Phase 6)
 from src.models import SearchResult
+
+# 搜索间冷却: 全局(跨工具调用)上一次搜索开始时刻。直接 URL 连搜是滑块第一触发源
+# (实测 2026-08-20: 27ms 内连发两次搜索立即触发滑块), 因此两次 taobao_search
+# 之间强制至少 anti_risk.search_cooldown_s 秒, 用真人不可能达到的爆发换降级。
+_last_search_at: float = 0.0
+
+# 拟人化导航: 淘宝首页/任意页顶部搜索框的候选选择器(优先命中即用)。
+_SEARCH_BOX_SELECTORS = (
+    "#q",                            # 淘宝 PC 经典搜索框
+    "input[name='q']",
+    ".search-combobox-input input",
+    "input[placeholder*='搜索']",
+    "input[type='search']",
+)
 
 _PRICE_RE = re.compile(r"¥\s*([\d,]+(?:\.\d+)?)")            # allow thousands commas (¥1,299)
 _SALES_RE = re.compile(r"([\d.]+万?)\s*\+?\s*(?:人付款|人付|付款|人收货|收货)")
@@ -208,12 +224,87 @@ def filter_search_results(results: list[SearchResult], filters: dict | None) -> 
     return out
 
 
+async def _enforce_search_cooldown() -> None:
+    """全局搜索间冷却: 距上一次 taobao_search 不足 anti_risk.search_cooldown_s 秒则等待。
+
+    直接 URL 连搜(上一请求刚 loaded 27ms 后立即 goto 下一个搜索 URL)是滑块
+    验证码的第一触发源(2026-08-20 实测连续触发)。冷却跨工具调用生效 —— 即使
+    batch 里多个搜索 op 连发, 也会被强制拉开到真人节奏。
+    """
+    global _last_search_at
+    from src.config import load_config
+    from src.log import get_logger
+
+    cooldown = float(getattr(load_config().anti_risk, "search_cooldown_s", 0) or 0)
+    if cooldown <= 0:
+        _last_search_at = time.monotonic()
+        return
+    now = time.monotonic()
+    if _last_search_at:
+        wait = cooldown - (now - _last_search_at)
+        if wait > 0:
+            get_logger().info("search: cooldown %.0fs before next search (interval %.0fs)", wait, cooldown)
+            await asyncio.sleep(wait)
+    _last_search_at = time.monotonic()
+
+
+async def _goto_search_page(page, url: str, keyword: str) -> None:
+    """拟人化导航到搜索结果页。
+
+    不用「直接 goto s.taobao.com/search?q=...」的爬虫式跳转(那是风控第一特征),
+    而是复用页面顶部搜索框输入关键词回车 —— 同一个人浏览器里, 从搜索框提交搜索
+    才是正常人类路径。找不到搜索框时才退回直接 goto(并记 warning, 不静默)。
+    """
+    from src.browser.pacing import human_delay
+    from src.browser.session import get_session
+    from src.log import get_logger
+
+    session = get_session()
+    box = None
+    # 若当前已在淘宝域内, 优先复用顶部搜索框; 否则先回首页(更接近真人「开淘宝→搜索」)
+    if not any(d in page.url for d in ("taobao.com", "tmall.com")):
+        try:
+            await page.goto("https://www.taobao.com", wait_until="domcontentloaded")
+            await session.guard_captcha(page)
+            await human_delay(1.5, 3.0)
+        except Exception as exc:
+            get_logger().warning("search: goto taobao home failed (%s) — falling through to direct URL", exc)
+    for sel in _SEARCH_BOX_SELECTORS:
+        try:
+            loc = page.locator(sel).first
+            if await loc.count():
+                box = loc
+                break
+        except Exception:
+            continue
+    if box is not None:
+        try:
+            await box.click(timeout=5_000)
+            await box.fill(keyword)
+            await human_delay(0.4, 1.0)
+            await page.keyboard.press("Enter")
+            # SPA 搜索提交后等待结果页
+            try:
+                await page.wait_for_url("**/search?*", timeout=15_000)
+            except Exception:
+                await page.wait_for_load_state("domcontentloaded")
+            await human_delay(1.0, 2.5)
+            get_logger().info("search: submitted via page search box → %s", page.url)
+            return
+        except Exception as exc:
+            get_logger().warning("search: search-box submission failed (%s) — falling back to direct URL", exc)
+    # 退回: 直接 URL(历史路径, 保底)
+    get_logger().warning("search: no usable search box — using direct URL %s", url)
+    await page.goto(url, wait_until="domcontentloaded")
+
+
 async def parse_search(keyword: str, page_num: int = 1, filters: dict | None = None) -> list[SearchResult]:
     """Live: search Taobao for `keyword` and return the result rows (paced, captcha-guarded)."""
     from src.browser.pacing import human_delay, human_scroll
     from src.browser.session import get_session
     from src.log import get_logger
 
+    await _enforce_search_cooldown()
     session = get_session()
     page = await session.start()
     # New SPA normalizes the URL to ...&tab=all&page=N; include tab=all up
@@ -222,7 +313,7 @@ async def parse_search(keyword: str, page_num: int = 1, filters: dict | None = N
     # rewritten by the page to page=1).
     url = build_search_url(keyword, page_num, filters)
     get_logger().info("search: requested page=%s url=%s", page_num, url)
-    await page.goto(url, wait_until="domcontentloaded")
+    await _goto_search_page(page, url, keyword)
     await session.guard_captcha(page)
     for _ in range(3):
         await human_scroll(page, 3)
