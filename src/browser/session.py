@@ -380,31 +380,63 @@ class BrowserSession:
             await asyncio.sleep(1.5)
         return False
 
-    async def _any_visible_selector(self, page) -> bool:
+    def _candidate_pages(self, page=None) -> list:
+        """所有相关活动标签页: 传入的 page + 浏览器上下文里全部未关闭的标签页。
+
+        搜索提交后风控常在**新标签页**弹出验证码(2026-08-20 实测), guard 若只盯
+        单个 page 就"看不见"验证码, 也不会在人工通过后检测到。扫描全部标签页才能
+        覆盖这个场景。
+        """
+        out: list = []
+        seen: set[int] = set()
+        for p in [page, *(self.context.pages if self.context is not None else [])]:
+            try:
+                if p is not None and not p.is_closed() and id(p) not in seen:
+                    seen.add(id(p))
+                    out.append(p)
+            except Exception:
+                continue
+        return out
+
+    async def _any_visible_selector(self, page=None) -> bool:
         """True when a *visible* captcha/punish widget is on screen.
 
-        ``query_selector`` alone is NOT enough: Taobao leaves solved captcha
-        widgets in the DOM (hidden via ``display:none`` / zero-size / off-screen)
-        for a while, and query_selector matches hidden elements too. A hidden
-        leftover must not keep us "blocked" after the human already solved it —
-        only a widget the human can actually still see counts.
+        Two failure modes this covers:
+        - ``query_selector`` alone matches hidden elements too: Taobao leaves solved
+          captcha widgets in the DOM (``display:none`` / zero-size / off-screen) for a
+          while, and a hidden leftover must NOT keep us "blocked" after the human
+          already solved it — only a widget the human can still see counts.
+        - captcha/slider lives INSIDE an iframe (baxia slider / image-select): the
+          main-document ``page.query_selector`` never sees it. We must walk every
+          frame of every candidate page, not just the top document.
         """
-        for sel in _SLIDER_SELECTORS:
+        for p in self._candidate_pages(page):
             try:
-                el = await page.query_selector(sel)
-                if el is None:
-                    continue
-                if await el.is_visible():
-                    return True
+                frames = p.frames
             except Exception:
-                pass
+                frames = []
+            for frame in [p.main_frame, *frames]:
+                for sel in _SLIDER_SELECTORS:
+                    try:
+                        el = await frame.query_selector(sel)
+                    except Exception:
+                        continue
+                    if el is None:
+                        continue
+                    try:
+                        if await el.is_visible():
+                            return True
+                    except Exception:
+                        pass
         return False
 
-    async def _looks_blocked(self, page) -> bool:
-        url = (page.url or "").lower()
-        # A login wall is authoritative on its own (the QR page IS the block).
-        if any(h in url for h in ("login.taobao.com", "login.tmall.com", "//login.")):
-            return True
+    async def _looks_blocked(self, page=None) -> bool:
+        # A login wall is authoritative on its own (the QR page IS the block),
+        # across every open tab.
+        for p in self._candidate_pages(page):
+            url = (p.url or "").lower()
+            if any(h in url for h in ("login.taobao.com", "login.tmall.com", "//login.")):
+                return True
         # Other block URL hints (punish / sec.taobao.com / _____tmd_____) only
         # count while a visible widget confirms the wall. After the human solves
         # an image-select captcha the tab can stay on sec.taobao.com for a beat
@@ -417,10 +449,10 @@ class BrowserSession:
         """Bring the browser window to front and (on Windows) flash its taskbar
         icon, so the human notices a captcha/punish handoff. Best-effort only.
         """
-        page = page or self.page
-        if page is not None:
+        # 前置所有活动标签页里仍在的页(验证码可能在新标签页), 保证人工看得到。
+        for p in self._candidate_pages(page):
             try:
-                await page.bring_to_front()
+                await p.bring_to_front()
             except Exception:
                 pass
         if os.name == "nt":  # Windows 部署 — 任务栏闪烁 msedge/chrome + 置前
@@ -444,17 +476,21 @@ class BrowserSession:
             except Exception:
                 pass
 
-    async def _dismiss_block_x(self, page) -> bool:
-        """先能X就X: 点击阻塞对话框(含滑块, 用户确认可点X关闭)的关闭钮; 不自动滑."""
-        try:
-            clicked = await page.evaluate(_CLOSE_FREQUENCY_DIALOG_JS)
-        except Exception:
-            return False
-        if clicked:
-            await asyncio.sleep(1.5)
-            if not await self._looks_blocked(page):
-                get_logger().info("dismissed block dialog via X (%s)", clicked)
-                return True
+    async def _dismiss_block_x(self, page=None) -> bool:
+        """先能X就X: 点击阻塞对话框(含滑块, 用户确认可点X关闭)的关闭钮; 不自动滑.
+
+        遍历所有活动标签页(验证码可能在新标签页), 任一页点掉 X 且整体不再阻塞即成功。
+        """
+        for p in self._candidate_pages(page):
+            try:
+                clicked = await p.evaluate(_CLOSE_FREQUENCY_DIALOG_JS)
+            except Exception:
+                continue
+            if clicked:
+                await asyncio.sleep(1.5)
+                if not await self._looks_blocked(page):
+                    get_logger().info("dismissed block dialog via X (%s)", clicked)
+                    return True
         return False
 
     async def guard_captcha(self, page=None, timeout_s: int | None = None, poll_s: float | None = None) -> None:
@@ -469,6 +505,12 @@ class BrowserSession:
         timeout_s = ar.captcha_timeout_s if timeout_s is None else timeout_s
         poll_s = ar.captcha_poll_s if poll_s is None else poll_s
         page = page or self.page
+        if page is None and self.context is not None:
+            # 主工作页可能已关, 但浏览器还在(验证码可能在新标签页) — 用任一活动页。
+            for p in self.context.pages:
+                if not p.is_closed():
+                    page = p
+                    break
         if page is None:
             return
         await self.dismiss_frequency_dialog(page)  # 软'访问太频繁'先自动点X
