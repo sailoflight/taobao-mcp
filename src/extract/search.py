@@ -248,12 +248,14 @@ async def _enforce_search_cooldown() -> None:
     _last_search_at = time.monotonic()
 
 
-async def _goto_search_page(page, url: str, keyword: str) -> None:
-    """拟人化导航到搜索结果页。
+async def _goto_search_page(page, url: str, keyword: str):
+    """拟人化导航到搜索结果页, 返回最终应解析的工作页(可能是新开的标签页)。
 
     不用「直接 goto s.taobao.com/search?q=...」的爬虫式跳转(那是风控第一特征),
     而是复用页面顶部搜索框输入关键词回车 —— 同一个人浏览器里, 从搜索框提交搜索
-    才是正常人类路径。找不到搜索框时才退回直接 goto(并记 warning, 不静默)。
+    才是正常人类路径。2026-08-20 实测: 首页搜索框回车会把结果开在**新标签页**
+    (主标签 URL 不变), 因此提交后要等待/接管新开的结果页, 并顺路 guard(新页
+    可能同现多个验证码)。找不到搜索框时才退回直接 goto(并记 warning, 不静默)。
     """
     from src.browser.pacing import human_delay
     from src.browser.session import get_session
@@ -283,19 +285,30 @@ async def _goto_search_page(page, url: str, keyword: str) -> None:
             await box.fill(keyword)
             await human_delay(0.4, 1.0)
             await page.keyboard.press("Enter")
-            # SPA 搜索提交后等待结果页
-            try:
-                await page.wait_for_url("**/search?*", timeout=15_000)
-            except Exception:
-                await page.wait_for_load_state("domcontentloaded")
-            await human_delay(1.0, 2.5)
-            get_logger().info("search: submitted via page search box → %s", page.url)
-            return
+            # 提交后: 结果可能在当前标签页, 也可能开在新标签页(2026-08-20 实测)。
+            # 每轮都跑 guard(新页可能同现滑块+选图, 等待人工通过), 并检查是否已有
+            # 搜索结果页可用; 找到后接管为新工作页。
+            result_page = page
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline:
+                await session.guard_captcha(page)  # 覆盖所有标签页×所有frame
+                for p in session._candidate_pages(page):
+                    if "s.taobao.com/search" in p.url or "s.tmall.com/search" in p.url:
+                        if p is not page:
+                            get_logger().info("search: adopted new-tab results page %s", p.url)
+                            session.page = p  # 接管新标签页为工作页
+                            result_page = p
+                        get_logger().info("search: submitted via page search box → %s", result_page.url)
+                        return result_page
+                await asyncio.sleep(2.0)
+            get_logger().warning("search: no results page appeared after submit (still %s) — using current tab", page.url)
+            return page
         except Exception as exc:
             get_logger().warning("search: search-box submission failed (%s) — falling back to direct URL", exc)
     # 退回: 直接 URL(历史路径, 保底)
     get_logger().warning("search: no usable search box — using direct URL %s", url)
     await page.goto(url, wait_until="domcontentloaded")
+    return page
 
 
 async def parse_search(keyword: str, page_num: int = 1, filters: dict | None = None) -> list[SearchResult]:
@@ -313,7 +326,7 @@ async def parse_search(keyword: str, page_num: int = 1, filters: dict | None = N
     # rewritten by the page to page=1).
     url = build_search_url(keyword, page_num, filters)
     get_logger().info("search: requested page=%s url=%s", page_num, url)
-    await _goto_search_page(page, url, keyword)
+    page = await _goto_search_page(page, url, keyword)
     await session.guard_captcha(page)
     for _ in range(3):
         await human_scroll(page, 3)
