@@ -389,15 +389,23 @@ HOME_AD_RECON_JS = r"""() => {
 
 # --- deep_price: read the live 平台加补后 (after-subsidy) price after selecting a variant ---
 SUBSIDY_PRICE_JS = r"""() => {
+  // 细查(mi_id)页价格结构: "平台加补后￥42.79 | 优惠前￥51" 双价并列(2026-08-20 实证)。
+  // 返回 {after, before, raw}: after=平台加补后(真实到手价), before=优惠前, raw=匹配到的文本。
   const all=[...document.querySelectorAll('*')];
-  let best=null, bestLen=999;
+  let best=null, bestLen=9999;
   for (const e of all) {
     const t=(e.innerText||'').replace(/\s+/g,'');
-    if (t.includes('平台加补后') && /\d/.test(t) && t.length<40 && t.length<bestLen) { best=t; bestLen=t.length; }
+    if (t.includes('平台加补后') && /\d/.test(t) && t.length<60 && t.length<bestLen) { best=t; bestLen=t.length; }
   }
   if (!best) return null;
-  const m = best.match(/平台加补后[¥￥]?([\d.]+)/);
-  return m ? m[1] : null;
+  // 容忍 "平台加补后 ￥42.79" / "平台加补后￥42.79" / "平台加补后：42.79"
+  const mAfter = best.match(/平台加补后[:：]?\s*[¥￥]?\s*([\d.]+)/);
+  const mBefore = best.match(/优惠前[:：]?\s*[¥￥]?\s*([\d.]+)/);
+  return {
+    after: mAfter ? mAfter[1] : null,
+    before: mBefore ? mBefore[1] : null,
+    raw: best.slice(0, 60),
+  };
 }"""
 
 # --- light price snapshot on a mi_id-entered page (favorite flow): what does the

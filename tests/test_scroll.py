@@ -73,3 +73,18 @@ def test_desc_panel_js_has_stable_stop():
     assert "stable < 3" in DESC_PANEL_JS
     assert "panel.scrollTop = sh" not in DESC_PANEL_JS or "stable" in DESC_PANEL_JS
     assert "lastCount" in DESC_PANEL_JS
+
+
+def test_subsidy_price_js_double_price_format():
+    """细查(mi_id)页价格双价结构 '平台加补后￥42.79 | 优惠前￥51' 读取(2026-08-20)。
+
+    用户实证: 细查页两个价并列, 旧 SUBSIDY_PRICE_JS 只按 '平台加补后' 关键词查可能
+    匹配到超长容器被 <40 排除或正则遇空格失败 → 误读原价。新实现返回 {after, before, raw},
+    容忍 平台加补后 与 ￥ 之间的空格/冒号。
+    """
+    from src.extract.selectors import SUBSIDY_PRICE_JS
+    assert "after" in SUBSIDY_PRICE_JS and "before" in SUBSIDY_PRICE_JS
+    assert "优惠前[:：]?" in SUBSIDY_PRICE_JS
+    assert "平台加补后[:：]?\\s*[¥￥]?\\s*" in SUBSIDY_PRICE_JS
+    # 旧逻辑的 <40 长度限制已放宽(<60), 避免双价整行被排除
+    assert "t.length<60" in SUBSIDY_PRICE_JS

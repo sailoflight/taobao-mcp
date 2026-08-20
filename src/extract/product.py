@@ -419,9 +419,10 @@ async def fill_subsidy_prices(page, product, max_skus: int = 24) -> None:
             shown = None
         if shown:
             try:
-                v.price = float(shown)
+                # SUBSIDY_PRICE_JS 现返回 {after, before, raw}; 兼容旧字符串返回值。
+                v.price = float(shown.get("after") if isinstance(shown, dict) else shown)
                 got_any = True
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, AttributeError):
                 pass
 
     if processed < len(clickable):
