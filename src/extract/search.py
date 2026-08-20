@@ -249,28 +249,33 @@ async def _enforce_search_cooldown() -> None:
 
 
 async def _goto_search_page(page, url: str, keyword: str):
-    """拟人化导航到搜索结果页, 返回最终应解析的工作页(可能是新开的标签页)。
+    """拟人化导航到搜索结果页, 返回最终应解析的工作页(单标签维护)。
 
     不用「直接 goto s.taobao.com/search?q=...」的爬虫式跳转(那是风控第一特征),
     而是复用页面顶部搜索框输入关键词回车 —— 同一个人浏览器里, 从搜索框提交搜索
-    才是正常人类路径。2026-08-20 实测: 首页搜索框回车会把结果开在**新标签页**
-    (主标签 URL 不变), 因此提交后要等待/接管新开的结果页, 并顺路 guard(新页
-    可能同现多个验证码)。找不到搜索框时才退回直接 goto(并记 warning, 不静默)。
+    才是正常人类路径。2026-08-20 实测: 首页搜索框回车会把结果开在**新标签页**。
+    本函数处理三件事:
+    - 接管新开的结果页, 并**关闭旧标签页**(只留结果页 — 避免标签堆积, 也避免
+      每次搜索都触发 Edge 新标签闪烁, 与 guard 的人工提醒混淆);
+    - 记录提交前的 URL, 只认「真的变化了」的结果页 URL — 避免在同一个结果页
+      顶部搜索框反复提交同词(SPA 可能不刷新, URL 不变, 拿到旧数据);
+    - 已在搜索结果页时先回首页再搜, 保证每次都是全新搜索。
+    找不到搜索框 / 提交 30s 无结果页时退回直接 goto(记 warning, 不静默)。
     """
     from src.browser.pacing import human_delay
     from src.browser.session import get_session
     from src.log import get_logger
 
     session = get_session()
-    box = None
-    # 若当前已在淘宝域内, 优先复用顶部搜索框; 否则先回首页(更接近真人「开淘宝→搜索」)
-    if not any(d in page.url for d in ("taobao.com", "tmall.com")):
+    # 已在淘宝域内且已是搜索结果页 → 回首页再搜(全新搜索); 不在淘宝域 → 回首页。
+    if ("s.taobao.com/search" in page.url) or not any(d in page.url for d in ("taobao.com", "tmall.com")):
         try:
             await page.goto("https://www.taobao.com", wait_until="domcontentloaded")
             await session.guard_captcha(page)
             await human_delay(1.5, 3.0)
         except Exception as exc:
             get_logger().warning("search: goto taobao home failed (%s) — falling through to direct URL", exc)
+    box = None
     for sel in _SEARCH_BOX_SELECTORS:
         try:
             loc = page.locator(sel).first
@@ -284,24 +289,36 @@ async def _goto_search_page(page, url: str, keyword: str):
             await box.click(timeout=5_000)
             await box.fill(keyword)
             await human_delay(0.4, 1.0)
+            start_url = page.url
             await page.keyboard.press("Enter")
             # 提交后: 结果可能在当前标签页, 也可能开在新标签页(2026-08-20 实测)。
-            # 每轮都跑 guard(新页可能同现滑块+选图, 等待人工通过), 并检查是否已有
-            # 搜索结果页可用; 找到后接管为新工作页。
+            # 每轮都跑 guard(新页可能同现滑块+选图, 等待人工通过); 只认 URL 真的
+            # 变成了搜索结果页(≠start_url, 防止同页反复搜索拿旧数据)。
             result_page = page
             deadline = time.monotonic() + 30
             while time.monotonic() < deadline:
                 await session.guard_captcha(page)  # 覆盖所有标签页×所有frame
+                found = None
                 for p in session._candidate_pages(page):
-                    if "s.taobao.com/search" in p.url or "s.tmall.com/search" in p.url:
-                        if p is not page:
-                            get_logger().info("search: adopted new-tab results page %s", p.url)
-                            session.page = p  # 接管新标签页为工作页
-                            result_page = p
-                        get_logger().info("search: submitted via page search box → %s", result_page.url)
-                        return result_page
+                    u = p.url or ""
+                    if ("s.taobao.com/search" in u or "s.tmall.com/search" in u) and u != start_url:
+                        found = p
+                        break
+                if found is not None:
+                    if found is not page:
+                        get_logger().info("search: adopted new-tab results page %s (closing old tab)", found.url)
+                        session.page = found  # 先切工作页, 再关旧标签
+                        try:
+                            await page.close()  # 关闭旧标签: 不堆积, 少闪烁
+                        except Exception:
+                            pass
+                        result_page = found
+                    else:
+                        get_logger().info("search: current tab navigated to results %s", found.url)
+                    return result_page
                 await asyncio.sleep(2.0)
-            get_logger().warning("search: no results page appeared after submit (still %s) — using current tab", page.url)
+            get_logger().warning("search: no NEW results URL after submit (url=%s) — direct-URL fallback", page.url)
+            await page.goto(url, wait_until="domcontentloaded")
             return page
         except Exception as exc:
             get_logger().warning("search: search-box submission failed (%s) — falling back to direct URL", exc)
