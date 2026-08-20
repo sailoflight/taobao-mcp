@@ -624,12 +624,21 @@ async def fetch_detail(product_url_or_id: str, miid_source: str = "config",
         await session.guard_captcha(page)
         harvest_page = page
 
-    for _ in range(2):  # bring the SKU panel into view before scrolling it internally
+    # Bring the SKU panel into view (it sits below the fold). Use the element's own
+    # position, NOT window.scrollTo(0, scrollHeight) — the latter also drags the page
+    # through the 推广商品 area (2026-08-20 user: "细查会一直下滑到推广区, 浪费时间").
+    from src.browser.scroll import scroll_into_view
+
+    panel_loc = harvest_page.locator("#tbpcDetail_SkuPanelBody")
+    for _ in range(2):
         try:
-            await harvest_page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            await scroll_into_view(harvest_page, panel_loc)
         except Exception:
-            pass
-        await human_delay(0.8, 1.5)
+            try:
+                await harvest_page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            except Exception:
+                pass
+        await human_delay(0.6, 1.2)
 
     harvest = await harvest_page.evaluate(DESC_PANEL_JS)
     raw = harvest.get("imgs") or harvest.get("imgsAnyWidth") or []
@@ -702,6 +711,35 @@ async def fetch_detail(product_url_or_id: str, miid_source: str = "config",
             pass
 
     stale = not harvest.get("scope")
+    # 分层评价摘要(让"检查分层详细评价"的过程可见, 2026-08-20 用户反馈):
+    # 评论若非空, 统计 好/中/差 或 前/中/后段 各自取了几条。
+    review_strata: dict | None = None
+    if with_reviews and reviews_extra and not any(
+        isinstance(r, dict) and "error" in r for r in reviews_extra
+    ):
+        try:
+            rated = [r for r in reviews_extra if r.get("rating") is not None]
+            if rated and len(rated) >= len(reviews_extra) * 0.6:
+                review_strata = {
+                    "mode": "rated",
+                    "good": sum(1 for r in reviews_extra if (r.get("rating") or 0) >= 4),
+                    "neutral": sum(1 for r in reviews_extra if (r.get("rating") or 0) == 3),
+                    "bad": sum(1 for r in reviews_extra if (r.get("rating") or 0) <= 2),
+                    "total": len(reviews_extra),
+                }
+            else:
+                n = len(reviews_extra)
+                seg = max(1, n // 3)
+                review_strata = {
+                    "mode": "segmented",
+                    "front": len(reviews_extra[0:seg]),
+                    "middle": len(reviews_extra[seg:2 * seg]),
+                    "back": len(reviews_extra[2 * seg:n]),
+                    "total": n,
+                    "note": "列表接口无星级 → 按 前/中/后 三段抽样, 覆盖不同时期/倾向",
+                }
+        except Exception:
+            review_strata = None
     return {
         "product_id": pid,
         "url": (harvest_page.url or "")[:220],
@@ -713,6 +751,7 @@ async def fetch_detail(product_url_or_id: str, miid_source: str = "config",
         "count": len(normalized),
         "detail_images": normalized,
         "reviews": reviews_extra if with_reviews else None,
+        "review_strata": review_strata,
         "qa": qa_extra,
         # Signal to the caller: mi_id is stale/expired → the favorite flow regenerates one.
         "miid_stale": stale,

@@ -169,36 +169,51 @@ DESC_SCOPE_JS = r"""() => {
 # container (#tbpcDetail_SkuPanelBody). The maintained userscript (greasyfork 460143,
 # 2026-01) scrolls that inner div to trigger lazy images, then harvests
 # .desc-root / .content-detail / [class*="desc-"] / [class*="detail-"] imgs (width>=700).
+# 2026-08-20: 改为「详情图数量稳定即停」 — 滚动中逐段收集, 若连续 3 轮 imgs 不再增长
+# 即认为详情图已全部加载(后面只剩推广商品区), 提前停止, 不再滚到 SKU 面板最底部。
 DESC_PANEL_JS = r"""async () => {
   const out = { panelFound: false, panelScrollable: false, scope: null, imgs: [], imgsAnyWidth: [] };
+  const seen = new Set(), seenAny = new Set();   // 跨轮去重(闭包, 不在 collect 内新建)
+  const collect = () => {
+    const sels = ['.desc-root', '.content-detail', '[class*="desc-"]', '[class*="detail-"]'];
+    for (const s of sels) {
+      const el = document.querySelector(s);
+      if (el) {
+        out.scope = s;
+        el.querySelectorAll('img').forEach(e => {
+          const u = e.getAttribute('data-ks-lazyload') || e.getAttribute('data-src') || e.getAttribute('src') || '';
+          if (!u) return;
+          if (e.width >= 700 && !seen.has(u)) { seen.add(u); out.imgs.push(u); }
+          if (!seenAny.has(u)) { seenAny.add(u); out.imgsAnyWidth.push(u); }
+        });
+        return;
+      }
+    }
+  };
   const panel = document.getElementById('tbpcDetail_SkuPanelBody');
   if (panel) {
     out.panelFound = true;
     const sh = panel.scrollHeight, ch = panel.clientHeight;
     out.panelScrollable = sh > ch;
+    collect();
     let top = 0;
-    while (top < sh - ch) {
+    let lastCount = out.imgs.length;
+    let stable = 0;
+    while (top < sh - ch && stable < 3) {
       panel.scrollTop = top;
       top += 300;
       await new Promise(r => setTimeout(r, 120));
+      collect();
+      if (out.imgs.length === lastCount) {
+        stable += 1;      // 本轮无新详情图 → 稳定计数 +1
+      } else {
+        stable = 0;       // 还有新图 → 继续滚
+      }
+      lastCount = out.imgs.length;
     }
-    panel.scrollTop = sh;
     await new Promise(r => setTimeout(r, 900));
-  }
-  const sels = ['.desc-root', '.content-detail', '[class*="desc-"]', '[class*="detail-"]'];
-  for (const s of sels) {
-    const el = document.querySelector(s);
-    if (el) {
-      out.scope = s;
-      const seen = new Set(), seenAny = new Set();
-      el.querySelectorAll('img').forEach(e => {
-        const u = e.getAttribute('data-ks-lazyload') || e.getAttribute('data-src') || e.getAttribute('src') || '';
-        if (!u) return;
-        if (e.width >= 700 && !seen.has(u)) { seen.add(u); out.imgs.push(u); }
-        if (!seenAny.has(u)) { seenAny.add(u); out.imgsAnyWidth.push(u); }
-      });
-      break;
-    }
+  } else {
+    collect();
   }
   return out;
 }"""

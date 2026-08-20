@@ -255,53 +255,39 @@ async def open_via_footmark(page, pid: str, title: str = "") -> dict:
     """
     from urllib.parse import parse_qs, urlparse
 
-    from src.browser.pacing import human_scroll
     from src.browser.session import guard_captcha
     from src.extract.miid import miid_from_url
 
     await page.goto(FOOTMARK_URL, wait_until="domcontentloaded")
     await guard_captcha(page)  # 足迹页也走滑块/访问频繁人工交接(用户可点X或滑动)
-    # 足迹商品卡懒加载不稳(今天偶发 "奋力加载中" 卡住, 用户手动浏览并发也扰动) —
-    # 有界重试: 分段滚动 + 加载态轮询 + 重载, 之后仍无卡才退收藏兜底。
-    # 开销有界(卡死时 ~2×15s), 避免拖慢 fallback; 非加载态无卡(空足迹)则不重试。
+    # 简化(2026-08-20 用户): 目标商品刚被粗查/细查打开过 → 足迹按最近浏览排序, 必在
+    # 第一个。不再做 分段滚动查找 + 加载态轮询 + 重载 —— 直接有界等第一张卡渲染,
+    # 点第一张(带 title 的真商品卡), 校验 opened_id==pid; 非目标才退回收藏兜底。
     cards = None
     n = 0
-    for attempt in range(2):
-        for _ in range(4):  # 分段滚动触发懒加载
-            try:
-                await human_scroll(page, 2)
-            except Exception:
-                break
-            await human_delay(0.8, 1.5)
-        # 加载态("奋力加载中")轮询等待卡片出现; 非加载态但仍无卡则不再等
-        for _ in range(4):
-            loc = page.locator('[class*="footerCard"]')
-            n = await loc.count()
-            if n > 0:
-                cards = loc
-                break
-            try:
-                loading = await page.evaluate("() => (document.body.innerText || '').includes('奋力加载中')")
-            except Exception:
-                loading = False
-            if not loading:
-                break
-            await human_delay(1.8, 2.5)
-        if cards is not None:
-            break
-        if attempt == 0:  # 仅一次重载再试
-            try:
-                await page.reload(wait_until="domcontentloaded")
-                await guard_captcha(page)  # 重载后仍可能触发滑块, 继续人工交接
-                await human_delay(1.5, 2.5)
-            except Exception:
-                break
+    try:
+        first = page.locator('[class*="footerCard"]').first
+        await first.wait_for(state="visible", timeout=12000)
+        cards = page.locator('[class*="footerCard"]')
+        n = await cards.count()
+    except Exception:
+        # 一次轻滚触发 JS 渲染(非"搜索", 只是让懒加载的卡出现), 再等一次
+        try:
+            await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            await human_delay(1.5, 2.5)
+            first = page.locator('[class*="footerCard"]').first
+            await first.wait_for(state="visible", timeout=8000)
+            cards = page.locator('[class*="footerCard"]')
+            n = await cards.count()
+        except Exception:
+            cards = None
+            n = 0
     if cards is None or n == 0:
-        return {"url": None, "reason": "no footmark product cards rendered (after bounded retries)",
+        return {"url": None, "reason": "no footmark product cards rendered (after bounded wait)",
                 "channel": "footmark", "cards": 0}
-    # 只认"真商品卡": 含 titleWrap + priceWrap 文本
+    # 只认"真商品卡": 取第一张含 titleWrap 的卡(默认就是刚打开过的目标)。
     product_idx = -1
-    for i in range(min(n, 60)):
+    for i in range(min(n, 8)):
         try:
             t = (await cards.nth(i).locator('[class*="titleWrap"]').first.inner_text() or "").strip()
         except Exception:
