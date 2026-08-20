@@ -920,3 +920,36 @@ async def save_detail_images(product_url_or_id: str, output_dir: str = "", max_i
         "failures": failures[:8],
         "miid_stale": detail.get("miid_stale"),
     }
+
+
+async def extract_recommendations(product_url_or_id: str, max_items: int = 12, min_score: int = 1) -> dict:
+    """[A2 游走原语] 直接 goto 商品详情页(粗查路径, 不走足迹/收藏/细查), 提取同类推荐.
+
+    2026-08-20 用户设计: A2(多轮游走)最接近人类行为 — 淘宝推荐算法的价值在跨页
+    迭代(进一个新详情页 → 推荐给新同类 → 再进)。游走原语必须轻量:
+    - 不用足迹/收藏链路(fine) — 慢 + 耗收藏配额 + 足迹链路标签管理复杂
+    - 不模拟点击进细查 — 浪费上下文
+    - 直接 goto item.htm(粗查路径) — 快; 但无 mi_id 非个性化, 推荐质量需实机验证
+
+    返回 rank_recommendations 的 {items, total_raw, kept, dropped_noise, capped}。
+    """
+    from src.browser.pacing import human_delay, human_scroll
+    from src.browser.session import get_session
+    from src.extract.product import _to_product_id
+
+    pid = _to_product_id(product_url_or_id)
+    session = get_session()
+    page = await session.start()
+    url = f"https://item.taobao.com/item.htm?id={pid}"
+    await page.goto(url, wait_until="domcontentloaded")
+    await session.guard_captcha(page)
+    # 推荐区块在主文档最底部: 粗查也先滚到底触发懒加载, 再提取, 最后滚回顶部。
+    from src.browser.scroll import scroll_to_bottom
+
+    await scroll_to_bottom(page)
+    await human_delay(1.2, 2.0)
+    from src.extract.recommend import rank_recommendations
+    from src.extract.selectors import RECOMMEND_JS
+
+    raw_rec = await page.evaluate(RECOMMEND_JS)
+    return rank_recommendations(raw_rec or [], max_items=max_items, min_score=min_score)
