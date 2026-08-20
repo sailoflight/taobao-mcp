@@ -119,7 +119,15 @@ async def taobao_session(action: str = "status") -> str:
                  + ("" if q["allowed"] else " — 已达上限, 细查将用 config mi_id"))
     except Exception:
         quota = ""
-    return f"status={s.status}; logged_in={logged_in}{note}{pacing}{quota}"
+    try:
+        from src.extract.search_quota import quota_status as _sq_status
+
+        sq = _sq_status()
+        sqtxt = (f"; search_quota={sq['count']}/{sq['limit']}今日"
+                 + ("" if sq["allowed"] else " — 已达上限, 建议休息, 可改用 coarse/fine 细查"))
+    except Exception:
+        sqtxt = ""
+    return f"status={s.status}; logged_in={logged_in}{note}{pacing}{quota}{sqtxt}"
 
 
 @mcp.tool(annotations=ToolAnnotations(
@@ -167,6 +175,16 @@ async def taobao_search(
         if v is not None:
             f[k] = v
     await _rate_limiter.acquire()
+    # 每日搜索配额(搜索列表页是滑块/风控第一触发源): 超限直接拒绝, 不让账号反复被标记。
+    from src.extract.search_quota import check_and_record as _search_quota_record
+
+    _sq = _search_quota_record()
+    if not _sq.get("allowed"):
+        return (
+            f"今日 taobao_search 已用满 {_sq.get('count')}/{_sq.get('limit')} 次 —— "
+            "搜索列表页是验证码/风控第一触发源, 建议休息(轻滑块约6-12小时恢复)。"
+            "当前账号状态: 进商品详情(coarse/fine)不触发验证码, 可先用它继续选品, 明日再搜。"
+        )
     results = await parse_search(keyword, page_num=page, filters=f)
     capped = results[: max(1, min(int(max_results or 30), 100))]
     if str(format).strip().lower() == "md":

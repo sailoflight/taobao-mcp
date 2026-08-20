@@ -10,7 +10,7 @@ headless = false              # ALWAYS false. Human watches & solves captcha.
 min_delay_s = 2.0             # random wait between actions
 max_delay_s = 6.0
 scroll_steps = 4              # incremental scroll to trigger lazy load
-max_products_per_minute = 6  # hard cap; never burst
+max_products_per_minute = 3  # hard cap; never burst (2-3/分钟, 2026-08-20 调低: 搜索更慢更安全)
 
 [click]
 # Human-like simulated click (pacing.human_click). Keep it a real person's reach (~0.5s) —
@@ -33,6 +33,7 @@ max_reviews = 60             # per product, paginated
 review_pages = 4
 fav_flow_per_day = 30            # daily cap on the 收藏链路 (favorite flow)
 review_sample_per_rating = 3     # 评论聚合: 好/中/差评各取 N 条(防被注入好评)
+search_per_day = 30              # 每日 taobao_search 上限(搜索列表页是滑块/风控第一触发源, 超限拒绝并提示休息)
 
 [output]
 dir = "./output"
@@ -50,7 +51,7 @@ mi_id = ""
 captcha_timeout_s = 300        # 验证码人工清除有界等待上限; 超时抛 CaptchaError, 绝不自动解决
 captcha_poll_s = 3.0           # 验证码轮询间隔(秒)
 login_timeout_s = 180          # QR 登录等待人工扫码上限(秒)
-search_cooldown_s = 45         # 两次 taobao_search 之间最小间隔(秒, 全局跨调用) — 直接URL连搜是滑块首因
+search_cooldown_s = 150        # 两次 taobao_search 之间最小间隔(秒, 全局跨调用) — 直接URL连搜是滑块首因; 真人两次搜索 ≥1-2分钟
 track_cache = true             # 物流/库存每日首次实机+同日缓存(零流量); false=每次实机
 fav_flow = true                # 收藏链路(miid 细查)总开关; false=禁止任何收藏动作
 miid_channel = "auto"          # miid 获取渠道(双机制, 用户设计): auto=足迹→收藏兜底 | footmark 仅足迹 | favorite 仅收藏 | config 静态miid

@@ -61,6 +61,9 @@ class LimitsCfg:
     # (repeated favorite/unfavorite actions are a flag risk). fetch_detail with
     # miid_source="favorite" checks this before touching favorites.
     fav_flow_per_day: int = 30
+    # Daily cap on taobao_search — 搜索列表页是滑块/风控第一触发源(2026-08-20 实测
+    # 每次搜索都弹轻滑块), 超限直接拒绝并提示休息, 不让账号被反复标记。
+    search_per_day: int = 30
 
 
 @dataclass(frozen=True)
@@ -89,7 +92,7 @@ class AntiRiskCfg:
     captcha_timeout_s: int = 300   # bounded wait for the human to clear a captcha; then CaptchaError
     captcha_poll_s: float = 3.0    # captcha polling interval
     login_timeout_s: int = 180     # QR-login wait for the human scan
-    search_cooldown_s: float = 45  # min interval between successive taobao_search calls (global,跨调用)
+    search_cooldown_s: float = 150  # min interval between successive taobao_search calls (global,跨调用) — 直接URL连搜是滑块首因
     track_cache: bool = True       # once-per-day track/inventory cache (zero same-day traffic)
     fav_flow: bool = True          # master switch for the 收藏链路 (miid fine-detail)
     miid_channel: str = "auto"     # miid 获取渠道: auto=足迹→收藏 双机制 | footmark 仅足迹 | favorite 仅收藏 | config 静态
