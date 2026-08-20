@@ -85,7 +85,10 @@ RECOMMEND_JS = r"""async () => {
     for(let i=0;i<8;i++){ if(!card) break; const t=card.innerText||'';
       if(t.includes('¥') && t.length<300){ found=card; break; } card=card.parentElement; }
     if(!found) continue; seen.add(id);
-    rows.push({id, text:(found.innerText||'').replace(/\s+/g,' ').trim().slice(0,160)});
+    const text=(found.innerText||'').replace(/\s+/g,' ').trim().slice(0,160);
+    // 价格: 取第一个 ¥/￥ 金额
+    const pm=(text.match(/[¥￥]\s*(\d+(?:\.\d+)?)/) || [])[1] || null;
+    rows.push({id, text, price: pm ? parseFloat(pm) : null});
   }
 
   // 3) 滚回顶部, 不影响后续操作

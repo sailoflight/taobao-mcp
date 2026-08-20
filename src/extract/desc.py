@@ -708,19 +708,15 @@ async def fetch_detail(product_url_or_id: str, miid_source: str = "config",
 
     # 同类推荐/看了又看 (近似搜索通道, 2026-08-20): 搜索页被验证码风控, 但详情页
     # 零验证码。从当前详情页 DOM 顺带收集同类商品卡(id+标题+¥) → 零额外流量/零验证码
-    # 的"近似搜索", 供选品横向找同类候选。失败静默(不阻塞细查主流程)。
-    recommendations: list = []
+    # 的"近似搜索"。推荐列表无限长且含泛推荐噪声 → rank_recommendations 排序/过滤/压缩
+    # (按耗材关键词打分, 降序, 截断到上限, 防大量清单冲击上下文)。失败静默。
+    recommendations: dict = {"items": [], "total_raw": 0, "kept": 0, "dropped_noise": 0, "capped": False}
     try:
+        from src.extract.recommend import rank_recommendations
         from src.extract.selectors import RECOMMEND_JS
 
         raw_rec = await harvest_page.evaluate(RECOMMEND_JS)
-        for r in raw_rec or []:
-            if r.get("id") and r.get("text"):
-                recommendations.append({
-                    "product_id": str(r["id"]),
-                    "title": str(r["text"])[:120],
-                    "url": f"https://item.taobao.com/item.htm?id={r['id']}",
-                })
+        recommendations = rank_recommendations(raw_rec or [])
     except Exception as exc:
         get_logger().warning("detail: recommend extraction failed: %s", exc)
 
