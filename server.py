@@ -20,7 +20,6 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, PlainTextResponse
 
 from src.browser.pacing import RateLimiter
-from src.browser.session import ensure_logged_in, get_session
 from src.cart import add_to_cart
 from src.errors import NotLoggedInError
 from src.inventory import export_inventory
@@ -62,6 +61,28 @@ mcp = FastMCP(
     **_mcp_kwargs,
 )
 _rate_limiter = RateLimiter()  # §7.2 hard cap — never burst past max_products_per_minute
+
+
+def _get_session():
+    """Lazy-load the browser session (Playwright) only when a tool needs it.
+
+    WIN-WSL bridge architecture: the Windows-side server body must not pull in
+    GUI/kernel dependencies at module import time (src/browser/session imports
+    ``playwright.async_api``). Keeping these imports inside the tool execution
+    path gives a clean error boundary and lets ``tools/list`` / non-browser tools
+    run without requiring Playwright to be importable.
+    """
+    from src.browser.session import get_session
+
+    return get_session()
+
+
+async def _ensure_logged_in():
+    """Lazy variant of ``ensure_logged_in``; see ``_get_session``."""
+    from src.browser.session import ensure_logged_in
+
+    return await ensure_logged_in()
+
 
 # ── process-wide browser lock (2026-08-20) ────────────────────────────────────
 # All top-level tools that drive the shared BrowserSession/page share ONE asyncio
@@ -200,9 +221,9 @@ async def taobao_session(action: str = "status") -> str:
     Example: {"action": "status"} / {"action": "login"}
     """
     if str(action).strip().lower() == "login":
-        return await ensure_logged_in()
+        return await _ensure_logged_in()
 
-    s = get_session()
+    s = _get_session()
     if s.context is None:
         return "not_started: call taobao_session(action=login) first (opens Chrome for QR login)."
     logged_in = await s.is_logged_in()
@@ -334,7 +355,7 @@ async def taobao_product(
       不要再对同一商品多次单独 coarse 粗查。
     只读 — 不付款/不改地址/不发消息。Example: {"product_url_or_id": "862892097837", "mode": "fine", "with_reviews": true, "reviews_keyword": "密封", "with_images": true}
     """
-    if await ensure_logged_in() != "logged_in":
+    if await _ensure_logged_in() != "logged_in":
         raise NotLoggedInError()
     await _rate_limiter.acquire()
     from src.extract.product import _product_markdown, parse_product
@@ -435,7 +456,7 @@ async def taobao_compare(
     if _atomic_gate_needed(src, atomic_confirm):
         # ⛔ 原子购物车模式需要显式确认 — 在任何浏览器/购物车动作之前返回确认门(预览)
         return _CART_ATOMIC_GATE
-    if await ensure_logged_in() != "logged_in":
+    if await _ensure_logged_in() != "logged_in":
         raise NotLoggedInError()
     await _rate_limiter.acquire()
     max_items = max(1, min(int(max_items or 10), 20))  # 1..20 硬上限
@@ -485,7 +506,7 @@ async def taobao_tracking(
     导出 md 文件请用 taobao_export(type=tracking)。
     Example: {"only_active": true, "max": 12}
     """
-    if await ensure_logged_in() != "logged_in":
+    if await _ensure_logged_in() != "logged_in":
         raise NotLoggedInError()
     from src.extract.orders import has_cached_today
 
@@ -554,7 +575,7 @@ async def taobao_export(
         if _atomic_gate_needed(_cmp_src, atomic_confirm):
             return _CART_ATOMIC_GATE
 
-    if await ensure_logged_in() != "logged_in":
+    if await _ensure_logged_in() != "logged_in":
         raise NotLoggedInError()
     await _rate_limiter.acquire()
 
@@ -654,7 +675,7 @@ async def taobao_message(
     reply 永不自作主张发送 — 每条需人工确认确切文案; 不问卖家国际运费(卖家只国内发货)。
     Example: {"action": "list", "open_seller": "南京海雀显卡"} / {"action": "reply", "seller": "南京海雀显卡", "message": "请问还有现货吗？", "confirm": true}
     """
-    if await ensure_logged_in() != "logged_in":
+    if await _ensure_logged_in() != "logged_in":
         raise NotLoggedInError()
     await _rate_limiter.acquire()
     act = str(action).strip().lower()
@@ -705,7 +726,7 @@ async def taobao_dossier(
     format=md(默认)可读档案; format=json 结构化。导出 md 文件请用 taobao_export(type=dossier)。
     Example: {"seller": "好管家旗舰店"} / {"order_id": "3309..."}
     """
-    if await ensure_logged_in() != "logged_in":
+    if await _ensure_logged_in() != "logged_in":
         raise NotLoggedInError()
     await _rate_limiter.acquire()
     dossiers = await full_picture(seller=seller, order_id=order_id)
@@ -750,7 +771,7 @@ async def taobao_debug(
     qa_expand: 问答展开机制诊断 — 数问答卡, 点"查看全部问答", 报告是否开新页/更多卡/抽屉。
     [DEBUG] 仅诊断/观测; 收藏链路调试会收藏再取消(无残留)。Example: {"action": "activity"} / {"action": "probe_reviews", "product_url_or_id": "862892097837"} / {"action": "miid_price", "product_url_or_id": "862892097837"}
     """
-    if await ensure_logged_in() != "logged_in":
+    if await _ensure_logged_in() != "logged_in":
         raise NotLoggedInError()
     await _rate_limiter.acquire()
     act = str(action).strip().lower()
@@ -914,7 +935,7 @@ async def taobao_cart(
     _rem_rej = _reject_cart_remove(act)
     if _rem_rej:  # ⛔ remove 已禁用 — 在任何浏览器动作之前拒绝
         return _rem_rej
-    if await ensure_logged_in() != "logged_in":
+    if await _ensure_logged_in() != "logged_in":
         raise NotLoggedInError()
     await _rate_limiter.acquire()
 
@@ -980,7 +1001,7 @@ async def taobao_favorites(
     取 mi_id 已内建(由 taobao_product mode=fine 走收藏-模拟点击-完整追踪参数自行使用, 不再暴露独立工具)。
     Example: {"action": "list", "limit": 30, "sort_by": "price_asc"}
     """
-    if await ensure_logged_in() != "logged_in":
+    if await _ensure_logged_in() != "logged_in":
         raise NotLoggedInError()
     await _rate_limiter.acquire()
     if str(action).strip().lower() == "list":
@@ -1017,7 +1038,7 @@ async def taobao_inventory(
     from src.inventory import needs_live_crawl
 
     if needs_live_crawl(since, refresh):   # offline re-export from cache needs no login/pacing
-        if await ensure_logged_in() != "logged_in":
+        if await _ensure_logged_in() != "logged_in":
             raise NotLoggedInError()
         await _rate_limiter.acquire()
     s = await export_inventory(since=since, filename=filename, embed_images=embed_images, refresh=refresh)

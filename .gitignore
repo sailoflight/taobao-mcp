@@ -8,6 +8,7 @@ dist/
 
 # Virtual environments
 .venv/
+.audit-venv/
 venv/
 
 # IDE and local agent state

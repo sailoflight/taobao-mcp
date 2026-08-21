@@ -20,6 +20,20 @@ run_mcp_stdio.py → server.py (stdio 模式, 无认证) → Chrome (Windows 桌
 - **stdio MCP 协议端到端不变**，零 OAuth、零公网暴露。
 - `streamable-http` 模式（`run_mcp_http.py`）仍**仅供公网部署**（ChatGPT 插件后端，强制 OAuth），本地链路不使用它。
 
+### 架构不变量（WIN-WSL 桥接模板验收）
+
+| 模板要求 | taobao-mcp 落点 | 校验 |
+|---|---|---|
+| WSL 端是纯 stdlib 的 MCP 门面 | `tools/mcp_tcp_bridge.py`（os/select/socket/sys） | `tests/test_bridge_architecture.py` |
+| 内层仅回环、本机可达 | `127.0.0.1:8765`，不绑 `0.0.0.0` | 同上 |
+| Windows 主体持有状态 | Chrome profile 在 Windows 侧 `user_data\chrome_profile`；WSL 门面重启不丢登录态 | 运行探针 |
+| 共享资源单属主 | `bridge_server.py` 同一时刻只放行一个客户端，多余连接拒绝 | `tools/bridge_server.py` |
+| 主体顶层不拉 GUI/内核依赖 | `server.py` 顶层不 import `src.browser.session`/`playwright`；`_get_session()`/`_ensure_logged_in()` 在工具执行路径内懒加载 | `tests/test_bridge_architecture.py` |
+| Windows 运行时对象不进 Git | `/user_data/`、`/output/`、`/config.local.toml`、`.venv/` 均已 gitignore | `verify_git_safety.py` |
+
+> 本地维护改完跑：`python3 tools/mcp_probe.py`（纯桥接链路）与
+> `.venv/bin/python -m pytest tests/test_bridge_architecture.py -q`（结构守卫）。
+
 ## 为什么需要这套桥（三条实测教训）
 
 1. **WSL interop 管道无法承载常驻 stdio**：DSH 插件直接 spawn `C:\...\python.exe` 时，interop 管道在暂时无数据时向 Windows 子进程报 EOF，server 响应完 `initialize` 后数秒内自行退出。一次性灌入的请求能成功，但真实会话的延迟调用必然断链。
@@ -34,14 +48,22 @@ run_mcp_stdio.py → server.py (stdio 模式, 无认证) → Chrome (Windows 桌
 
 ## Windows 侧运行手册
 
-1. 常驻启动桥接服务（PowerShell）：
+> 无窗口启动/重启/自启脚本位于 `tools/windows/`（与 onshape 的
+> `mcp_main/bridge/windows/` 同款）。WSL 端可直接呼唤 Windows 桥接：
+> `tools/wsl_bridge_ctl.sh start|restart|status`。
+
+1. 常驻启动桥接服务（**无窗口**，推荐）：
 
    ```powershell
    cd C:\MCP\taobao-mcp
-   .\.venv\Scripts\python.exe .\tools\bridge_server.py 8765
+   wscript.exe .\tools\windows\start-bridge-hidden.vbs 8765
    ```
 
-   建议用任务计划程序（Task Scheduler，登录时启动）或由 Codex 侧统一托管，避免依赖 WSL 会话生命周期。服务启动后 stdout 会打印 `taobao mcp bridge listening on 127.0.0.1:8765`。
+   或双击 `tools\windows\start-bridge.bat` / `setup-autostart.bat`。建议用任务计划程序
+   （Task Scheduler，登录时启动）或由 Codex 侧统一托管，避免依赖 WSL 会话生命周期。
+   桥接本体用 `.venv\Scripts\pythonw.exe` 运行，不产生 CMD/Python 控制台窗口；运行日志在
+   `output\bridge-server.log`。**仅排查故障时**才用前台命令
+   `.\.venv\Scripts\python.exe .\tools\bridge_server.py 8765`（会开控制台）。
 
 2. 日志：子进程 stderr 落 `output\bridge-server.log`（stdout 保持协议纯净，勿合并）。正常调用应看到 `client ... -> spawned server pid=...`，并且**在客户端保持连接期间没有紧随其后的 `exited rc=0`**。
 3. 监听 `127.0.0.1:8765`，仅回环，无需放行 Windows 防火墙（镜像模式下 WSL 直连回环）。
@@ -72,6 +94,25 @@ run_mcp_stdio.py → server.py (stdio 模式, 无认证) → Chrome (Windows 桌
 
 3. 重启 DSH TUI（新会话），输入 `/mcp` 应显示 `taobao（13 个工具）: taobao_session, taobao_search, taobao_product, …`；工具名形如 `mcp__taobao__taobao_search`。
 4. 首次登录：调用 `taobao_session(action="login")` → **Chrome/Edge 窗口出现在 Windows 桌面** → 用手机淘宝 App 扫码（180 秒窗口，每 3 秒轮询）。登录态持久化在 Windows 侧 `user_data\chrome_profile`，后续会话免扫码。
+
+### 从 WSL 直接启动/重启 Windows 桥接
+
+不用切到 Windows 双击脚本，WSL 侧一条命令即可：
+
+```bash
+tools/wsl_bridge_ctl.sh start     # 无窗口启动 bridge（127.0.0.1:8765）
+tools/wsl_bridge_ctl.sh restart   # 桥接卡死时：强杀浏览器+旧 bridge 再拉起
+tools/wsl_bridge_ctl.sh status    # 仅检查端口，不触发 Windows 进程
+```
+
+默认 Windows 部署副本为 `C:\MCP\taobao-mcp`；若不在该路径，用
+`TAOBAO_WIN_ROOT='C:\你的路径\taobao-mcp' tools/wsl_bridge_ctl.sh start` 覆盖。
+这些命令调用 `tools/windows/` 下的隐藏 VBS/PowerShell 脚本，不在 WSL 内起
+`server.py`。
+
+> Windows 部署副本需先同步 `tools/windows/` 与 `tools/wsl_bridge_ctl.sh`；
+> 若 WSL 侧报找不到 VBS，先把仓库里的 `tools/windows/` 拷到
+> `C:\MCP\taobao-mcp\tools\` 再重试。
 
 ## 快速验证（不经 DSH 的纯桥接链路）
 

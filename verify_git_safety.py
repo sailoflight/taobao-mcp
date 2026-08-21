@@ -15,6 +15,7 @@ IGNORE_PROBES = (
     "user_data/__git_probe__",
     "output/__git_probe__",
     ".venv/__git_probe__",
+    ".audit-venv/__git_probe__",
     "scripts/__git_probe__",
     "skills/taobao-sourcing/sourcing_profile.md",
     "src.zip",
@@ -28,6 +29,7 @@ FORBIDDEN_TRACKED_PREFIXES = (
     "user_data/",
     "output/",
     ".venv/",
+    ".audit-venv/",
     "scripts/",
     "skills/taobao-sourcing/sourcing_profile.md",
 )
