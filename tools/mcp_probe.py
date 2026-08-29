@@ -111,6 +111,11 @@ def main() -> int:
         })
         server = init.get("result", {}).get("serverInfo", {})
         print(f"initialize ok: {server.get('name')} {server.get('version')}")
+        instructions = init.get("result", {}).get("instructions") or ""
+        print(f"runtime prompt delivered via initialize.instructions: {'yes' if instructions else 'no'} "
+              f"({len(instructions)} chars)")
+        if not instructions:
+            raise ProbeError("initialize returned no instructions (runtime prompt missing)")
 
         proc.stdin.write(
             b'{"jsonrpc":"2.0","method":"notifications/initialized"}\n'

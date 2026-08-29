@@ -51,7 +51,7 @@ tests/fixtures/**/page.html
 skills/taobao-sourcing/sourcing_profile.md
 
 # Local one-off reconnaissance scripts may contain account data or machine paths
-scripts/
+/scripts/
 
 # Reference checkout, local archives, and platform noise
 _base_repo/
