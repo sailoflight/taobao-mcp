@@ -1,4 +1,8 @@
-# DSH (WSL) ↔ taobao-mcp (Windows) 桥接部署手册
+# 已退役的 DSH (WSL) ↔ taobao-mcp (Windows) 项目中继手册
+
+> **历史记录，不是当前运行手册。** 本文引用的项目内 relay/listener/launcher
+> 已从源码删除，所有命令均不再受支持。当前普通 stdio 与外部共享桥部署见
+> `../operations/MCP_RUNBOOK.md`。
 
 本手册描述如何在 **Windows 上运行 taobao-mcp server（真实 Chrome + 持久化 profile）**，并从 **WSL 中的 DeepSeek Harness（DSH）** 通过官方 MCP 客户端插件稳定调用它的 13 个工具。
 
@@ -11,10 +15,10 @@ DSH (WSL, dsh-tui)  ── 官方插件 @deepseek-ai/dsh-mcp-client (stdio trans
 tools/mcp_tcp_bridge.py (WSL)  ── stdio ↔ TCP 中继（raw fd，不做缓冲读）
         │ loopback TCP (镜像网络共享 127.0.0.1)
         ▼
-tools/bridge_server.py (Windows, 常驻监听 127.0.0.1:8765)
-        │ 每个 TCP 连接拉起一个子进程；同一时刻只允许一个客户端
+tools/bridge_server.py (Windows, 常驻监听 127.0.0.1:8765，pythonw)
+        │ 每个 TCP 连接拉起一个无控制台 stdio 子进程；同一时刻只允许一个客户端
         ▼
-run_mcp_stdio.py → server.py (stdio 模式, 无认证) → Chrome (Windows 桌面可见)
+run_mcp_stdio.py → server.py (python.exe + CREATE_NO_WINDOW) → Chrome (Windows 桌面可见)
 ```
 
 - **stdio MCP 协议端到端不变**，零 OAuth、零公网暴露。
@@ -26,9 +30,12 @@ run_mcp_stdio.py → server.py (stdio 模式, 无认证) → Chrome (Windows 桌
 |---|---|---|
 | WSL 端是纯 stdlib 的 MCP 门面 | `tools/mcp_tcp_bridge.py`（os/select/socket/sys） | `tests/test_bridge_architecture.py` |
 | 内层仅回环、本机可达 | `127.0.0.1:8765`，不绑 `0.0.0.0` | 同上 |
-| Windows 主体持有状态 | Chrome profile 在 Windows 侧 `user_data\chrome_profile`；WSL 门面重启不丢登录态 | 运行探针 |
+| Windows 运行时状态归属明确 | `bridge_server.py` 常驻；每个客户端拥有一个 FastMCP/浏览器子进程；断开时子进程干净关闭，但 Windows `user_data\chrome_profile` 保留登录态 | 运行探针 + lifecycle 测试 |
+| 健康检查不抢业务锁 | `status` 发送单字节 preface，由 listener 在 `_ACTIVE_LOCK` 前响应，不拉起 FastMCP 子进程 | `tests/test_bridge_runtime.py` |
+| Windows 全链路无控制台 | listener/任务用 `pythonw.exe`；stdio 子进程用 `python.exe + CREATE_NO_WINDOW` | bridge/windows 测试 |
 | 共享资源单属主 | `bridge_server.py` 同一时刻只放行一个客户端，多余连接拒绝 | `tools/bridge_server.py` |
 | 主体顶层不拉 GUI/内核依赖 | `server.py` 顶层不 import `src.browser.session`/`playwright`；`_get_session()`/`_ensure_logged_in()` 在工具执行路径内懒加载 | `tests/test_bridge_architecture.py` |
+| 运行时角色提示同代部署 | `src/runtime_prompt.py` 是唯一权威；DSH companion 由脚本生成并 `--check`；live probe 校验 revision | `tests/test_runtime_prompt.py` |
 | Windows 运行时对象不进 Git | `/user_data/`、`/output/`、`/config.local.toml`、`.venv/` 均已 gitignore | `verify_git_safety.py` |
 
 > 本地维护改完跑：`python3 tools/mcp_probe.py`（纯桥接链路）与
@@ -44,7 +51,7 @@ run_mcp_stdio.py → server.py (stdio 模式, 无认证) → Chrome (Windows 桌
 
 - Windows 11 22H2+，WSL2 开启**镜像网络**（`%UserProfile%\.wslconfig` 中 `[wsl2] networkingMode=Mirrored`，改后 `wsl --shutdown` 重启）；`127.0.0.1` 因此双侧共享。
 - Windows 侧已完成 `C:\MCP\taobao-mcp` 部署：`.venv`（Python 3.11+）、依赖安装、`config.local.toml` 中 `executable_path` 指向 Edge（`channel="chrome"` + 显式 `executable_path` 时 Playwright 会使用该浏览器）。
-- DSH 版本 0.1.0-rc.7（插件版本需与之对齐）。
+- DSH profile 已安装与当前 Harness 兼容的 MCP client；profile 同时加载工具 row 与生成的 runtime-policy companion row。
 
 ## Windows 侧运行手册
 
@@ -70,30 +77,27 @@ run_mcp_stdio.py → server.py (stdio 模式, 无认证) → Chrome (Windows 桌
 
 ## WSL 侧运行手册
 
-1. 安装官方 MCP 客户端插件（一次）：
+1. 在目标 DSH profile 安装兼容的 `@deepseek-ai/dsh-mcp-client`。
+2. 将 `tools/dsh/cordis.patch.yml.example` 的两个 entry 一起合入该
+   profile 的 `cordis.patch.yml`，并把 `<repo>` 替换为 WSL checkout 绝对路径：
+   - MCP row 启动 `tools/mcp_bridge_entry.sh 8765`；它先做无副作用健康检查，
+     Windows listener 不可达时通过 `wsl_bridge_ctl.sh start` 拉起并等待就绪，
+     然后 `exec` 纯 stdlib relay。
+   - companion row 加载生成的 `tools/dsh/runtime-prompt-companion.js`，因为只
+     注册工具但不把 `initialize.instructions` 投递给模型的客户端不兼容。
+3. 部署前检查 companion 与 Engine 是否同代：
 
    ```bash
-   dsh plugin --profile dsh-tui add @deepseek-ai/dsh-mcp-client@0.1.0-rc.7
+   .venv/bin/python tools/dsh/build_runtime_prompt_companion.py --check
+   .venv/bin/python -m pytest tests/test_runtime_prompt.py -q
    ```
 
-2. 在 `~/.dsh/profiles/dsh-tui/cordis.patch.yml` 写入：
-
-   ```yaml
-   - insert:
-       - id: mcp-taobao
-         name: '@deepseek-ai/dsh-mcp-client'
-         config:
-           transport: stdio
-           serverName: taobao
-           command: python3
-           args:
-             - /home/<user>/code/taobao-mcp/tools/mcp_tcp_bridge.py
-             - '8765'
-           failOnStartupError: false
-   ```
-
-3. 重启 DSH TUI（新会话），输入 `/mcp` 应显示 `taobao（13 个工具）: taobao_session, taobao_search, taobao_product, …`；工具名形如 `mcp__taobao__taobao_search`。
-4. 首次登录：调用 `taobao_session(action="login")` → **Chrome/Edge 窗口出现在 Windows 桌面** → 用手机淘宝 App 扫码（180 秒窗口，每 3 秒轮询）。登录态持久化在 Windows 侧 `user_data\chrome_profile`，后续会话免扫码。
+4. 重启 DSH profile 后，工具列表应显示 13 个 `taobao_*` 工具；模型在首次
+   工具决策前还必须能看到当前 `[revision=...]`、`Production / User` 和
+   `Production / Operator`。只看得到工具但看不到 policy 不是健康部署。
+5. 首次登录：调用 `taobao_session(action="login")`，在 Windows 可见浏览器中
+   扫码。客户端断开会关闭其浏览器进程；下一连接用相同 Windows profile
+   恢复 cookies，若站点要求重新认证则交给人处理。
 
 ### 从 WSL 直接启动/重启 Windows 桥接
 
@@ -102,7 +106,7 @@ run_mcp_stdio.py → server.py (stdio 模式, 无认证) → Chrome (Windows 桌
 ```bash
 tools/wsl_bridge_ctl.sh start     # 无窗口启动 bridge（127.0.0.1:8765）
 tools/wsl_bridge_ctl.sh restart   # 桥接卡死时：强杀浏览器+旧 bridge 再拉起
-tools/wsl_bridge_ctl.sh status    # 仅检查端口，不触发 Windows 进程
+tools/wsl_bridge_ctl.sh status    # 单字节健康握手；不拉起子进程、不占 MCP 锁
 ```
 
 默认 Windows 部署副本为 `C:\MCP\taobao-mcp`；若不在该路径，用
@@ -123,7 +127,9 @@ cd /home/<user>/code/taobao-mcp
 python3 tools/mcp_probe.py
 ```
 
-预期输出末尾：`idle-ok`、`tools/call taobao_session(action=status) ok: ...`、`bridge stayed alive for >= 12s`。
+预期输出包含当前 runtime-policy revision、`tools/call ... status ok` 和
+`idle-ok`。若 Windows deployment 与 WSL checkout/companion 不同代，probe
+会在任何业务工具调用前失败。
 
 ## 故障排查
 

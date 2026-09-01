@@ -1,0 +1,1 @@
+{"facets":["mcp"],"layout":{"memory":"docs/memory","scratch":[".agent-scratch"]},"overlays":["agent-governance"],"policy":{"mandatory":[],"root":"AGENTS.md"},"project_id":"taobao-mcp","protected_effects":[],"provider":{"digest":"sha256:f2a5bef21e14b6a76db4ee28ece3f4e37d2896eea8b22bac4c91229cf418fb0e","mode":"embedded-local","release":"2.0.0"},"schema_version":1}

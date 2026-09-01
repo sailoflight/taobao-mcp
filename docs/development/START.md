@@ -4,9 +4,9 @@
 
 | Runtime/platform | Supported range | Evidence |
 |---|---|---|
-| Python | >= 3.11 (dev 3.12) | `pyproject.toml` requires-python |
-| Windows host (Engine) | Windows 11 22H2+, WSL2 mirrored networking | `DSH_WSL_BRIDGE.md` |
-| Browser | Google Chrome or Edge via `config.local.toml` | `config.toml [browser]` |
+| Python | >= 3.11 (dev 3.12) | `pyproject.toml` |
+| MCP host | host able to run Python and the configured visible Chrome/Edge | ordinary stdio entry + browser config |
+| Cross-host client | optional independently installed bridge | `../operations/MCP_RUNBOOK.md` |
 
 ## Bootstrap
 
@@ -15,47 +15,45 @@ uv venv --python 3.12
 uv pip install -e ".[dev]"
 ```
 
-State: run from repository root. Network not required for offline tests; live
-Taobao crawl needs a logged-in Chrome profile on Windows. Never put credentials
-in the repo (`config.local.toml`, `user_data/`, `output/` are gitignored).
+Run from the repository root. Network is not required for offline tests. Live
+Taobao work needs a logged-in browser profile on the MCP host. Never commit
+`config.local.toml`, `user_data/`, `output/`, credentials, cookies, or captures.
 
 ## Entrypoints
 
-| Purpose | Command/path | Scope/output | Side effects |
-|---|---|---|---|
-| Run (stdio MCP) | `.venv/bin/python server.py` | MCP server, 13 tools | opens Chrome only on login tool |
-| Fast check | `.venv/bin/python -m py_compile server.py tools/*.py` | syntax | none |
-| Test | `.venv/bin/python -m pytest -q` | offline unit/contract/guard tests | none |
-| WSL→Windows bridge probe | `python3 tools/mcp_probe.py` | full MCP handshake + `taobao_session(status)` | live Windows bridge must be up |
-| Windows bridge start/restart | `tools/wsl_bridge_ctl.sh start|restart|status` | windowless bridge control | starts/restarts Windows process |
+| Purpose | Command/path | Side effects |
+|---|---|---|
+| Ordinary stdio MCP | `.venv/bin/python run_mcp_stdio.py` | browser opens only when requested |
+| Direct server | `.venv/bin/python server.py` | transport selected by environment |
+| Offline stdio probe | `.venv/bin/python tools/mcp_probe.py` | status only; no login/crawl |
+| Syntax | `.venv/bin/python -m py_compile server.py run_mcp_stdio.py tools/mcp_probe.py dsh/*.py` | none |
+| Tests | `.venv/bin/python -m pytest -p no:cacheprovider -q` | offline |
+| Runtime companion | `.venv/bin/python dsh/build_runtime_prompt_companion.py --check` | none in check mode |
 
 ## Task routing
 
-| Change area | Contract/entry | Matching verification |
+| Change area | Contract | Matching verification |
 |---|---|---|
-| MCP tools / server.py | `server.py`, `src/` | `../verification/MATRIX.md#mcp-contract` |
-| Extraction parsers | `src/extract/*.py` | `../verification/MATRIX.md#offline-parsers` |
-| WIN-WSL bridge | `tools/mcp_tcp_bridge.py`, `tools/bridge_server.py` | `../verification/MATRIX.md#bridge-structure` |
+| MCP tools / server | `server.py`, `src/` | tool/contract tests |
+| Extraction parsers | `src/extract/*.py` | matching parser tests |
+| Browser/session | `src/browser/` | browser/config tests |
+| Stdio/client policy | `run_mcp_stdio.py`, `dsh/` | stdio architecture + runtime-prompt tests |
+| Deployment adapter | external bridge project | do not add relay code here |
 
-## Configuration, state, and data
+## Local data
 
-| Item | Owner/source | Committed? | Local/test rule |
-|---|---|---|---|
-| `config.toml` | repo | yes | defaults |
-| `config.local.toml` | machine | no (gitignored) | executable_path / mi_id |
-| `user_data/` Chrome profile | Windows engine | no | never commit |
-| `output/` exports/logs/caches | local | no | never commit |
-
-## Generated artifacts
-
-| Output | Source | Regenerate | Check drift |
-|---|---|---|---|
-| `agent-project-guides/` state | `install.sh` | `./agent-project-guides/scripts/install.sh check` | `check-update` |
+| Item | Rule |
+|---|---|
+| `config.toml` | tracked defaults |
+| `config.local.toml` | ignored machine overrides |
+| `user_data/` | ignored browser/login state; single process owner |
+| `output/` | ignored exports/logs/caches |
 
 ## Common failures
 
-| Symptom | Cheapest check | Exact detail/runbook |
+| Symptom | First check | Authority |
 |---|---|---|
-| bridge NOT reachable | `tools/wsl_bridge_ctl.sh status` | `../operations/MCP_RUNBOOK.md` |
-| 0 tools / no response | `python3 tools/mcp_probe.py` | `DSH_WSL_BRIDGE.md` 故障排查 |
-| profile lock "正在使用" | check stray Chrome/python | `../operations/MCP_RUNBOOK.md` |
+| initialize/tools missing | run `tools/mcp_probe.py` on MCP host | verification matrix |
+| browser cannot launch | executable/profile config and profile owner | Operator runbook |
+| external client cannot connect | external bridge registry/node health | bridge's own runbook |
+| profile lock | stop duplicate MCP/browser process | Operator runbook |

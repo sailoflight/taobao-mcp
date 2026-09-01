@@ -1,0 +1,26 @@
+# Merge both entries into the target DSH profile's cordis.patch.yml.
+# Register id `taobao` in the independently installed win-wsl-mcp-bridge first.
+# Replace <bridge-client> with its WSL client executable and <repo> with this
+# checkout's absolute path. This repository does not ship a relay/listener.
+- insert:
+    - id: mcp-taobao
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: taobao
+        transport: stdio
+        command: <bridge-client>
+        args:
+          - connect
+          - taobao
+          - --local-port
+          - '8769'
+        toolCallTimeoutMs: 300000
+        failOnStartupError: false
+        reconnect:
+          enabled: true
+          initialDelayMs: 500
+          maxDelayMs: 30000
+          maxAttempts: 10
+    - id: mcp-taobao-runtime-policy
+      name: <repo>/dsh/runtime-prompt-companion.js
+      config: {}

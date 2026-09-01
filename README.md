@@ -48,11 +48,20 @@ never commit/publish). `output/` is local-only unless you share a specific expor
 npx @modelcontextprotocol/inspector .venv/bin/python server.py
 ```
 
-### WIN-WSL 双端部署（DSH 在 WSL、浏览器在 Windows）
-本机若走 **WSL 里的 DSH/Codex → Windows 真实 Chrome**，不要直接在 WSL 起 `server.py`：
-按 `DSH_WSL_BRIDGE.md` 配置 —— WSL 只跑纯 stdlib 中继 `tools/mcp_tcp_bridge.py`，
-Windows 跑常驻 `tools/bridge_server.py`，浏览器 profile/登录态全部留在 Windows 侧。
-WSL 里可直接拉起/重启 Windows 桥接：`tools/wsl_bridge_ctl.sh start|restart|status`。
+### Windows / WSL deployment
+
+Run the ordinary stdio MCP on the host that owns the visible browser and
+`user_data/chrome_profile`:
+
+```powershell
+.\.venv\Scripts\python.exe -B run_mcp_stdio.py
+```
+
+A WSL client may reach that process through an independently installed
+`win-wsl-mcp-bridge`: register the command above as id `taobao`, then configure
+the client to run `win-wsl-mcp-wsl connect taobao`. This repository intentionally
+ships no TCP relay, listener, scheduled-task launcher, or fixed bridge port. See
+`docs/operations/MCP_RUNBOOK.md` and `dsh/cordis.patch.yml.example`.
 
 ## First-run login (once per session)
 `taobao_session(action=login)` → 打开可见 Chrome → 手机扫 QR → 会话持久在 `user_data/`,

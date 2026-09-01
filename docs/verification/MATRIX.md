@@ -1,44 +1,48 @@
 # Verification matrix
 
-## Defaults and boundaries
+## Defaults
 
-- Default network: offline / live-approved-only
-- Default production write: forbidden
-- Default data: synthetic / fixture / sanitized
-- Supported verification platforms: Python 3.11+ on WSL (offline), Windows host (live bridge)
+- Default network: offline.
+- Default production/account mutation: forbidden.
+- Default data: synthetic, fixture, or sanitized.
+- Browser login/crawl is never part of repository regression tests.
 
-## Command authorities
+## Core commands
 
-| Check family | Command/config source | Working directory | Expected evidence |
-|---|---|---|---|
-| Syntax | `.venv/bin/python -m py_compile server.py tools/*.py` | repo root | exit 0 |
-| Offline tests | `.venv/bin/python -m pytest -q` | repo root | pass count, 0 failures |
-| Bridge structure guards | `pytest tests/test_bridge_architecture.py tests/test_windows_bridge_scripts.py -q` | repo root | pass |
-| Git safety | `.venv/bin/python verify_git_safety.py` | repo root | "Git safety checks passed" |
-| Live bridge probe | `python3 tools/mcp_probe.py` | repo root | initialize/tools/list/tools/call ok, idle-ok |
-| Bridge health | `tools/wsl_bridge_ctl.sh status` | repo root | "bridge reachable" |
+```bash
+PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m py_compile \
+  server.py run_mcp_stdio.py configure_codex.py tools/mcp_probe.py \
+  dsh/build_runtime_prompt_companion.py
+PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -p no:cacheprovider -q
+PYTHONDONTWRITEBYTECODE=1 .venv/bin/python dsh/build_runtime_prompt_companion.py --check
+PYTHONDONTWRITEBYTECODE=1 .venv/bin/python verify_git_safety.py
+```
 
 ## Change matrix
 
-| Change type/scope | Fast check | Required checks | Broader trigger | External risk/cost |
-|---|---|---|---|---|
-| Documentation only | markdown review | none | generated reference changed | 0 |
-| Internal logic (parsers) | py_compile | matching `tests/test_*.py` | shared boundary (models) | 0 |
-| MCP tool/API change | py_compile + schema | `tests/test_tools.py`, contract tests | release/compat | low |
-| Bridge/transport change | py_compile + structure guards | `tools/mcp_probe.py` live | client compat matrix | network/live |
-| Config/anti-risk change | `taobao_config` unit | `tests/test_config.py` | production pacing caps | low |
+| Change | Required offline evidence | Broader condition |
+|---|---|---|
+| MCP schema/handler | syntax + tool/contract tests | external client check when compatibility changes |
+| Parser/extraction | matching parser fixtures/tests | live selector work only when separately approved |
+| Browser/session | browser/config tests | human-visible target-host check only when approved |
+| Stdio entry | `test_stdio_architecture`, runtime-prompt tests, `tools/mcp_probe.py` | target-host probe |
+| DSH companion | builder `--check`, runtime-prompt tests | external-cwd model visibility |
+| External bridge config | this repo's DSH example/static guard | bridge project's own doctor/registry/lifecycle suite |
+| Retired relay history | link/banner review | no executable path may return |
 
-## Live, destructive, and costly checks
+## Negative relay guard
 
-| Check | Environment/data | Approval | Budget/stop condition | Cleanup/rollback |
-|---|---|---|---|---|
-| `taobao_session(action=login)` | Windows real Chrome | human QR scan | 180s login window | none (profile persists) |
-| `taobao_cart(action=add, confirm=true)` | real Taobao cart | explicit `confirm=true` | single SKU proof | exact-sku rollback |
-| `taobao_message(action=reply, confirm=true)` | real seller chat | per-message human OK | one message | none |
-| Bridge restart | Windows engine | human OK | `tools/wsl_bridge_ctl.sh restart` | force-restart runbook |
+Current source and documentation, excluding `docs/history/`, must not reference or
+restore `mcp_tcp_bridge.py`, `bridge_server.py`, `mcp_bridge_entry.sh`,
+`wsl_bridge_ctl.sh`, `tools/windows`, port 8765, or `TaobaoMCPBridge`.
 
-## Evidence and incomplete verification
+## Live gates
 
-Report commands/checks actually run, scope, environment, result, and artifact. For
-skipped/failed checks, record reason and remaining risk; never turn an unrun check
-into a pass.
+- `taobao_session(action=login)` requires a human QR window and is not an offline test.
+- Cart additions, seller replies, config writes, and any other account mutation
+  require their schema-defined confirmation.
+- Payment, checkout, address selection, captcha bypass, and destructive cleanup
+  are never regression checks.
+
+Record commands actually run, scope, environment, results, and skipped evidence.
+Never describe an unexecuted or external deployment check as passed.

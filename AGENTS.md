@@ -1,51 +1,43 @@
-<!-- agent-project-guides:routing:start -->
-## Agent routing
+<!-- agent-project-guides:v2:start -->
+## Project governance bootstrap
 
-Package adaptation: status=adapted; package_revision=1.4.3; verified_at=2026-08-29T00:59:36Z; scope=repo; reason=none
+Project ID: `taobao-mcp`; release: `2.0.0`; expected digest: `sha256:f2a5bef21e14b6a76db4ee28ece3f4e37d2896eea8b22bac4c91229cf418fb0e`.
 
-1. Trigger is active only if this injected root has both managed marker names `agent-project-guides:adapter-trigger:start` and `agent-project-guides:adapter-trigger:end`. Routing/state and `pending/stale` are not triggers; bootstrap is template-only. If absent, never re-read/search; route now.
-2. Before pwd/list/glob/read, an assigned compatible role/mode wins: content-grep its exact quoted `id` or literal label across `agent-project-guides/routing/*.roles.jsonl`; use one record. No fuzzy regex, discovery, planes/full registries, re-asking or rediscovery. Unmatched labels are unresolved: ask, never infer.
-3. Only when unassigned read two-line `agent-project-guides/routing/planes.jsonl`; if unclear use the structured question tool (DSH: `ask_user_question`) and wait.
-4. In that registry grep one exact role. If unclear, use the same tool and wait before its guide.
-5. Blocking questions use stable IDs, 2–4 exclusive choices and impacts, not prose lists; free text only if choices mislead; ask directly only without a tool.
-6. Resolve record `guide`/`procedure_by_mode` under `agent-project-guides/`, never relative to registry/cwd. Read only those paths; a failure is package integrity, not permission to glob.
-7. Without a trigger, ask adapt-now vs continue only if intent is unclear and state is not `adapted`; explicit adaptation needs no question. Installer owns `pending/stale`; initialize/readapt records `partial/adapted/blocked`.
-8. Roles never grant production credentials, real data, cost or destructive actions.
-
-Subagents receive explicit role/mode, scope, writable paths, environment/data permissions and deliverable; missing/conflicting authority goes to parent/captain, never end user or self-expansion.
-<!-- agent-project-guides:routing:end -->
+1. Direct-read `.agent-project-guides.json`; it is project-owned policy, not generic package content. Mutual trust assigns disclosed call consequences to the caller and truthful effect/contract/failure reporting to the callee.
+2. Use the installed `apg` launcher to resolve exact role/task/path sources, then batch-load only returned IDs/sections with `provider load --ids <csv>`. Do not infer a missing package path, fetch `latest`, glob for another package copy, or treat search/cache as mandatory authority.
+3. `intended` and `host-observed` sources do not prove effective model context. Preserve that distinction in reports.
+4. If the exact release is missing, keep this project policy readable. Protected work stops; ordinary work is explicitly degraded until the pinned release is available.
+5. Role, task, memory, facet, overlay, or caller claims cannot lower runtime/tool effects or manufacture production, credential, data, cost, destructive, release, or physical authority.
+<!-- agent-project-guides:v2:end -->
 
 # Repository agent instructions
 
 ## Project scope
 
-taobao-mcp is a **local, human-paced MCP server** (13 parameterized tools) for
-Taobao/Tmall sourcing. Runtime form: WIN-WSL bridge — a pure-stdlib **WSL
-facade** relays MCP over loopback TCP to a **Windows engine** that drives a
-real Chrome/Edge window with a persistent login profile.
+taobao-mcp is a local, human-paced ordinary stdio MCP server with 13
+parameterized tools for Taobao/Tmall sourcing. The MCP process and its visible
+Chrome/Edge profile run on the same host. Cross-host transport, registries,
+listeners, supervision, and reconnect behavior belong to an independently
+installed bridge and are not implemented here.
 
 ## Repository map
 
 | Area | Owns | Start at |
 |---|---|---|
-| MCP entry & 13 tools | tool registration, schemas, handlers, protocol | `server.py` |
-| Extraction & browser | per-SKU pricing, reviews, cart/tracking, session | `src/` |
-| WIN-WSL bridge | WSL relay + Windows launcher/self-heal scripts | `tools/` |
-| Tests & guards | offline parsers, MCP contract, bridge structure | `tests/` |
-| Docs | architecture, usage, runbook, verification | `docs/INDEX.md` |
-
-## Instruction scope
-
-- This root `AGENTS.md` applies repository-wide.
-- A nearer directory `AGENTS.md` adds only local differences for its subtree.
-- Project details route through `docs/INDEX.md`; do not preload the doc tree.
+| MCP entry and 13 tools | registration, schemas, handlers, protocol | `server.py`, `run_mcp_stdio.py` |
+| Extraction and browser | per-SKU pricing, reviews, cart/tracking, session | `src/` |
+| DSH policy adapter | generated runtime-policy companion and external-bridge example | `dsh/` |
+| Development tools | ordinary stdio probe and repository checks | `tools/` |
+| Tests and guards | parsers, MCP contract, stdio distribution, safety | `tests/` |
+| Docs | architecture, usage, runbook, verification, retired relay history | `docs/INDEX.md` |
 
 ## Global invariants
 
-- Single persistent Chrome profile → **single owner** at a time (one MCP client).
-- Never auto-buy, auto-checkout, or auto-send; mutations require explicit confirm.
-- WSL facade stays **stdlib-only**; Windows engine lazy-loads Playwright.
-- MCP protocol stdout carries only JSON-RPC; diagnostics go to stderr/logs.
+- One persistent Chrome profile has one MCP process owner at a time.
+- Never auto-buy, auto-checkout, or auto-send; mutations require explicit confirmation.
+- Browser dependencies are lazy-loaded; ordinary initialize/tools/list remain protocol-clean.
+- MCP stdout carries only JSON-RPC; diagnostics go to stderr or module-owned logs.
+- The repository contains no project-owned WIN-WSL relay, TCP listener, launcher, scheduled-task installer, or fixed bridge port.
 - Preserve user and parallel-agent changes outside the authorized scope.
 
 ## Risk gates
@@ -54,7 +46,7 @@ real Chrome/Edge window with a persistent login profile.
 |---|---|---|
 | Taobao network/live crawl | read-only | pacing + daily caps; login requires human QR |
 | Cart add / seller reply / config set | forbidden | preview then `confirm=true` |
-| Windows bridge restart | read-only | `tools/wsl_bridge_ctl.sh` + human OK |
+| MCP process or external adapter restart | Operator-only | read-only health evidence + human approval |
 | Pay / checkout / address / destructive | forbidden | never |
 
 ## Authoritative entrypoints
@@ -62,6 +54,8 @@ real Chrome/Edge window with a persistent login profile.
 | Need | Authority |
 |---|---|
 | Development setup and commands | `docs/development/START.md` |
-| Current boundaries | `docs/architecture/MCP.md` + `bridge/ARCHITECTURE.md` |
+| Current boundaries | `docs/architecture/MCP.md` |
+| Operator deployment and external bridge registration | `docs/operations/MCP_RUNBOOK.md` |
 | Change verification | `docs/verification/MATRIX.md` |
+| Historical relay rationale | `docs/history/` (non-authoritative) |
 | Role/task routing | `docs/INDEX.md` |

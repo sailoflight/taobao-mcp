@@ -2,78 +2,72 @@
 
 Status: verified
 Scope: repository
-Evidence: `server.py` (13 tools), `src/` parsers, `tools/` bridge, `tests/`
+Evidence: `server.py`, `run_mcp_stdio.py`, `src/`, `tests/`
 
 ## System context
 
-Implemented capability: a single-tenant MCP server that finds Taobao/Tmall
-products, reads per-SKU prices and variant-linked reviews, stages cart lines,
-tracks orders, and drafts seller messages — all human-paced, no auto-buy/auto-send.
-Actors: WSL agents (DSH/Codex) via stdio; Windows host runs the real Chrome
-engine. Exclusions: payment, checkout, address selection, forwarding/logistics.
+The repository implements a single-tenant ordinary stdio MCP that finds
+Taobao/Tmall products, reads per-SKU prices and reviews, stages confirmed cart
+lines, tracks orders, and handles confirmed seller messages. Payment, checkout,
+address selection, and autonomous sending are excluded.
+
+The MCP process and its visible Chrome/Edge profile run on the same host.
+Cross-host transport is optional deployment infrastructure supplied by an
+independently installed bridge. This repository owns no cross-host relay,
+listener, registry, service launcher, scheduled task, or fixed port.
 
 ## Runtime topology
 
-| Unit/process/package | Responsibility | Lifecycle owner | Communicates through |
-|---|---|---|---|
-| WSL MCP facade | stdio↔TCP relay, complete MCP forwarding | WSL agent spawns it | stdio (client) → loopback TCP |
-| Windows bridge | spawn `run_mcp_stdio.py`, single-client lock | Windows (persistent) | loopback TCP |
-| Windows MCP engine | 13 tools, dispatch, browser session | Windows persistent | stdio child of bridge |
-| Chrome/Edge engine | real browser + persistent profile | Windows engine | Playwright |
-
-Detailed WIN-WSL mapping: see `bridge/ARCHITECTURE.md`.
-
-## Module boundaries
-
-| Module | Owns | Does not own | Entrypoint | Contract |
-|---|---|---|---|---|
-| `server.py` | tool registration/schemas/handlers | parsing/browser details | `server.py` | tool schemas |
-| `src/extract/` | search/product/reviews/orders/… parsers | protocol | `src/extract/*.py` | `src/models.py` |
-| `src/browser/` | Chrome session, pacing, scroll | business rules | `src/browser/session.py` | config |
-| `tools/` | WSL relay + Windows launcher/self-heal | tool logic | `tools/*` | `tools/wsl_bridge_ctl.sh` |
-
-## Dependency direction
-
 ```text
-MCP client -> mcp_tcp_bridge.py -> bridge_server.py -> server.py -> src/* -> Playwright/Chrome
+MCP client or external adapter
+  -> stdin/stdout
+  -> run_mcp_stdio.py
+  -> server.py (13 tools + canonical runtime policy)
+  -> src/*
+  -> Playwright -> visible Chrome/Edge + persistent user_data profile
 ```
 
-- Allowed: WSL facade → Windows engine; server → src extraction; src → browser.
-- Forbidden: Windows engine importing WSL-only deps; src modules owning the MCP protocol.
+| Unit | Responsibility | Lifecycle owner |
+|---|---|---|
+| `run_mcp_stdio.py` | force stdio mode and exec the server | MCP client/adapter |
+| `server.py` | identity, policy, 13 schemas/handlers, process-wide serialization | MCP process |
+| `src/extract/` | search/product/review/order parsers | business module |
+| `src/browser/` | browser session, pacing, scroll, persistent profile | MCP process |
+| `dsh/` | generated runtime-policy companion and external-bridge client example | client compatibility |
 
-## Trust and side-effect boundaries
+## Boundaries
 
-| Boundary/action | Input identity/trust | Effect | Gate/failure rule |
-|---|---|---|---|
-| MCP client → WSL facade | local stdio | read/forward | protocol-clean stdout |
-| WSL → Windows TCP | loopback only | read/forward | bind 127.0.0.1 only |
-| Taobao crawl | logged-in profile | read/write favorites/cart | pacing + daily caps + confirm |
-| Cart add / message send | confirmed by human | write | preview then `confirm=true` |
+- `server.py` may call `src/*`; extraction/browser modules do not own MCP protocol.
+- Browser/Playwright imports remain lazy so initialize, tools/list, and local
+  validation do not require a launched browser.
+- stdout contains JSON-RPC only; diagnostics use stderr or module-owned logs.
+- One profile has one MCP process owner. A deployment must not launch two
+  ordinary MCP processes against the same `user_data` directory.
+- An external bridge may supervise this command, but command/registry/link
+  semantics belong to that bridge and are not duplicated here.
 
-## Data and configuration ownership
+## Trust and effects
 
-| Item | Authority/owner | Lifecycle | Consistency/retention rule |
-|---|---|---|---|
-| `config.toml` | repo | tracked | defaults |
-| `config.local.toml` | machine | untracked | machine overrides |
-| Chrome profile `user_data/` | Windows engine | persistent | never commit |
-| `output/` exports/logs | local | untracked | never commit |
+| Action | Effect | Gate |
+|---|---|---|
+| initialize/tools/list/status | local/protocol or read-only state | no business mutation |
+| Taobao crawl | account/network reads; some flows may touch favorites | pacing, caps, human verification |
+| Cart add / seller reply | account write | preview plus explicit confirmation |
+| Payment / checkout / address | prohibited | never implemented |
 
-## Failure and recovery model
+## Data ownership
 
-Bridge restart/self-heal is windowless (`tools/wsl_bridge_ctl.sh`, `tools/windows/`).
-Client reconnect does not reset the persistent browser profile. See
-`../operations/MCP_RUNBOOK.md` and `DSH_WSL_BRIDGE.md`.
+| Item | Owner | Retention |
+|---|---|---|
+| `config.toml` | repository defaults | tracked |
+| `config.local.toml` | MCP host | ignored, preserve across deploys |
+| `user_data/` | browser profile on MCP host | ignored, single owner, preserve |
+| `output/` | exports/logs/caches | ignored, preserve as required |
+| runtime policy | `src/runtime_prompt.py` + generated `dsh/` companion | one revisioned generation |
 
-## Invariants
+## History
 
-- WSL facade is stdlib-only and never holds Windows state.
-- Windows engine lazy-loads Playwright (no GUI dep at import).
-- One persistent Chrome profile has a single owner at a time.
-- MCP stdout carries only JSON-RPC; diagnostics go to stderr/logs.
-- Mutations require explicit human confirmation.
-
-## Unknowns and decisions
-
-- Unknown: none blocking current scope.
-- Decision: see `DSH_WSL_BRIDGE.md` (bridge rationale) and `bridge/ARCHITECTURE.md`.
+The retired project-owned WIN-WSL relay rationale is preserved under
+`docs/history/`. Those pages are non-authoritative and their commands are
+unsupported. Current deployment and recovery authority is
+`docs/operations/MCP_RUNBOOK.md`.
