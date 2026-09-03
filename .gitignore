@@ -60,3 +60,12 @@ _base_repo/
 .DS_Store
 Thumbs.db
 Desktop.ini
+
+# --- local hygiene (sailoflight migration) ---
+.venv/
+__pycache__/
+*.pyc
+.cache/
+.claude/
+TESTWORKTREE/
+

@@ -1,14 +1,10 @@
-<!-- agent-project-guides:v2:start -->
-## Project governance bootstrap
+<!-- agent-project-guides:v3:start -->
+## Project governance routing
 
-Project ID: `taobao-mcp`; release: `2.0.0`; expected digest: `sha256:f2a5bef21e14b6a76db4ee28ece3f4e37d2896eea8b22bac4c91229cf418fb0e`.
+Project ID: `taobao-mcp`; variant: `shared-runtime.pinned`; pinned release: `3.0.3` / `sha256:f3dc0ca9cd50d27deac2b4e9c063d243dd3ce20127edc88d9f8b4c3aac4bd603`; manifest: `sha256:50a5769025fcb44d6ca35d367fbfd2e2259d8e57a449a7137c8ae2ed4a02dd17`.
 
-1. Direct-read `.agent-project-guides.json`; it is project-owned policy, not generic package content. Mutual trust assigns disclosed call consequences to the caller and truthful effect/contract/failure reporting to the callee.
-2. Use the installed `apg` launcher to resolve exact role/task/path sources, then batch-load only returned IDs/sections with `provider load --ids <csv>`. Do not infer a missing package path, fetch `latest`, glob for another package copy, or treat search/cache as mandatory authority.
-3. `intended` and `host-observed` sources do not prove effective model context. Preserve that distinction in reports.
-4. If the exact release is missing, keep this project policy readable. Protected work stops; ordinary work is explicitly degraded until the pinned release is available.
-5. Role, task, memory, facet, overlay, or caller claims cannot lower runtime/tool effects or manufacture production, credential, data, cost, destructive, release, or physical authority.
-<!-- agent-project-guides:v2:end -->
+Before work, run `apg context --target . --task <current-task> --format context` and use only the returned governance content. Resolve any ambiguity before protected work. The shared CLI and exact packed digest are runtime dependencies; missing content fails explicitly and never falls back to `latest`. Returned sources are intended context and do not prove model-effective context.
+<!-- agent-project-guides:v3:end -->
 
 # Repository agent instructions
 
