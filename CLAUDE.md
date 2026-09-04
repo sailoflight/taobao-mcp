@@ -7,9 +7,10 @@
 ## 0. Current Status & Operating Mode  *(updated 2026-06-30)*
 
 > ⚠️ **状态指针(2026-09-04 复核):** 2026-08-19 的工具面重构已收口 — 代码现与 §3 的 13 个参数化
-> 工具一致(39→13, main 101 提交, 树干净, 全量测试 409 passed / 1 skipped)。执行记录与当前仍开放项
-> (A2 三模式近似搜索仅设计稿; PUBLIC_DEPLOYMENT 未部署待用户授权)以 REFACTOR_PLAN.md / NOTES.md /
-> PUBLIC_DEPLOYMENT.md 为准, 本节以下为 2026-06 时的基线状态描述。
+> 工具一致(39→13, main 102 提交, 树干净, 全量测试 423 passed / 1 skipped)。执行记录与当前仍开放项
+> (A2 三模式近似搜索 2026-09-04 起以 debug action=a2 落地初版, 实机冒烟待人工; PUBLIC_DEPLOYMENT
+> 未部署待用户授权)以 REFACTOR_PLAN.md / NOTES.md / PUBLIC_DEPLOYMENT.md 为准, 本节以下为 2026-06
+> 时的基线状态描述。
 
 > **✅ STATUS: v1.0 — built, audited, locked (2026-06-04).** All 7 phases are implemented and tagged (`phase-0-done … phase-6-done`); the base repo `JeremyDong22/taobao_mcp` was cloned to `_base_repo/` for recon (see `NOTES.md`). **Two forensic-audit rounds (5 detectives)** then found and FIXED **4 CRITICAL + 9 HIGH + ~25 MEDIUM/LOW** bugs — including: single-SKU pricing, `¥1,299`→`1.0`, the search price-pick (was grabbing the struck-through `优惠前` price), variant↔review cross-contamination, and the big one — **reading 参数 specs + variant-linked reviews straight from the embedded HTML** (`componentsVO`), which removed a redundant second navigation, an empty-specs gap, and a swallowed-captcha. **80 tests pass; live e2e green.** What exists: the FastMCP server (**13 parameterized tools** — taobao_session, taobao_search, taobao_product, taobao_compare, taobao_cart, taobao_favorites, taobao_tracking, taobao_dossier, taobao_message, taobao_inventory, taobao_config, taobao_debug, taobao_export), extraction (per-SKU prices, variant-linked reviews, search), xlsx/markdown output, the sourcing Skill + supplier templates, hardening + evals. The "live co-browse" mode (below) remains a manual fallback.
 >

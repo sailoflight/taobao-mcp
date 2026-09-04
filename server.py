@@ -762,7 +762,7 @@ async def taobao_dossier(
 ))
 @_serialized
 async def taobao_debug(
-    action: str,                       # detail|sku_structure|sweep_price|miid_price|recommend|entry_probe|home|collect|favorite|watch|activity|probe_reviews|footmark|qa_expand
+    action: str,                       # detail|sku_structure|sweep_price|miid_price|recommend|entry_probe|a2|home|collect|favorite|watch|activity|probe_reviews|footmark|qa_expand
     product_url_or_id: str = "",
     target: str = "特大号白色",         # sku_structure
     target_chip: str = "特大号",        # miid_price
@@ -772,21 +772,33 @@ async def taobao_debug(
     start_url: str = "https://detail.tmall.com/item.htm?id=755873641229",  # watch
     limit: int = 12,                   # activity
     days: int | None = None,           # activity (None=全部/0=今天/1=近2天)
+    a2_seeds: str = "",                # a2: 逗号分隔种子商品 id/URL(queue: JSON 数组套数组)
+    a2_mode: str = "auto",             # a2: auto=全自动 | interactive=人机协同 | queue=AI自驱队列
+    a2_budget: int | None = None,      # a2: 本轮访问页数(默认 auto 6 / interactive 3 / queue 每组 3; 全程≤15)
+    a2_state: str = "",                # a2 interactive: 上轮返回的 state(JSON, 续跑回传)
 ) -> str:
     """调试诊断(一个工具 + action 参数, [DEBUG] 观测/诊断为主; collect/favorite 会临时收藏再取消
     无残留, watch 持续监听 — 有状态, 非纯只读).
 
-    参数: action(必填)=detail|sku_structure|sweep_price|miid_price|home|collect|favorite|watch|activity|probe_reviews|footmark|qa_expand ·
+    参数: action(必填)=detail|sku_structure|sweep_price|miid_price|recommend|entry_probe|a2|home|collect|favorite|watch|activity|probe_reviews|footmark|qa_expand ·
       product_url_or_id(detail/sku_structure/sweep_price/miid_price/favorite/probe_reviews/footmark/qa_expand 时) · target(sku_structure 目标芯片) ·
       target_chip(miid_price 目标变体) · max_chips(sweep_price 扫描上限) · target_pid(collect 可选) ·
       product_url_or_id(recommend/entry_probe 时: recommend=取该商品详情页同类推荐, A2游走原语;
       entry_probe=一次性诊断三种粗查进入方式(entry=url|recommend|search)的详情/推荐/评论/问答/优惠价) ·
+      a2_seeds/a2_mode/a2_budget/a2_state(a2 时: 详见下方"a2 近似搜索游走") ·
       watch_seconds/start_url(watch 监听器: 人工操作时记录多页/tab URL+mi_id; start_url 仅允许
       taobao.com/tmall.com 及子域的 HTTPS — 其它一律拒绝) · limit/days(activity: 事件数/范围 None全部 0今天 1近2天)。
+    a2 近似搜索游走(搜索页 s.taobao.com/search 触发验证码 → 用详情页同类推荐近似搜索):
+      a2_seeds=逗号分隔起始商品 id/URL(interactive 续跑时=用户本轮选定的延伸方向, 与 a2_state 同传;
+      queue 时=JSON 数组套数组, 每组一队如 [["PETG种子"],["ABS种子"]]) · a2_mode=auto(全自动, 默认)/
+      interactive(人机协同, 每轮走 a2_budget 页后返回候选+state, 由用户定方向续跑)/
+      queue(AI自驱队列, 每组跑一段短全自动后跨组去重合并) · a2_budget=本轮访问页数(默认 auto 6 /
+      interactive 3 / queue 每组 3; 全程上限 15) · a2_state=interactive 上轮返回的 state(JSON)。
+      只读粗查游走(不点型号/不进收藏链路), 页间拟人节奏, 验证码→人工交接中止。
     probe_reviews: 实证评论渲染 — 分别探测 普通页 vs 收藏链路 mi_id 弹窗页 是否渲染评论区(诊断评论抓取路径)。
     footmark: 足迹渠道诊断 — 打开足迹页点第一张卡, 校验打开的 id 是否为目标(双机制第一棒)。
     qa_expand: 问答展开机制诊断 — 数问答卡, 点"查看全部问答", 报告是否开新页/更多卡/抽屉。
-    [DEBUG] 仅诊断/观测; 收藏链路调试会收藏再取消(无残留)。Example: {"action": "activity"} / {"action": "probe_reviews", "product_url_or_id": "862892097837"} / {"action": "miid_price", "product_url_or_id": "862892097837"}
+    [DEBUG] 仅诊断/观测; 收藏链路调试会收藏再取消(无残留)。Example: {"action": "activity"} / {"action": "probe_reviews", "product_url_or_id": "862892097837"} / {"action": "miid_price", "product_url_or_id": "862892097837"} / {"action": "a2", "a2_seeds": "990615757513,736546459871", "a2_mode": "queue", "a2_budget": 3}
     """
     if await _ensure_logged_in() != "logged_in":
         raise NotLoggedInError()
@@ -912,8 +924,24 @@ async def taobao_debug(
 
         return json.dumps(await probe_qa_expand(product_url_or_id), ensure_ascii=False, indent=2)
 
-    return (f"未知 action={action}; 支持 detail/sku_structure/sweep_price/miid_price/"
-            "home/collect/favorite/watch/activity/probe_reviews/footmark/qa_expand")
+    if act == "a2":
+        from src.extract.a2 import a2_queue, a2_walk
+
+        mode = str(a2_mode or "").strip().lower()
+        state = None
+        if a2_state and a2_state.strip():
+            try:
+                state = json.loads(a2_state)
+            except ValueError as exc:
+                raise ValueError(f"a2_state 不是合法 JSON: {exc}") from exc
+        if mode == "queue":
+            res = await a2_queue(a2_seeds or "", budget_per_group=int(a2_budget or 3))
+        else:
+            res = await a2_walk(a2_seeds or "", mode=mode, budget=a2_budget, state=state)
+        return json.dumps(res, ensure_ascii=False, indent=2)
+
+    return (f"未知 action={action}; 支持 detail/sku_structure/sweep_price/miid_price/recommend/"
+            "entry_probe/a2/home/collect/favorite/watch/activity/probe_reviews/footmark/qa_expand")
 
 
 @mcp.tool(annotations=ToolAnnotations(

@@ -97,7 +97,7 @@ ships no TCP relay, listener, scheduled-task launcher, or fixed bridge port. See
 | `taobao_inventory` | action=export(用缓存, 零流量) / refresh(实机重抓): 全历史含运成本库存表(xlsx, embed_images 缩略图或 =IMAGE). |
 | `taobao_export` | 通用导出 type=compare/cart/favorites/tracking/dossier/product, filename/title, format=md(默认)/xlsx(仅 compare). |
 | `taobao_config` | action=get(当前生效配置) / set(改 key=section.key, 首次 confirm=false 预览+人工提醒, confirm=true 生效; 写 gitignored 覆盖文件). |
-| `taobao_debug` | 调试诊断 action=detail/sku_structure/sweep_price/miid_price/home/collect/favorite/watch(监听器)/activity(会话活动遥测)/probe_reviews(评论渲染诊断)/footmark(足迹渠道诊断)/qa_expand(问答展开诊断). |
+| `taobao_debug` | 调试诊断 action=detail/sku_structure/sweep_price/miid_price/recommend(A2游走原语)/entry_probe(三种粗查进入方式诊断)/a2(近似搜索三模式: auto 全自动 / interactive 人机协同 / queue AI 自驱队列)/home/collect/favorite/watch(监听器)/activity(会话活动遥测)/probe_reviews(评论渲染诊断)/footmark(足迹渠道诊断)/qa_expand(问答展开诊断). |
 
 ## The Skill
 `skills/taobao-sourcing/SKILL.md` = 选品剧本(search→你挑→fetch→翻译→评论分层→单价归一→对比→export→风控提示);

@@ -6,7 +6,8 @@
 > ③部署 + 实机冒烟(已执行, /mnt/c 全同步, 7/7 绿, 修复 orders.py load_config 真 bug);
 > ④每功能实现提交一次(已执行, 见下方步骤 git log)。
 > **"全部完成"的范围 = 39→13 工具重构本身(2026-08-19)。仍开放、不属该范围的项**:
-> ① A2 三模式近似搜索仅设计稿未实施(见下「推荐近似搜索(A)」节);
+> ① ~~A2 三模式近似搜索仅设计稿~~ → **已落地初版(2026-09-04): 三模式全自动/人机协同/AI自驱队列经
+> `taobao_debug action=a2` 接线, src/extract/a2.py + tests/test_a2.py, 全量测试绿; 实机冒烟待人工在场**;
 > ② PUBLIC_DEPLOYMENT 公共部署未落地(占位 URL、无 .env/.mcp.json、.app.json 空 — 等待用户授权,
 > 见 PUBLIC_DEPLOYMENT.md)。(2026-09-04 复核)
 
@@ -105,10 +106,13 @@
 
 ## 推荐近似搜索(A) 设计定稿(2026-08-20, 用户定架构)
 
-> ⚠️ **实施状态(2026-09-04 复核): 设计稿, 未实施。** 三模式(全自动/人机协同/AI 自驱队列)与
-> 多轮游走(budget/per_node/min_score/全局去重池/轨迹输出)均**未落地**; 已实现并落地者仅为**单页原语**:
-> `extract_recommendations`(desc.py, 挂 debug action=recommend)、`probe_entry`(desc.py, 挂 debug
-> action=entry_probe)、排序/过滤 `rank_recommendations`(src/extract/recommend.py)及对应单测。
+> ✅ **实施状态(2026-09-04): 三模式已落地初版** — `src/extract/a2.py`(`a2_walk` 全自动/人机协同 +
+> `a2_queue` AI 自驱队列 + 纯函数 fold/rank/pick_frontier/merge), 挂 `taobao_debug action=a2`
+> (参数 a2_seeds/a2_mode/a2_budget/a2_state), tests/test_a2.py 覆盖(全量 423 passed / 1 skipped,
+> main 102 提交)。默认值按初稿: per_node=8、min_score=6、budget auto 6/interactive 3/queue 每组 3,
+> 全程上限 15; 人机协同经 state 续跑(用户每轮选延伸方向, 不重访)。单页原语仍为:
+> `extract_recommendations`(desc.py, action=recommend)、`probe_entry`(desc.py, action=entry_probe)。
+> **实机冒烟待人工在场**(需登录会话; 每页拟人节奏 + captcha 人工交接)。
 
 > 背景: 搜索页(s.taobao.com/search)当前每次触发验证码, 但详情页(coarse/fine)零验证码。
 > 方案: 用"详情页同类推荐"近似替代搜索, 横向找同类候选。
