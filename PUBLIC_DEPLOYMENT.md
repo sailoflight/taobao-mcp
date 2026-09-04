@@ -1,5 +1,9 @@
 # Public deployment
 
+> **状态(2026-09-04 复核): 未部署。** 仓库内无 `.env`/`.mcp.json`(仅有 `.env.public.example`,
+> 其中 `MCP_PUBLIC_URL`/OAuth 均为 `example.com` 占位); `.app.json` 保持 `{"apps": {}}` 空。
+> 空 apps 是刻意为之(见 §5 末段) — 需用户显式授权填入真实注册 connection ID 后, 才按本文 §1–§5 落地。
+
 This project supports two independent MCP transports from the same `server.py`:
 
 - Local Codex: stdio through `.mcp.json` (the default).

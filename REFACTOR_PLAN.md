@@ -5,6 +5,10 @@
 > ②activity_report 保留并入 debug(已并入 taobao_debug action=activity);
 > ③部署 + 实机冒烟(已执行, /mnt/c 全同步, 7/7 绿, 修复 orders.py load_config 真 bug);
 > ④每功能实现提交一次(已执行, 见下方步骤 git log)。
+> **"全部完成"的范围 = 39→13 工具重构本身(2026-08-19)。仍开放、不属该范围的项**:
+> ① A2 三模式近似搜索仅设计稿未实施(见下「推荐近似搜索(A)」节);
+> ② PUBLIC_DEPLOYMENT 公共部署未落地(占位 URL、无 .env/.mcp.json、.app.json 空 — 等待用户授权,
+> 见 PUBLIC_DEPLOYMENT.md)。(2026-09-04 复核)
 
 ---
 
@@ -100,6 +104,11 @@
 ---
 
 ## 推荐近似搜索(A) 设计定稿(2026-08-20, 用户定架构)
+
+> ⚠️ **实施状态(2026-09-04 复核): 设计稿, 未实施。** 三模式(全自动/人机协同/AI 自驱队列)与
+> 多轮游走(budget/per_node/min_score/全局去重池/轨迹输出)均**未落地**; 已实现并落地者仅为**单页原语**:
+> `extract_recommendations`(desc.py, 挂 debug action=recommend)、`probe_entry`(desc.py, 挂 debug
+> action=entry_probe)、排序/过滤 `rank_recommendations`(src/extract/recommend.py)及对应单测。
 
 > 背景: 搜索页(s.taobao.com/search)当前每次触发验证码, 但详情页(coarse/fine)零验证码。
 > 方案: 用"详情页同类推荐"近似替代搜索, 横向找同类候选。
