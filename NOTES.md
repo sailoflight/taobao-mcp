@@ -1,7 +1,7 @@
 # NOTES.md — Base Repo Recon (`JeremyDong22/taobao_mcp`)
 
 > ## 📋 系统状态总览(2026-08-18, 打磨 256 轮 / 297 个未 push 提交(目标上限收官))
-> **部署**: 源码在 WSL `/home/lijq/code/taobao-mcp`, 活体部署在 Windows `C:\MCP\taobao-mcp`(经 /mnt/c 访问)。
+> **部署**: 源码在 WSL `/home/user/code/taobao-mcp`, 活体部署在 Windows `C:\MCP\taobao-mcp`(经 /mnt/c 访问)。
 > 每次改动: 本地改 → 单测 → cp 到 /mnt/c → 实机验证 → 分步 git 提交(不 push)。
 >
 > **工具 37 个**(29 正式 + 8 debug): 搜索(search/search_md, 过滤+客户端排序+翻页) · 商品
