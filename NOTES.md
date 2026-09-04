@@ -1,5 +1,10 @@
 # NOTES.md — Base Repo Recon (`JeremyDong22/taobao_mcp`)
 
+> ⚠️ **本文档 = 基线 recon + 轮次开发日志档案(时间顺序存档)。当前规范状态以
+> REFACTOR_PLAN.md 为准**(2026-08-19 收口: 39→13 工具、每功能一提交;2026-09-04 复核:
+> main 101 提交、树干净、全量测试 409 passed / 1 skipped)。紧接其下的
+> "系统状态总览(2026-08-18)"为**重构前快照**(37 工具/297 提交), 已过时, 仅存档。
+
 > ## 📋 系统状态总览(2026-08-18, 打磨 256 轮 / 297 个未 push 提交(目标上限收官))
 > **部署**: 源码在 WSL `/home/user/code/taobao-mcp`, 活体部署在 Windows `C:\MCP\taobao-mcp`(经 /mnt/c 访问)。
 > 每次改动: 本地改 → 单测 → cp 到 /mnt/c → 实机验证 → 分步 git 提交(不 push)。
@@ -26,6 +31,18 @@
 > export_tracking(完整订单号/取件码📦) → fetch_reviews(keyword) → export_full_picture(店铺档案) →
 > activity_report(days)。
 > 存储容器方案: 天鼠特大号(到手¥33.75) + Purable 50#(¥15.9) 已在购物车, 仅入车未付款。
+>
+> **复核注记(2026-09-04, 针对上列旧待办/待核验文字, 处置如下):**
+> - 已知 bug/待办 ①(fetch_reviews 评论抽屉抓取空): **已解决** — 评论改由页面嵌入 componentsVO
+>   读取 + 细查(mi_id)页抽取(见下方轮次与 CLAUDE.md), 无需再走 rate API 逆向。
+> - ② rate API 逆向 / ③ 评论新触发点: **已不再需要**(同上, 由嵌入数据 + mi_id 页路线取代);
+>   相关诊断探针保留在 taobao_debug(probe_reviews / qa_expand / footmark)。
+> - "明日人工核验"(git log / pytest / 冒烟): **已执行** — 见下方轮次(收官轮 198 passed;
+>   REFACTOR 收口后全量测试 233 passed;2026-09-04 复核 409 passed / 1 skipped)。
+> - 文中其余"暂缓/遗留/待验证"文字(rate 接口、specs 独立加载、问答展开等)为各轮当时的决策记录;
+>   凡被后续实现取代者均已由后续轮次收口(评论→嵌入 componentsVO、问答展开 parse_qa、
+>   双机制足迹→收藏);未取代的外部风控事项(如 s.taobao.com/search 验证码)保留,
+>   并在 REFACTOR_PLAN.md「推荐近似搜索(A)」节注明绕行方案。
 
 > Phase 0 documentation of the base repo's **actual** behavior, as cloned to
 > `_base_repo/ (repo root)` (git HEAD `4cdeb50`, "Fix critical bugs causing MCP tool to hang with certain URLs").

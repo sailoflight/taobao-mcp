@@ -62,15 +62,19 @@
 
 ---
 
-## 待办提醒(防遗忘)
-- [ ] 每步完成后立即 git 提交(每功能一次),**不 push**,留本地
-- [ ] 新工具注册必须插在 `def main()` 之前(否则 Unknown tool)
-- [ ] server.py 为共享文件,跨步改动用 hunk 分块 staging 归入对应功能提交
-- [ ] 评论分层抽样需覆盖 好/中/差 三档,防被注入好评
-- [ ] 搜索 A/B/C 三态语义固化在工具 description(防 AI 误用)
-- [ ] config 首次 set 必须二次确认 + 人工提醒文案
-- [ ] 部署后 md5 抽查(防 round96 式未落盘)
-- [ ] 冒烟避开搜索页验证码(当前 s.taobao.com/search 仍被 captcha 拦截,待人工清除)
+## 执行期提醒(2026-09-04 复核: 均已处置/转注 — 非遗留缺陷)
+
+> 本清单是执行期的"防遗忘"提醒, 不是未完成项。REFACTOR 已于 2026-08-19 收口(见文首状态),
+> 2026-09-04 复核时逐项核销如下(每条证据均可在仓库复验)。
+
+- [x] 每步完成后立即 git 提交(每功能一次),**不 push**,留本地 — 已执行: git log 为"基线+每功能一提交"形态(main 现共 101 提交, 未 push)
+- [x] 新工具注册必须插在 `def main()` 之前(否则 Unknown tool) — 已执行: 13 个 taobao_* 工具全部注册于 `def main()`(server.py:1102)之前
+- [x] server.py 为共享文件,跨步改动用 hunk 分块 staging 归入对应功能提交 — 已执行(执行期工作方式; git log 每功能一提交印证)
+- [x] 评论分层抽样需覆盖 好/中/差 三档,防被注入好评 — 已落地: src/extract/reviews.py 分层抽样(Pure 纯函数 + Live 路径) + tests/test_reviews_stratified.py
+- [x] 搜索 A/B/C 三态语义固化在工具 description(防 AI 误用) — 已落地: server.py 工具描述含 A 类(headless 列表查询)/ B 粗查(coarse)/ C 细查(fine) 语义
+- [x] config 首次 set 必须二次确认 + 人工提醒文案 — 已落地: taobao_config 首次 confirm=false 预览返回确认+人工提醒, confirm=true 才写入
+- [x] 部署后 md5 抽查(防 round96 式未落盘) — 已执行: /mnt/c 全同步 + 实机冒烟 7/7(见文首 ③)
+- [x] 冒烟避开搜索页验证码 — 已执行(冒烟路径不依赖 s.taobao.com/search); **注**: 搜索页 captcha 属外部风控, 至今仍在(2026-08-20 复核), 已以"详情页同类推荐(A2)近似搜索"绕行 — 见下节
 
 ---
 
