@@ -39,10 +39,10 @@
 >   相关诊断探针保留在 taobao_debug(probe_reviews / qa_expand / footmark)。
 > - "明日人工核验"(git log / pytest / 冒烟): **已执行** — 见下方轮次(收官轮 198 passed;
 >   REFACTOR 收口后全量测试 233 passed;2026-09-04 复核 409 passed / 1 skipped)。
-> - 文中其余"暂缓/遗留/待验证"文字(rate 接口、specs 独立加载、问答展开等)为各轮当时的决策记录;
->   凡被后续实现取代者均已由后续轮次收口(评论→嵌入 componentsVO、问答展开 parse_qa、
->   双机制足迹→收藏);未取代的外部风控事项(如 s.taobao.com/search 验证码)保留,
->   并在 REFACTOR_PLAN.md「推荐近似搜索(A)」节注明绕行方案。
+> - 文中其余"暂缓/遗留/待验证"文字(rate 接口、specs 独立加载、问答展开、足迹自动化等)为各轮当时的
+>   决策记录, 已**就地逐条标注处置**〔复核 2026-09-04〕(评论→嵌入 componentsVO+细查页、问答展开
+>   parse_qa、双机制足迹→收藏; specs 维持"无嵌入数据优雅不显示"的已知限制);未取代的外部风控事项
+>   (如 s.taobao.com/search 验证码)保留, 并在 REFACTOR_PLAN.md「推荐近似搜索(A)」节注明绕行方案。
 
 > Phase 0 documentation of the base repo's **actual** behavior, as cloned to
 > `_base_repo/ (repo root)` (git HEAD `4cdeb50`, "Fix critical bugs causing MCP tool to hang with certain URLs").
@@ -543,11 +543,11 @@ Our deliverables: (i) a price for **every** SKU via `skuBase`/`sku2info` join; (
 
 ### 打磨轮次 13(评论 bug 定论)
 - **定论**: 商品页 outerHTML 415KB(有完整 skuBase 商品数据, title 正常), 但 **rateContent=0、全文仅 1 处"评价"** — 当前 Tmall SSR **不把评论放入 HTML**, 评论完全走独立加载机制(rate API/新路由)。
-- 结论: fetch_reviews 抽屉抓取修不了(SSR 无评论、抽屉不渲染 innerText), 需反向找 rate API(如 mtop.taobao.rate.detaillist.get)或新 UI 触发。**暂缓**(已用嵌入式预览评论降级, 见轮次11)。
+- 结论: fetch_reviews 抽屉抓取修不了(SSR 无评论、抽屉不渲染 innerText), 需反向找 rate API(如 mtop.taobao.rate.detaillist.get)或新 UI 触发。**暂缓**(已用嵌入式预览评论降级, 见轮次11)。 〔复核 2026-09-04: **已解决** — 评论改由嵌入 componentsVO 读取(见 CLAUDE.md v1.0) + 细查 mi_id 页 parse_reviews 就地抽取(见下方 2026-08-19 轮次), rate API 逆向不再需要。〕
 
 ### 打磨轮次 14(rate API 尝试结论)
 - 尝试用页面 lib.mtop 调评论 API(`mtop.taobao.rate.detaillist.get` / `rateDetail.list` / `detail.getdetail`): 全部 `ABORT::接口异常退出` — 猜的接口名不在 SDK 白名单/参数不符。
-- 结论: 找真评论接口需**网络拦截**(加载评论区时抓 mtop XHR)或**JS bundle 逆向**(搜 rate 接口名)。当前评论区不触发加载, 需先找触发点 — **暂缓**。
+- 结论: 找真评论接口需**网络拦截**(加载评论区时抓 mtop XHR)或**JS bundle 逆向**(搜 rate 接口名)。当前评论区不触发加载, 需先找触发点 — **暂缓**。 〔复核 2026-09-04: **已不再需要** — 评论路线改为嵌入 componentsVO + 细查 mi_id 页, 无需接口逆向; 渲染诊断探针保留在 taobao_debug(probe_reviews)。〕
 - 经验: page.evaluate 只接受单参数(要传 dict); mtop 错误要 JSON.stringify(e) 看 ret。
 
 ### 打磨轮次 15
@@ -665,7 +665,7 @@ Our deliverables: (i) a price for **every** SKU via `skuBase`/`sku2info` join; (
 
 ### 打磨轮次 40(specs 深挖定论)
 - **Tmall 参数表不在嵌入式数据**: 天鼠 res 里 componentsVO 无 prop 类 key, 顶层 params 只是跟踪参数(trackParams/safeParams), item.props=None。"密封"来自型号标签非参数。
-- 结论: 与评论抽屉同类 — Tmall 参数表独立加载(可能详情图/单独 XHR), 非提取 bug。specs 功能对有嵌入数据的商品正常显示, 无数据优雅不显示。**暂缓深挖**(优先级低于已有功能)。
+- 结论: 与评论抽屉同类 — Tmall 参数表独立加载(可能详情图/单独 XHR), 非提取 bug。specs 功能对有嵌入数据的商品正常显示, 无数据优雅不显示。**暂缓深挖**(优先级低于已有功能)。 〔复核 2026-09-04: **维持现设计(已知限制)** — 参数 specs 读嵌入 componentsVO(BASE_PROPS), 有数据显示、无数据商品优雅不显示; Tmall 独立加载参数表未再深挖。〕
 
 ### 打磨轮次 41
 - `taobao_compare_products` 增 `sort_by`('price' 有货最低价升 / 'unit' 最低单价升, 错误行排最后)。买家一眼看最优。
@@ -1474,6 +1474,7 @@ Our deliverables: (i) a price for **every** SKU via `skuBase`/`sku2info` join; (
 - 启示: miid 页可由足迹渠道获得(带 last_time+mi_id), 可能不消耗收藏配额(30/日) —
   中/差评与问答可在该页抽取, 是收藏链路的替代/补充; 自动化可行性待验证
   (footMark 需要先浏览过该商品, last_time 为时间戳参数)。
+   〔复核 2026-09-04: **已验证并落地** — 见下节 2026-08-19「足迹渠道 + 双机制」: auto 通道先足迹、失败退回收藏链路, 实机 miid_from=footmark_click 零配额。〕
 - **天鼠问答最后一条(用户点名)**: "箱子会不会很软,搬家装电器那些,承重怎么样啊"
   → 答 "只能装衣服被子" — 佐证天鼠箱体偏软、仅适合装衣物被子, 不适合承重(电器/易碎),
   与"密封=营销扣盖、非真密封条"一致。
@@ -1490,7 +1491,7 @@ Our deliverables: (i) a price for **every** SKU via `skuBase`/`sku2info` join; (
   可配 footmark/favorite/config。配置 [anti_risk] miid_channel。
 - 实机: fine+with_reviews → miid_from=footmark_click, 配额未耗, 9评论+2问答+23详情图。
 - 提交: c3ea43f(双机制) + 80cb3ba(探针问答结构)。
-- 遗留: 问答卡需展开才见多个回答("查看更多/查看全部问答"按钮 1 个) — 完整问答分页/展开未做, 需要时采集人工数据。
+- 遗留: 问答卡需展开才见多个回答("查看更多/查看全部问答"按钮 1 个) — 完整问答分页/展开未做, 需要时采集人工数据。 〔复核 2026-09-04: **已解决** — 见下节 2026-08-19「问答展开」: parse_qa 展开已实现(点"查看全部问答"→抽屉抽取→Esc 收), 实机 9 去重问答。〕
 
 ### 双机制兜底路径验证(2026-08-19)
 - 用未浏览商品(好居乐 932185928162)测 auto 通道: 足迹点第一张(天鼠, 打开非目标 id=862892097837,
