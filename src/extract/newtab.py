@@ -9,6 +9,8 @@ Ctrl+Click(前台新标签, 与右键→新标签同一链接导航管道; 退�
 probe_entry 完全相同的 ENTRY_PROBE_JS 信号 → 与裸 goto 行可直接对比。
 
 只读、零写; 单标签卫生(弹窗 finally 关闭); captcha 人工交接; URL 白名单(仅淘宝/天猫).
+已知限制: 浏览器右键菜单(原生)无法脚本化; 合成 Ctrl+Click/中键可能被来源页 JS
+preventDefault(实测淘宝首页拦截) → 自动退 "新标签 + referer 导航" 并记录 opened_via。
 """
 
 
@@ -138,15 +140,25 @@ async def probe_open_newtab(product_url_or_id: str, source: str = "bare") -> dic
 
     popup, opened_via, err = await open_link_new_tab(page, href)
     await remove_probe_anchor(page)
+    fallback_err: str | None = None
     if popup is None:
-        return {
-            "error": f"链接型打开失败(未弹出新标签): {err}",
-            "entry": "newtab",
-            "goto_url": href,
-            "referer": source_url,
-            "source_url": source_url,
-            "opened_via": opened_via or "none",
-        }
+        # 合成 Ctrl+Click/中键被来源页 JS 拦截(如淘宝首页 SPA 吞掉 auxclick) —
+        # 真实右键菜单是浏览器原生、无法脚本化。退回"新标签 + referer 导航"(仍与裸
+        # goto 不同: 新标签上下文 + referer=来源页), 并如实记录 opened_via 与拦截原因。
+        fallback_err = err
+        try:
+            popup = await page.context().new_page()
+            await popup.goto(href, referer=source_url, wait_until="domcontentloaded")
+            opened_via = "fallback_new_page_referer"
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "error": f"链接型打开失败: 合成点击被拦截({err}); fallback 新标签导航也失败: {str(exc)[:120]}",
+                "entry": "newtab",
+                "goto_url": href,
+                "referer": source_url,
+                "source_url": source_url,
+                "opened_via": "none",
+            }
 
     out: dict = {}
     try:
@@ -158,6 +170,8 @@ async def probe_open_newtab(product_url_or_id: str, source: str = "bare") -> dic
         out = await probe_popup_entry(popup, href=href, referer=source_url, entry_label="newtab")
         out["source_url"] = source_url
         out["opened_via"] = opened_via or "unknown"
+        if fallback_err:
+            out["ctrl_middle_blocked"] = f"合成 Ctrl+Click/中键被来源页 JS 拦截: {fallback_err}"
     finally:
         if not popup.is_closed():
             try:
