@@ -574,6 +574,8 @@ async def taobao_export(
       exclude_unavailable/max_items(cart) · only_active/max(tracking) · seller/order_id(dossier) ·
       product_url_or_id/with_reviews(product)。
     只读浏览 + 落盘本地文件(gitignored); 不写入购物车/收藏, 不发消息。
+    注(2026-09-08): export(type=compare) 每次都是**重新执行一次取价后再落盘**(非导出上次缓存
+    结果) — 需要"再比一次并留档"时才调用; 纯导出上次对比请直接引用会话中的 md/json。
     compare 用 source=cart_atomic 时: atomic_confirm=false 返回确认门(预览), true 才执行
     (加购恰好1件→读到手价→按精确 skuId 退回, 全程 XHR 快照证明; 无法证明不删并提示人工检查)。
     tracking: 读今日缓存(零流量)否则每日一次抓取(限速); 含取件码📦摘要。
@@ -762,11 +764,10 @@ async def taobao_dossier(
 ))
 @_serialized
 async def taobao_debug(
-    action: str,                       # detail|sku_structure|sweep_price|miid_price|recommend|entry_probe|a2|home|collect|favorite|watch|activity|probe_reviews|footmark|qa_expand|config_detail|open_probe|cart_probe
+    action: str,                       # detail|sku_structure|entry_probe|a2|home|collect|favorite|watch|activity|probe_reviews|footmark|qa_expand|config_detail|open_probe|cart_probe
     product_url_or_id: str = "",
     target: str = "特大号白色",         # sku_structure
-    target_chip: str = "特大号",        # miid_price
-    max_chips: int = 12,               # sweep_price
+    target_chip: str = "特大号",        # entry_probe(entry=url|recommend|search) / open_probe(source)
     target_pid: str = "",              # collect
     watch_seconds: int = 180,          # watch
     start_url: str = "https://detail.tmall.com/item.htm?id=755873641229",  # watch
@@ -779,13 +780,15 @@ async def taobao_debug(
 ) -> str:
     """调试诊断(一个工具 + action 参数, [DEBUG] 观测/诊断为主; collect/favorite 会临时收藏再取消
     无残留, watch 持续监听 — 有状态, 非纯只读).
+    收编说明(2026-09-08): 正式能力走 13 工具; 本工具仅剩诊断/机制 recon。已移除
+      sweep_price/miid_price(被 product deep_price / fine、compare(cart) 覆盖)与
+      recommend(A2 原语并入 a2; 单页渲染/raw 体检用 config_detail)。
 
-    参数: action(必填)=detail|sku_structure|sweep_price|miid_price|recommend|entry_probe|a2|home|collect|favorite|watch|activity|probe_reviews|footmark|qa_expand|config_detail|open_probe|cart_probe ·
-      product_url_or_id(detail/sku_structure/sweep_price/miid_price/favorite/probe_reviews/footmark/qa_expand 时) · target(sku_structure 目标芯片) ·
-      target_chip(miid_price 目标变体) · max_chips(sweep_price 扫描上限) · target_pid(collect 可选) ·
-      product_url_or_id(recommend/entry_probe 时: recommend=取该商品详情页同类推荐, A2游走原语,
-      URL 带 config mi_id(2026-09-08 实证, 裸 URL 空壳); 失效见返回 miid_stale) ·
-      entry_probe=一次性诊断三种进入方式(entry=url|recommend|search)的详情/推荐/评论/问答/优惠价) ·
+    参数: action(必填)=detail|sku_structure|entry_probe|a2|home|collect|favorite|watch|activity|probe_reviews|footmark|qa_expand|config_detail|open_probe|cart_probe ·
+      product_url_or_id(detail/sku_structure/favorite/probe_reviews/footmark/qa_expand/config_detail/open_probe/cart_probe 时) · target(sku_structure 目标芯片) ·
+      target_chip(entry_probe: entry=url|recommend|search; open_probe: 来源 bare=首页) · target_pid(collect 可选) ·
+      entry_probe=一次性诊断三种进入方式(entry=url|recommend|search)的详情/推荐/评论/问答/优惠价
+      (2026-09-08 矩阵后为裸直达回归探针; 推荐区延伸/渲染体检请用 a2 或 config_detail) ·
       a2_seeds/a2_mode/a2_budget/a2_state(a2 时: 详见下方"a2 近似搜索游走") ·
       watch_seconds/start_url(watch 监听器: 人工操作时记录多页/tab URL+mi_id; start_url 仅允许
       taobao.com/tmall.com 及子域的 HTTPS — 其它一律拒绝) · limit/days(activity: 事件数/范围 None全部 0今天 1近2天)。
@@ -812,7 +815,7 @@ async def taobao_debug(
       商品链接(记录其 URL 参数)并在购物车页开新标签 → ENTRY_PROBE。不写购物车、绝不删行;
       商品不在购物车时返回门控指引(先 taobao_cart add confirm=true 暂存 1 件 → 重跑;
       退回用 taobao_export cart_atomic 或手动)。
-    [DEBUG] 仅诊断/观测; 收藏链路调试会收藏再取消(无残留)。Example: {"action": "activity"} / {"action": "probe_reviews", "product_url_or_id": "862892097837"} / {"action": "miid_price", "product_url_or_id": "862892097837"} / {"action": "a2", "a2_seeds": "990615757513,736546459871", "a2_mode": "queue", "a2_budget": 3}
+    [DEBUG] 仅诊断/观测; 收藏链路调试会收藏再取消(无残留)。Example: {"action": "activity"} / {"action": "probe_reviews", "product_url_or_id": "862892097837"} / {"action": "config_detail", "product_url_or_id": "861510231125"} / {"action": "a2", "a2_seeds": "990615757513,736546459871", "a2_mode": "queue", "a2_budget": 3}
     """
     if await _ensure_logged_in() != "logged_in":
         raise NotLoggedInError()
@@ -827,21 +830,6 @@ async def taobao_debug(
         from src.extract.desc import probe_sku_structure
 
         return json.dumps(await probe_sku_structure(product_url_or_id, target=target),
-                          ensure_ascii=False, indent=2)
-    if act == "sweep_price":
-        from src.extract.desc import sweep_variant_prices
-
-        return json.dumps(await sweep_variant_prices(product_url_or_id, max_chips=max_chips),
-                          ensure_ascii=False, indent=2)
-    if act == "miid_price":
-        from src.extract.desc import probe_miid_price
-
-        return json.dumps(await probe_miid_price(product_url_or_id, target_chip=target_chip),
-                          ensure_ascii=False, indent=2)
-    if act == "recommend":
-        from src.extract.desc import extract_recommendations
-
-        return json.dumps(await extract_recommendations(product_url_or_id),
                           ensure_ascii=False, indent=2)
     if act == "entry_probe":
         from src.extract.desc import probe_entry
@@ -987,8 +975,8 @@ async def taobao_debug(
 
         return json.dumps(await probe_cart_entry(product_url_or_id), ensure_ascii=False, indent=2)
 
-    return (f"未知 action={action}; 支持 detail/sku_structure/sweep_price/miid_price/recommend/"
-            "entry_probe/a2/home/collect/favorite/watch/activity/probe_reviews/footmark/qa_expand/"
+    return (f"未知 action={action}; 支持 detail/sku_structure/entry_probe/a2/home/collect/"
+            "favorite/watch/activity/probe_reviews/footmark/qa_expand/"
             "config_detail/open_probe/cart_probe")
 
 
