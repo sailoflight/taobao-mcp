@@ -147,7 +147,7 @@ async def probe_open_newtab(product_url_or_id: str, source: str = "bare") -> dic
         # goto 不同: 新标签上下文 + referer=来源页), 并如实记录 opened_via 与拦截原因。
         fallback_err = err
         try:
-            popup = await page.context().new_page()
+            popup = await page.context.new_page()
             await popup.goto(href, referer=source_url, wait_until="domcontentloaded")
             opened_via = "fallback_new_page_referer"
         except Exception as exc:  # noqa: BLE001
