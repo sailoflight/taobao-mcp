@@ -546,8 +546,8 @@ async def probe_cart_entry(product_url_or_id: str) -> dict:
     购物车行的链接是新标签链接导航的天然来源(referer=购物车页) — 与足迹/收藏"真实点卡"
     并列的渠道上下文。纯只读: 不写购物车。商品不在购物车时返回门控指引:
       先 taobao_cart(action=add, confirm=true) 暂存 1 件(既有人工确认门), 再重跑本探针;
-      验证完如需退回该临时行: taobao_export(type=compare, source=cart_atomic,
-      atomic_confirm=true)(按精确 skuId 退回) 或 Chrome 购物车手动删 — 本探针绝不删行。
+      暂存行的退回: 本探针与现有工具都不删除(taobao_cart remove 禁用; cart_atomic 只回滚
+      它自己加的购) → 验证完请 Chrome 购物车手动删, 或保留该行。
     """
     from urllib.parse import urlparse
 
@@ -600,12 +600,18 @@ async def probe_cart_entry(product_url_or_id: str) -> dict:
             "in_cart": False,
             "gate": ("购物车无该商品(id=%s)。矩阵验证需先暂存 1 件: 请运行 "
                      "taobao_cart(action=add, product_url_or_id=%s, confirm=true)(既有人工确认门), "
-                     "再重跑本探针(只读, 不删行)。验证完如需退回临时行: "
-                     "taobao_export(type=compare, source=cart_atomic, atomic_confirm=true) "
-                     "按精确 skuId 退回, 或 Chrome 购物车手动删除。") % (pid, pid),
+                     "再重跑本探针(只读, 不删行)。暂存行退回: 本工具与现有工具都不删行 "
+                     "(taobao_cart remove 禁用; cart_atomic 只回滚它自己加的购) — 请 Chrome "
+                     "购物车手动删除, 或保留该行。") % (pid, pid),
         }
 
     # 命中首行: 记录其链接(含/不含渠道参数 — 矩阵关键数据), 再在购物车页真实点击打开新标签。
+    seen_lines: list[dict] = []
+    for ln in lines:
+        key = (ln.get("href"), ln.get("sku_id"), ln.get("qty"))
+        if not any(s["href"] == ln["href"] and s["sku_id"] == ln["sku_id"] for s in seen_lines):
+            seen_lines.append(ln)
+    lines = seen_lines
     first = lines[0]
     href = first["href"]
     if href.startswith("//"):
@@ -629,11 +635,22 @@ async def probe_cart_entry(product_url_or_id: str) -> dict:
         except Exception as exc:  # noqa: BLE001
             popup_err = str(exc)[:120]
             continue
+    fallback_err: str | None = None
     if popup is None:
-        return {
-            "product_id": pid, "in_cart": True, "lines": lines,
-            "error": f"购物车行链接打开失败: {popup_err}", "opened_via": "none",
-        }
+        # 购物车 SPA 同样拦截合成 Ctrl+Click/中键(与淘宝首页一致) → 退新标签+referer 导航。
+        fallback_err = popup_err
+        try:
+            popup = await page.context.new_page()
+            await popup.goto(href, referer="https://cart.taobao.com/cart.htm",
+                             wait_until="domcontentloaded")
+            opened_via = "fallback_new_page_referer"
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "product_id": pid, "in_cart": True, "lines": lines,
+                "error": f"购物车行链接打开失败: 合成点击被拦截({popup_err}); "
+                         f"fallback 新标签导航也失败: {str(exc)[:120]}",
+                "opened_via": "none",
+            }
 
     out: dict = {}
     try:
