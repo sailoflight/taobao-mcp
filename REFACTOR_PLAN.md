@@ -123,6 +123,20 @@
 - fine(足迹/收藏链路)页面带 mi_id + spm=tbpc.mytb_footmark, 推荐 raw 26 条。
 - **结论: A2 游走原语用粗查即可**(快/不耗收藏配额/推荐质量不输 fine, 量还更大)。
 
+> **〔2026-09-08 复核 — 已推翻, 证据优先〕** 上述"无 mi_id 也渲染推荐(raw 72)/粗查即可"
+> 只在 08-20 当日服务状态成立。今日矩阵实证(Tmall 拓竹 Silk+ 861510231125 + C店 P100
+> 736546459871 + 人工 typed 手输): **裸 URL 直达一律空壳**(脚本 goto / 地址栏 typed /
+> 链接型新标签打开 / 任意 referer — 均无 .desc-root/价格/推荐/评论问答; 20+ 分钟不恢复,
+> 真实渠道点击也不解锁); **URL 带有效 mi_id 参数 → 一律全量渲染**(goto+静态 config mi_id:
+> desc-root+16 图+推荐 raw 32; typed 带 mi_id: 有; 购物车行链接自带 mi_id: anchors 191/cards 72;
+> 足迹·收藏渠道点击铸造新 mi_id: raw 21)。typed 无改写 + 编造 mi_id 不触发 → 触发键是 URL 里
+> **有效 mi_id 参数本身**(服务端按参数出内容), 与导航类别/域名/点击上下文无关。
+> ⇒ 08-18 recon"mi_id 单独即可触发"回归成立; 08-20"详情改主文档 SSR"为当时状态漂移。
+> ⇒ A2 原语需在 URL 带有效 mi_id(config.mi_id 每会话校验新鲜度, 失效经足迹/auto 刷新并写
+> output/.miid.json); 静态 token 跨多商品复用有固定足迹风控风险(NOTES) — 需轮换 + pacing。
+> 详见下方"2026-09-08 进入方式实证矩阵结果"节与 3 个新 debug 探针
+> (config_detail/open_probe/cart_probe, commit 9ae2266 起)。
+
 ### 三模式架构(用户设计)
 | 模式 | 适用 | 原理 |
 |---|---|---|
@@ -172,6 +186,37 @@
 > 淘宝生成带 spm+mi_id 的 URL)。网址/搜索/推荐属于粗查 — 用 goto/直接输入。
 > 矩阵 = 6 上下文 × 3 进入方式, 但**粗查只用网址/搜索/推荐 + goto/直接输入**;
 > 细查(收藏/足迹/购物车)只用模拟点击。最终执行集聚焦在"粗查 3×2 + 细查 3×1 抽样"。
+
+### 2026-09-08 实机矩阵结果(补全"补充 1", 商品 861510231125 拓竹 Silk+ + 对照 736546459871 C店 P100)
+> 目标商品全天同会话实测。捕获口径: entry_probe/推荐/粗查用 ENTRY_PROBE_JS + 推荐 raw;
+> fine(足迹/收藏渠道)与 config_detail 用 fetch_detail; 购物车行用 cart_probe。
+> 逐行原始证据见会话记录(2026-09-08); 此表为闭合结论。
+
+| 上下文×进入 | URL 特征 | 详情 | 价格 | 评论/问答 | 推荐区 |
+|---|---|---|---|---|---|
+| 网址·goto(裸) | 无 mi_id | ✗ | ✗ | ✗ | anchors 3 / **cards 0** |
+| 搜索·goto(referer=s.taobao) | 无 mi_id | ✗ | ✗ | ✗ | 0 |
+| 推荐·goto | 无 mi_id | ✗ | ✗ | ✗ | 0 |
+| 地址栏 typed 裸 URL(人工手输) | 无改写 | ✗ | ✗ | ✗ | 无 |
+| 地址栏 typed **带 mi_id**(人工手输) | 无改写 | **✓** | ✓ | ✓ | 有 |
+| 链接型打开 裸 URL+referer(open_probe) | 无 mi_id | ✗ | ✗ | ✗ | 0 |
+| 足迹·真实点卡(渠道点击铸造新 mi_id) | mi_id+spm+upStreamPrice | ✓ 16图 | ✓ ¥29.35 加补后 | ✓/✓ 10 | raw 21 |
+| 收藏·真实点卡(渠道点击) | mi_id+spm+upStreamPrice | ✓ | ✓ | 抽屉 22 条/✓ | (同源) |
+| goto+**静态 config mi_id**(config_detail 探针) | mi_id 参数单独 | ✓ 16图 | (config 不读价) | — | **raw 32/kept 17** |
+| 购物车行链接(自带 from=cart+skuId+mi_id, cart_probe) | mi_id+upStreamPrice | ✓ 16图 | ✓ ¥29.35/¥35 | ✓/✓ 10 | **anchors 191 / cards 72** |
+
+- **闭合判定: "直达"形态(裸 goto/typed/链接打开, 无论 referer/域名/导航类别)一律空壳;
+  URL 带有效 mi_id(渠道铸造或 config 静态)一律全量。** typed 无改写 + 编造 mi_id 无效 →
+  触发键 = 有效 mi_id 参数本身(账号/渠道级, 服务端按参数出内容)。C店与 Tmall 行为一致;
+  空壳 20+ 分钟不恢复、真实点击不解锁裸访问; 无效商品 id 手输会触发验证码(注意限流)。
+- **工具化**: 3 个只读 debug 探针落地(13 工具契约不变, commit 9ae2266/7bad894 起):
+  `config_detail`(goto+静态 mi_id 渲染探针, 报告 desc_root/推荐 raw/miid_stale)、
+  `open_probe`(链接型新标签打开, referer=来源页; 合成 Ctrl/中键被 SPA 拦截 → fallback
+  new_page+referer, 如实记录 opened_via)、`cart_probe`(购物车行链接只读; 不在车返回门控,
+  暂存行退回=Chrome 手动删, cart_atomic 只回滚其自身加购)。
+- **对 A2 含义**: 原"裸 goto 粗查游走"在当前服务状态下不可靠 → A2 每节点需带有效 mi_id
+  (fetch_detail config/渠道均自带), 或每次会话先 config_detail 探测 + config mi_id 失效即
+  auto/足迹刷新(output/.miid.json)。改原语属代码变更, 另提案待用户批。
 
 ### 补充 2: 不同详情情况对推荐算法的影响
 - 若某进入方式落地页**无详情/无推荐区** → 该方式不能用于 A2 游走(推荐没渲染)
@@ -235,6 +280,12 @@
   淘宝前端已不再把详情绑定 mi_id, 粗查裸 goto 即有详情。
 - **历史影响**: 早期因"裸粗查无详情(mi_id 才触发)"而设计 fine 链路必须带 mi_id 进(足迹/收藏)。
   现在裸粗查已有详情 → A2 游走用粗查成立, 用户判断正确且被当前前端验证。
+
+> **〔2026-09-08 复核 — 再次漂移〕** 详情/推荐区又回到"URL 需带有效 mi_id 才渲染"状态:
+> 裸 goto / typed 裸 URL / 链接型打开均空壳; goto+静态 config mi_id 实测全量渲染
+> (desc-root + 16 图 + 推荐 raw 32, miid_stale=false)。→ 详情渲染在 **裸 SSR(08-20) ↔
+> mi_id 触发(08-18/09-08)** 之间随前端状态漂移 — 每次会话开工前须探测(config_detail 探针),
+> 不可长期假设某一种形态成立。
 
 ### ⭐ 关键发现: upStreamPrice = 真实到手价, 只暴露在 mi_id 链路(2026-08-20 三方对比)
 > 拓竹 PETG【无料盘】30502 绿色, 三方价格实测对比(粗查/细查/购物车):

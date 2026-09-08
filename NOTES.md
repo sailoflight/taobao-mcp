@@ -1550,3 +1550,34 @@ Our deliverables: (i) a price for **every** SKU via `skuBase`/`sku2info` join; (
 - **用户基准结论不变**: 恒冠 1060960469596 30×35 ×10 ¥11.6 仍是 30cm 档最低;
   + 收纳博士泵 ¥12.9 = ¥24.5(省 ¥0.4)。
 - 报告已更新: output/sourcing/基准对比-30x34食品袋+泵.md。
+
+---
+
+## 2026-09-08 进入方式实证: mi_id 参数单独即触发渲染(推翻 08-20"裸粗查即可")(矩阵补全)
+> 目标 861510231125(拓竹 Silk+, Tmall)+ 对照 736546459871(C店 P100); 全程人工 paced 实机;
+> 修正正文在 REFACTOR_PLAN.md"2026-09-08 实机矩阵结果"节; 工具=3 个新 debug 只读探针
+> (config_detail / open_probe / cart_probe, commit 9ae2266 起)。
+
+- **裸 URL 直达 = 空壳(与导航类别无关)**: 脚本 goto(url/search/recommend 三态同构)、地址栏
+  typed 手输裸 URL、链接型新标签打开(裸 URL+referer)、无效→验证码。均无 .desc-root/价格/
+  推荐(raw 0)/评论问答; C店 item.taobao.com 与 Tmall detail.tmall.com 一致; 20+ 分钟不恢复,
+  真实渠道点击不解锁裸访问。会话早期首 1–2 次裸 goto 曾正常(14:41 seed/hop 出 5/8), 之后
+  持续空壳 — 前端服务状态漂移, 每次会话须探测。
+- **URL 带有效 mi_id = 全量渲染(无论怎么到那里)**: typed 手输带 mi_id=有(无改写);
+  goto+静态 config mi_id(config_detail)=desc-root+16图+推荐 raw 32/kept 17(miid_stale=false);
+  购物车行链接自带 from=cart+skuId+mi_id+upStreamPrice(cart_probe)=anchors 191/cards 72 全量;
+  足迹(fine, raw 21)/收藏(抽屉 22 条)渠道点击铸造新 mi_id=全量。
+- **判定**: 触发键 = URL 里的**有效 mi_id 参数本身**(账号/渠道级值, 编造值不触发, typed 无改写
+  → 服务端按参数出内容), 非 referer/点击上下文/导航类别/域名。08-18 recon"mi_id 单独即可触发"
+  回归成立; 08-20"详情改主文档 SSR、裸 goto 也完整"为当日状态, 已再漂移。mi_id 语义在这两种
+  形态间反复 — 按会话探测, 勿长期假设。
+- **A2 含义**: 裸 goto 粗查游走当前不可靠 → 每节点 URL 带有效 mi_id(fetch_detail 自带),
+  config.mi_id 失效→auto/足迹刷新(output/.miid.json); 静态 token 多商品复用=固定足迹风控,
+  需轮换+pacing。原语改动另提案。
+- **upStreamPrice 交叉印证**(08-20 发现继续成立): Silk+ 低温料盘×2 加补后 ¥29.35 == 购物车
+  platform_after; 各渠道 URL 的 upStreamPrice=2935 一致。
+- **工具限制(如实记录)**: 合成 Ctrl+Click/中键被淘宝首页与购物车 SPA preventDefault(原生右键
+  菜单不可脚本化) → open_probe/cart_probe 自动 fallback new_page+referer 并记 opened_via。
+- **购物车暂存行清理**: 861510231125 skuId 6031428933896 qty1(实证用)留在真实购物车 — 现有
+  工具不删行(remove 禁用; cart_atomic 只回滚自身加购), 需 Chrome 手动删或保留(该 Silk+ 为
+  采购候选, 保留亦可)。
