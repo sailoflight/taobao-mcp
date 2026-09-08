@@ -2,8 +2,8 @@
 
 背景(REFACTOR_PLAN.md「推荐近似搜索(A)」): s.taobao.com/search 搜索页触发验证码风控,
 用"详情页同类推荐"近似搜索替代 — 从种子商品(如 拓竹 PETG)出发, 靠淘宝推荐算法跨页
-迭代, 横向找同类候选。单页原语 ``extract_recommendations``(粗查 goto item.htm,
-零收藏配额, desc.py)已落地; 本模块在其上实现用户定稿的**三模式**:
+迭代, 横向找同类候选。单页原语 ``extract_recommendations``(地址跳转 + config mi_id,
+零收藏配额, desc.py; 2026-09-08 实证: 裸 URL=空壳, 带有效 mi_id=全量渲染)已落地; 本模块在其上实现用户定稿的**三模式**:
 
 - ``auto``(全自动): 从种子出发按综合分游走, 直到预算耗尽或无新候选 — 一次返回最终筛选结果;
 - ``interactive``(人机协同): 每轮只走 ``budget`` 页(较短且过滤低的全自动), 返回候选 +
@@ -370,6 +370,18 @@ async def a2_walk(seeds: str | list[str], mode: str = "auto", budget: int | None
         st["budget_used"] = used_before + round_used
         hits = fold_visit(st, pid, step, source_of(pid), (page_res or {}).get("items"))
         st["visited"][pid]["found"] = hits
+        # 2026-09-08: config mi_id 失效(落地页未渲染且推荐 0) → 停本轮, 不烧剩余预算;
+        # 刷新 mi_id(任一次 足迹/收藏 细查会铸造新值写 output/.miid.json, 或人工 Chrome
+        # 点商品)后凭返回 state 续跑。
+        if (page_res or {}).get("miid_stale"):
+            st["miid_stale"] = True
+            node_errors.append({
+                "product_id": pid,
+                "error": ("config mi_id 已失效(落地页未渲染且推荐 0) — 停止本轮。请刷新 mi_id "
+                          "(任一次 fine 细查会铸造新值写 output/.miid.json, 或人工 Chrome 点一个 "
+                          "商品), 然后凭返回 state 续跑。")})
+            break
+        st["miid_stale"] = False  # 节点成功即清除旧失效标记(续跑 state 场景)
         # 页间拟人节奏(首页后即开始; 原语内部已有滚动延迟, 这里补跳转间距)
         await human_delay(1.8, 3.2)
 
@@ -388,6 +400,7 @@ async def a2_walk(seeds: str | list[str], mode: str = "auto", budget: int | None
         "candidates": candidates[:MAX_OUT],
         "candidate_total": len(candidates),
         "captcha": captcha,
+        "miid_stale": bool(st.get("miid_stale")),
         "node_errors": node_errors[:8],
         "pacing": limiter.usage(),
         "state": st,

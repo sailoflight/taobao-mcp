@@ -783,8 +783,9 @@ async def taobao_debug(
     参数: action(必填)=detail|sku_structure|sweep_price|miid_price|recommend|entry_probe|a2|home|collect|favorite|watch|activity|probe_reviews|footmark|qa_expand|config_detail|open_probe|cart_probe ·
       product_url_or_id(detail/sku_structure/sweep_price/miid_price/favorite/probe_reviews/footmark/qa_expand 时) · target(sku_structure 目标芯片) ·
       target_chip(miid_price 目标变体) · max_chips(sweep_price 扫描上限) · target_pid(collect 可选) ·
-      product_url_or_id(recommend/entry_probe 时: recommend=取该商品详情页同类推荐, A2游走原语;
-      entry_probe=一次性诊断三种粗查进入方式(entry=url|recommend|search)的详情/推荐/评论/问答/优惠价) ·
+      product_url_or_id(recommend/entry_probe 时: recommend=取该商品详情页同类推荐, A2游走原语,
+      URL 带 config mi_id(2026-09-08 实证, 裸 URL 空壳); 失效见返回 miid_stale) ·
+      entry_probe=一次性诊断三种进入方式(entry=url|recommend|search)的详情/推荐/评论/问答/优惠价) ·
       a2_seeds/a2_mode/a2_budget/a2_state(a2 时: 详见下方"a2 近似搜索游走") ·
       watch_seconds/start_url(watch 监听器: 人工操作时记录多页/tab URL+mi_id; start_url 仅允许
       taobao.com/tmall.com 及子域的 HTTPS — 其它一律拒绝) · limit/days(activity: 事件数/范围 None全部 0今天 1近2天)。
@@ -794,7 +795,8 @@ async def taobao_debug(
       interactive(人机协同, 每轮走 a2_budget 页后返回候选+state, 由用户定方向续跑)/
       queue(AI自驱队列, 每组跑一段短全自动后跨组去重合并) · a2_budget=本轮访问页数(默认 auto 6 /
       interactive 3 / queue 每组 3; 全程上限 15) · a2_state=interactive 上轮返回的 state(JSON)。
-      只读粗查游走(不点型号/不进收藏链路), 页间拟人节奏, 验证码→人工交接中止。
+      只读地址跳转游走(URL 带 config mi_id, 不点型号/不进收藏链路), 页间拟人节奏,
+      验证码→人工交接中止; config mi_id 失效(返回 miid_stale=true)即停本轮并提示刷新后续跑。
     probe_reviews: 实证评论渲染 — 分别探测 普通页 vs 收藏链路 mi_id 弹窗页 是否渲染评论区(诊断评论抓取路径)。
     footmark: 足迹渠道诊断 — 打开足迹页点第一张卡, 校验打开的 id 是否为目标(双机制第一棒)。
     qa_expand: 问答展开机制诊断 — 数问答卡, 点"查看全部问答", 报告是否开新页/更多卡/抽屉。

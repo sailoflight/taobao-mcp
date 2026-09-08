@@ -946,28 +946,38 @@ async def save_detail_images(product_url_or_id: str, output_dir: str = "", max_i
     }
 
 
-async def extract_recommendations(product_url_or_id: str, max_items: int = 12, min_score: int = 1) -> dict:
-    """[A2 游走原语] 直接 goto 商品详情页(粗查路径, 不走足迹/收藏/细查), 提取同类推荐.
+async def extract_recommendations(product_url_or_id: str, max_items: int = 12, min_score: int = 1,
+                                  use_miid: bool = True) -> dict:
+    """[A2 游走原语] 地址跳转访问商品详情页, 提取同类推荐(URL 带 config mi_id).
 
-    2026-08-20 用户设计: A2(多轮游走)最接近人类行为 — 淘宝推荐算法的价值在跨页
-    迭代(进一个新详情页 → 推荐给新同类 → 再进)。游走原语必须轻量:
-    - 不用足迹/收藏链路(fine) — 慢 + 耗收藏配额 + 足迹链路标签管理复杂
-    - 不模拟点击进细查 — 浪费上下文
-    - 直接 goto item.htm(粗查路径) — 快; 但无 mi_id 非个性化, 推荐质量需实机验证
+    2026-08-20 原为裸 goto 粗查; **2026-09-08 实证矩阵推翻**: 裸 URL 直达=空壳(无推荐,
+    详情/价格/评论全无), URL 带有效 mi_id(账号/渠道级)→ 全量渲染(goto+config mi_id 实测
+    推荐 raw 32)。故原语改为 goto URL 上带 config.detail.mi_id(load_config 自动合并
+    output/.miid.json 运行时覆盖, 文件 mtime 变化即重读 → 失效后刷新即生效)。
+    use_miid=False 保留裸形态(矩阵对照/进入语义探针用)。
+    失效检测: 落地后若 .desc-root 未渲染且推荐 raw==0 → miid_stale=True(静态 token 过期);
+    a2_walk 见到即停(不烧剩余预算)并提示刷新后凭 state 续跑。
 
-    返回 rank_recommendations 的 {items, total_raw, kept, dropped_noise, capped}。
+    返回 rank_recommendations 的 {items, total_raw, kept, dropped_noise, capped} +
+    {rendered, miid_used, miid_stale, landed_url, landed_has_miid}。
     """
-    from src.browser.pacing import human_delay, human_scroll
+    from src.browser.pacing import human_delay
     from src.browser.session import get_session
+    from src.config import load_config
     from src.extract.product import _to_product_id
 
     pid = _to_product_id(product_url_or_id)
     session = get_session()
     page = await session.start()
+    miid = ""
+    if use_miid:
+        miid = (load_config().detail.mi_id or "").strip()
     url = f"https://item.taobao.com/item.htm?id={pid}"
+    if miid:
+        url += f"&mi_id={miid}"
     await page.goto(url, wait_until="domcontentloaded")
     await session.guard_captcha(page)
-    # 推荐区块在主文档最底部: 粗查也先滚到底触发懒加载, 再提取, 最后滚回顶部。
+    # 推荐区块在主文档最底部: 先滚到底触发懒加载, 再提取, 最后滚回顶部。
     from src.browser.scroll import scroll_to_bottom
 
     await scroll_to_bottom(page)
@@ -977,9 +987,17 @@ async def extract_recommendations(product_url_or_id: str, max_items: int = 12, m
 
     raw_rec = await page.evaluate(RECOMMEND_JS)
     result = rank_recommendations(raw_rec or [], max_items=max_items, min_score=min_score)
-    # URL 诊断(2026-08-20 用户疑点): 粗查是 URL 拼接 goto item.htm(无 mi_id 参数),
-    # 但实测页面 URL 可能被淘宝 JS 注入 mi_id(登录态/SPA 重写)。记录实际落地 URL,
-    # 判断"URL 拼接是否真的进入无 mi_id 页面" — 这决定 A2 游走原语的语义。
+    # 渲染信号: 带 mi_id 时 .desc-root 出现 = 页面全量渲染(空壳页无此节点)。
+    rendered = False
+    try:
+        rendered = bool(await page.evaluate(
+            "() => !!document.querySelector('.desc-root')"))
+    except Exception:
+        pass
+    result["rendered"] = rendered
+    result["miid_used"] = miid
+    result["miid_stale"] = bool(miid) and (not rendered) and (int(result.get("total_raw") or 0) == 0)
+    # URL 诊断(2026-08-20 用户疑点保留): 记录实际落地 URL 与是否仍带 mi_id(SPA 是否改写)。
     try:
         result["landed_url"] = (page.url or "")[:220]
         from src.extract.miid import miid_from_url
