@@ -536,3 +536,126 @@ async def remove_cart_item(product_id: str, variant: str = "", qty: int | None =
         return {"removed": True, "product_id": pid, "variant": variant, "sku_id": sku_id}
     return {"removed": False, "reason": "verify_failed",
             "note": f"点击删除后精确目标行仍在购物车(可能弹窗未确认) — 未继续删除, 请人工检查."}
+
+
+# ── 2026-09-08 矩阵补全: 购物车上下文·链接型打开 只读探针(cart_probe) ──────────────
+
+async def probe_cart_entry(product_url_or_id: str) -> dict:
+    """只读: 若商品在购物车, 取该行真实商品链接并在购物车页"链接型打开"它 → ENTRY_PROBE.
+
+    购物车行的链接是新标签链接导航的天然来源(referer=购物车页) — 与足迹/收藏"真实点卡"
+    并列的渠道上下文。纯只读: 不写购物车。商品不在购物车时返回门控指引:
+      先 taobao_cart(action=add, confirm=true) 暂存 1 件(既有人工确认门), 再重跑本探针;
+      验证完如需退回该临时行: taobao_export(type=compare, source=cart_atomic,
+      atomic_confirm=true)(按精确 skuId 退回) 或 Chrome 购物车手动删 — 本探针绝不删行。
+    """
+    from urllib.parse import urlparse
+
+    from src.browser.pacing import human_delay
+    from src.browser.session import get_session
+
+    from src.extract.newtab import open_link_new_tab, probe_popup_entry
+    from src.extract.product import _to_product_id
+
+    pid = _to_product_id(product_url_or_id)
+    session = get_session()
+    page = await session.start()
+    await page.goto("https://cart.taobao.com/cart.htm", wait_until="domcontentloaded")
+    await page.wait_for_timeout(5000)
+    await session.guard_captcha(page)
+    try:
+        await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        await page.wait_for_timeout(1200)
+        await page.evaluate("window.scrollTo(0, 0)")
+    except Exception:
+        pass
+
+    # 找 pid 的商品行: 行内真实商品链接(a[href*="item.htm"]) + skuId/数量/行文本
+    lines = await page.evaluate(
+        """(pid) => {
+          const want = String(pid);
+          const out = [];
+          const anchors = document.querySelectorAll('a[href*="item.htm"], a[href*="detail.tmall.com"]');
+          anchors.forEach((lnk, i) => {
+            const h = (lnk.getAttribute('href') || '');
+            const m = h.match(/[?&]id=(\\d{6,})/);
+            if (!m || m[1] !== want) return;
+            const block = lnk.closest('[class*="cartItemInfo"]');
+            let qty = 1, text = '';
+            if (block) {
+              const qi = block.querySelector('input[class*="countValue"], input[type="number"], [class*="stepper"] input, [class*="Stepper"] input');
+              if (qi) { const v = parseInt((qi.value || '').replace(/\\D/g, ''), 10); if (v > 0) qty = v; }
+              text = (block.innerText || '').replace(/\\s+/g, ' ').trim().slice(0, 140);
+            }
+            out.push({index: i, href: h, sku_id: (h.match(/[?&]skuId=(\\d+)/) || [])[1] || null,
+                      qty, text});
+          });
+          return out;
+        }""",
+        pid,
+    )
+    if not lines:
+        return {
+            "product_id": pid,
+            "in_cart": False,
+            "gate": ("购物车无该商品(id=%s)。矩阵验证需先暂存 1 件: 请运行 "
+                     "taobao_cart(action=add, product_url_or_id=%s, confirm=true)(既有人工确认门), "
+                     "再重跑本探针(只读, 不删行)。验证完如需退回临时行: "
+                     "taobao_export(type=compare, source=cart_atomic, atomic_confirm=true) "
+                     "按精确 skuId 退回, 或 Chrome 购物车手动删除。") % (pid, pid),
+        }
+
+    # 命中首行: 记录其链接(含/不含渠道参数 — 矩阵关键数据), 再在购物车页真实点击打开新标签。
+    first = lines[0]
+    href = first["href"]
+    if href.startswith("//"):
+        href = "https:" + href
+    elif href.startswith("/"):
+        href = "https://cart.taobao.com" + href
+    lnk = page.locator('a[href*="item.htm"], a[href*="detail.tmall.com"]').nth(first["index"])
+    opened_via: str = ""
+    popup = None
+    popup_err: str | None = None
+    for method in ("ctrl_click", "middle_click"):
+        try:
+            async with page.expect_popup(timeout=25000) as pi:
+                if method == "ctrl_click":
+                    await lnk.click(modifiers=["Control"])
+                else:
+                    await lnk.click(button="middle")
+            popup = pi.value
+            opened_via = method
+            break
+        except Exception as exc:  # noqa: BLE001
+            popup_err = str(exc)[:120]
+            continue
+    if popup is None:
+        return {
+            "product_id": pid, "in_cart": True, "lines": lines,
+            "error": f"购物车行链接打开失败: {popup_err}", "opened_via": "none",
+        }
+
+    out: dict = {}
+    try:
+        try:
+            await session.guard_captcha(popup)
+        except Exception:  # noqa: BLE001
+            pass
+        out = await probe_popup_entry(popup, href=href,
+                                      referer="https://cart.taobao.com/cart.htm",
+                                      entry_label="cart_newtab")
+        out["product_id"] = pid
+        out["in_cart"] = True
+        out["lines"] = lines
+        out["clicked_href"] = first["href"]
+        out["cart_link_params"] = sorted(
+            {k for k in urlparse(first["href"]).query.split("&") if k and "=" in k})
+        out["opened_via"] = opened_via or "unknown"
+    finally:
+        if not popup.is_closed():
+            try:
+                await popup.close()
+            except Exception:  # noqa: BLE001
+                pass
+        out["popup_closed"] = True
+    return out
