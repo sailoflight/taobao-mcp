@@ -216,7 +216,10 @@
   暂存行退回=Chrome 手动删, cart_atomic 只回滚其自身加购)。
 - **对 A2 含义**: 原"裸 goto 粗查游走"在当前服务状态下不可靠 → A2 每节点需带有效 mi_id
   (fetch_detail config/渠道均自带), 或每次会话先 config_detail 探测 + config mi_id 失效即
-  auto/足迹刷新(output/.miid.json)。改原语属代码变更, 另提案待用户批。
+  auto/足迹刷新(output/.miid.json)。**〔2026-09-08 已实施, commit 9f3c308〕**
+  extract_recommendations 默认 URL 带 config.mi_id; 落地未渲染且推荐 0 → miid_stale 停本轮。
+  实机冒烟(auto, budget=2, seed 861510231125): 2 节点各 found 8, 延伸 897280821638,
+  候选 9 条真实 拓竹耗材(变更前同款种子裸 goto=空壳 raw 0)。
 
 ### 2026-09-08 场景路由收口(两大进入族, 用户定稿)
 > 矩阵反推的落地原则(2026-09-08 用户): 当前进入方式只有两大类 — **地址跳转** 与
@@ -234,9 +237,10 @@
 
 - 代码已体现"足迹>收藏": fetch_detail 双机制 auto = 足迹优先、收藏仅兜底,
   anti_risk.fav_flow 可整体关收藏链路; probe_reviews/细查足迹失败才碰收藏。
-- A2 原语改造方向(待用户批): 大批量阶段裸地址跳转只做粗查定位; 进入"需要推荐延伸/全量
-  信号"的节点时切到带有效 mi_id(fetch_detail 足迹渠道优先), 或每会话 config_detail 体检后
-  用地址跳转+轮换 config mi_id 控制风控足迹。
+- A2 原语改造(2026-09-08 已实施, commit 9f3c308, 用户批准): 大批量阶段裸地址跳转只做粗查定位;
+  需要推荐延伸/全量信号的节点改走"地址跳转 + config mi_id"(extract_recommendations 默认带;
+  失效即停提示刷新后凭 state 续跑)。足迹/收藏渠道不适配任意游走目标(足迹首卡≠目标、
+  收藏每节点耗配额) — 留作 fine 短名单细查; config mi_id 轮换 + pacing 控固定足迹风控。
 
 ### 补充 2: 不同详情情况对推荐算法的影响
 - 若某进入方式落地页**无详情/无推荐区** → 该方式不能用于 A2 游走(推荐没渲染)
