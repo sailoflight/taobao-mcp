@@ -108,17 +108,18 @@ def test_captcha_in_other_tab_is_detected():
     from types import SimpleNamespace
 
     sess = get_session()
-    # main page has nothing; the "new tab" holds a visible baxia slider.
+    # 门面改造后 context 由共享库 owner 持有 — 测试用桩 owner 注入页集合。
+    original_owner = sess._owner
     main = FakePage("https://s.taobao.com/search?q=pctg", visible_sels=set())
     newtab = FakePage("https://s.taobao.com/search", visible_sels={"#nc_1_n1z"})
-    sess.context = SimpleNamespace(pages=[main, newtab])
+    sess._owner = SimpleNamespace(context=SimpleNamespace(pages=[main, newtab]))
     try:
         assert _looks_blocked(sess, main) is True
         # Once the human solves it in the new tab, the widget is gone → not blocked.
         newtab._visible_sels = set()
         assert _looks_blocked(sess, main) is False
     finally:
-        sess.context = None
+        sess._owner = original_owner
 
 
 def test_captcha_inside_iframe_is_detected():
@@ -151,8 +152,10 @@ def test_captcha_inside_iframe_is_detected():
 # ---- launch hardening: headed fail-closed + single persistent context ----------
 
 class _FakePage:
-    def __init__(self):
+    def __init__(self, context=None):
         self._closed = False
+        # library ownership backref: pages created by a context carry it
+        self.context = context
 
     def is_closed(self) -> bool:
         return self._closed
@@ -169,13 +172,25 @@ class _FakePage:
 
 class _FakeContext:
     def __init__(self):
-        self.pages = [_FakePage()]
+        self.pages = [_FakePage(context=self)]
+        self._close_cb = None
+
+    # library _attach_context/_forget_context need the native event API
+    def on(self, event, cb) -> None:
+        if event == "close":
+            self._close_cb = cb
+
+    def remove_listener(self, event, cb) -> None:
+        if event == "close" and self._close_cb is cb:
+            self._close_cb = None
 
     async def add_init_script(self, *a, **k) -> None:
         pass
 
     async def new_page(self) -> _FakePage:
-        return _FakePage()
+        page = _FakePage(context=self)
+        self.pages.append(page)
+        return page
 
     async def close(self) -> None:
         pass
@@ -217,13 +232,12 @@ def test_start_refuses_headless(tmp_path, monkeypatch):
     cfg = load_config()
     headless_cfg = replace(cfg, browser=replace(cfg.browser, headless=True))
     sess = BrowserSession(config=headless_cfg)
-    monkeypatch.setattr(sess_mod, "async_playwright", lambda: _FakePlaywright())
     monkeypatch.setattr(sess_mod, "_resolve_project_user_data_dir", lambda p: tmp_path / "profile")
 
     with pytest.raises(BrowserLaunchError, match="headless"):
         asyncio.run(sess.start())
-    # 没发生任何 launch: playwright 从未启动、上下文从未创建
-    assert sess.playwright is None and sess.context is None and sess.page is None
+    # 没发生任何 launch: 共享库 owner 从未创建, 上下文从未创建
+    assert sess._owner is None and sess.status == "uninitialized"
 
 
 def test_start_cannot_launch_two_contexts_concurrently(tmp_path, monkeypatch):
@@ -231,10 +245,9 @@ def test_start_cannot_launch_two_contexts_concurrently(tmp_path, monkeypatch):
     from src.browser import session as sess_mod
 
     fake_pw = _FakePlaywright()
-    monkeypatch.setattr(sess_mod, "async_playwright", lambda: fake_pw)
     monkeypatch.setattr(sess_mod, "_resolve_project_user_data_dir", lambda p: tmp_path / "profile")
 
-    sess = BrowserSession()
+    sess = BrowserSession(playwright_factory=lambda: fake_pw)
 
     async def go():
         start = asyncio.Event()
@@ -247,11 +260,18 @@ def test_start_cannot_launch_two_contexts_concurrently(tmp_path, monkeypatch):
         tasks = [asyncio.create_task(one()) for _ in range(2)]
         start.set()
         await asyncio.gather(*tasks)
-        return results
+        # 断言取值在 owning loop 内(共享库 ExecutionContextError 契约)。
+        return (
+            results,
+            all(p is sess.page for p in results),
+            sess.status,
+            fake_pw.chromium.launch_calls,
+            fake_pw.started,
+        )
 
-    pages = asyncio.run(go())
-    assert fake_pw.chromium.launch_calls == 1   # exactly ONE persistent context
-    assert fake_pw.started == 1                 # playwright started once
+    pages, same_page, status, launch_calls, started = asyncio.run(go())
+    assert launch_calls == 1   # exactly ONE persistent context
+    assert started == 1        # playwright started once
     assert len(pages) == 2
-    assert all(p is sess.page for p in pages)   # both callers reuse the same page
-    assert sess.status == "started"
+    assert same_page           # both callers reuse the same page
+    assert status == "started"

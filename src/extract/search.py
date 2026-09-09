@@ -310,7 +310,7 @@ async def _goto_search_page(page, url: str, keyword: str):
                 if found is not None:
                     if found is not page:
                         get_logger().info("search: adopted new-tab results page %s (closing old tab)", found.url)
-                        session.page = found  # 先切工作页, 再关旧标签
+                        session.adopt_page(found)  # 共享库显式接管(ADAPTATION_GUIDE §6), 不再裸赋值
                         try:
                             await page.close()  # 关闭旧标签: 不堆积, 少闪烁
                         except Exception:

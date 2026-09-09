@@ -1,11 +1,14 @@
 """Persistent headed real-Chrome session: launch, login, login-check, captcha pause.
 
-Owns the singleton Playwright persistent context (CLAUDE.md §7 + Phase 1). The
-session-persistence approach is adapted from the base repo (NOTES.md §6), but
-launch is hardened per §7: real Chrome via ``channel="chrome"``, the
+Resource ownership is delegated to the shared library ``browser_common``
+(``AsyncSession``, lijq-browser-common==0.1.0.dev1): it exclusively holds the
+native Playwright driver/context and the single working page, while THIS module
+keeps all Taobao business policy — active QR-polling login, captcha handoff,
+stealth init script, project-local profile boundary (ADAPTATION_GUIDE §2/§10).
+
+Launch hardening (§7) is unchanged: real Chrome via ``channel="chrome"``, the
 AutomationControlled flag off, locale/timezone set, ``navigator.webdriver``
-masked, and login is converted from the base's *passive* "return login_required"
-into an *active* QR-polling ``ensure_logged_in()``.
+masked, headed mode fail-closed.
 
 Captcha rule (§7.4): on a slider/punish/login wall, set ``human_action_required``,
 leave the window visible, and poll until the human clears it. NEVER auto-solve.
@@ -18,7 +21,14 @@ import os
 import time
 from pathlib import Path
 
-from playwright.async_api import async_playwright
+from browser_common import (
+    AsyncSession,
+    PageCleanupError,
+    ReleaseReport,
+    ResourceUnavailableError,
+    SessionConfig,
+    SessionStateError,
+)
 
 from src.config import Config, load_config
 from src.errors import BrowserLaunchError, CaptchaError
@@ -118,42 +128,52 @@ def _resolve_project_user_data_dir(configured_path: str) -> Path:
     return resolved
 
 
-class BrowserSession:
-    """Singleton-style holder for the persistent context + working page."""
+async def _after_context_created(context) -> None:
+    """Shared-library init hook (ADAPTATION_GUIDE §9): runs once per NEW context,
+    before the working page is selected. Re-applies the §7 stealth init script.
+    Must never reenter start/release and must stay short — no login/captcha here.
+    """
+    await context.add_init_script(_STEALTH_JS)
 
-    def __init__(self, config: Config | None = None) -> None:
+
+def _report_failures(report: ReleaseReport) -> str:
+    """Compact, type-only rendering of a release report for logs (no page data)."""
+    return ",".join(f"{f.operation}:{f.error_type}" for f in report.failures) or "none"
+
+
+class BrowserSession:
+    """Business facade over ONE exclusive shared-library AsyncSession.
+
+    browser_common owns the native driver/context/working page (single owner,
+    ADAPTATION_GUIDE §2.4); this class keeps the historical surface — page/
+    context accessors, status strings, login/captcha policy — that the extract
+    modules and tests rely on, and maps business hard rules onto SessionConfig.
+    """
+
+    def __init__(self, config: Config | None = None, *, playwright_factory=None) -> None:
         self.config = config or load_config()
-        self.playwright = None
-        self.context = None
-        self.page = None
         self.status = "uninitialized"
         self.human_action_required = False
         self.login_confirmed: bool | None = None
         self.login_confirmed_at: float = 0.0
-        # Guards the launch section so two concurrent start() calls can never
-        # spin up two persistent contexts at once (only ONE context per process).
+        # Serializes the probe→(release→restart)→start DECISION; the inner
+        # AsyncSession has its own launch lock. Together they keep the §7.3
+        # invariant: only ONE context per process.
         self._start_lock = asyncio.Lock()
+        # Exclusive resource owner (created lazily on first start so that import
+        # and constructor stay browser-free; tests may inject a factory).
+        self._owner: AsyncSession | None = None
+        self._playwright_factory = playwright_factory  # offline-test assembly only (§9)
 
-    # ---- lifecycle ---------------------------------------------------------
-    async def start(self):
-        """Launch (or reuse) the persistent headed real-Chrome context; return the page.
+    # ---- shared-library ownership ------------------------------------------
+    def _build_owner(self) -> AsyncSession:
+        """Map business config onto the shared-library SessionConfig.
 
-        Concurrent start() calls are serialized: the second caller waits for the
-        first and then REUSES its launched context instead of launching a second
-        one. Headed mode is enforced fail-closed BEFORE any launch.
+        Order per ADAPTATION_GUIDE §2.3: business hard rules (headless fail-closed,
+        project-local profile boundary) run FIRST; the library never overrides
+        them. ``cleanup_restored=True`` reproduces the old startup behavior of
+        closing every restored tab except the selected working one (§7.3).
         """
-        async with self._start_lock:
-            return await self._start_locked()
-
-    async def _start_locked(self):
-        # Reuse a live page if the browser is still responsive.
-        if self.page is not None and not self.page.is_closed():
-            try:
-                await self.page.evaluate("1 + 1")
-                return self.page
-            except Exception:
-                await self.close()
-
         b = self.config.browser
         if b.headless:
             # Fail-closed (§7.1): never launch a headless browser. The human must
@@ -165,74 +185,161 @@ class BrowserSession:
             )
         user_dir = _resolve_project_user_data_dir(b.user_data_dir)
         user_dir.mkdir(parents=True, exist_ok=True)
-
-        self.playwright = await async_playwright().start()
-        launch_kwargs = dict(
-            user_data_dir=str(user_dir),
-            headless=b.headless,
-            locale=b.locale,
-            timezone_id=b.timezone,
-            viewport={"width": 1280, "height": 800},
-            args=["--disable-blink-features=AutomationControlled"],
-        )
+        launch: dict = {
+            "headless": False,  # enforced above, fail-closed
+            "locale": b.locale,
+            "timezone_id": b.timezone,
+            "viewport": {"width": 1280, "height": 800},
+            "args": ["--disable-blink-features=AutomationControlled"],
+        }
         if b.executable_path:
-            launch_kwargs["executable_path"] = b.executable_path  # pin exact Google Chrome binary
+            launch["executable_path"] = b.executable_path  # pin exact Google Chrome binary
         elif b.channel:
-            launch_kwargs["channel"] = b.channel  # real Chrome, not bundled Chromium
-        try:
-            self.context = await self.playwright.chromium.launch_persistent_context(**launch_kwargs)
-        except Exception as exc:  # channel="chrome" needs Google Chrome installed
-            await self._stop_playwright()
-            raise BrowserLaunchError(
-                f"Could not launch Chrome (channel={b.channel!r}): {exc}. "
-                "Install Google Chrome, or run `.venv/bin/python -m playwright install chrome`. "
-                "To fall back to bundled Chromium, set channel = \"\" in config.local.toml."
-            ) from exc
+            launch["channel"] = b.channel  # real Chrome, not bundled Chromium
+        return AsyncSession(
+            SessionConfig(user_dir, launch_options=launch, cleanup_restored=True),
+            playwright_factory=self._playwright_factory,
+            after_context_created=_after_context_created,
+        )
 
-        await self.context.add_init_script(_STEALTH_JS)
-        # 清理 user_data 恢复的残留标签页(2026-08-20 用户定位): launch_persistent_context
-        # 会恢复上次会话残留的所有标签(如 PETG 搜索页), 干扰足迹/收藏链路的标签管理 —
-        # 脚本开 popup 详情页 + 删旧标签时, 活动页会漂移进残留搜索页(触发验证码)。
-        # 启动即清理: 只保留一个干净工作页, 其余残留标签全部关闭(单标签规则 §7.3)。
-        self.page = None
-        for p in list(self.context.pages or []):
+    # Native-resource accessors: delegate to the exclusive owner. Per the library
+    # contract they RAISE when unavailable instead of returning None (guide §5).
+    @property
+    def page(self):
+        if self._owner is None:
+            raise ResourceUnavailableError("Browser not started; call start() first")
+        return self._owner.page
+
+    @property
+    def context(self):
+        if self._owner is None:
+            raise ResourceUnavailableError("Browser not started; call start() first")
+        return self._owner.context
+
+    def _page_or_none(self):
+        try:
+            return self.page
+        except ResourceUnavailableError:
+            return None
+
+    def _context_or_none(self):
+        try:
+            return self.context
+        except ResourceUnavailableError:
+            return None
+
+    def adopt_page(self, page) -> None:
+        """Explicitly adopt a same-context page as the working page (guide §6).
+
+        Replaces the old raw ``session.page = <page>`` assignment; adoption never
+        closes the previous working page — the caller coordinates that cleanup.
+        """
+        if self._owner is None:
+            raise ResourceUnavailableError("Browser not started; call start() first")
+        self._owner.adopt_page(page)
+
+    async def _release_owner(self) -> ReleaseReport:
+        assert self._owner is not None
+        report = await self._owner.release()
+        if report.complete:
+            get_logger().info(
+                "browser released (clean=%s, context=%s, driver=%s)",
+                report.clean, report.context_status, report.driver_status,
+            )
+        else:
+            get_logger().warning(
+                "browser release INCOMPLETE (context=%s, driver=%s, failures=%s) — "
+                "session retained for a controlled re-release; resources are NOT "
+                "confirmed freed",
+                report.context_status, report.driver_status, _report_failures(report),
+            )
+        return report
+
+    async def _ensure_released(self) -> None:
+        """Release (with one controlled retry); raise only if still retained."""
+        await self._release_owner()
+        report = self._owner.last_release_report
+        if report is not None and not report.complete:
+            get_logger().warning(
+                "first release incomplete (%s) — one controlled retry", _report_failures(report)
+            )
+            await self._release_owner()
+            report = self._owner.last_release_report
+            if report is not None and not report.complete:
+                raise BrowserLaunchError(
+                    "could not release the previous browser session "
+                    f"({_report_failures(report)}); resolve the release failure "
+                    "(or restart the MCP process) before starting again."
+                )
+
+    # ---- lifecycle ---------------------------------------------------------
+    async def start(self):
+        """Start (or reuse) the persistent headed real-Chrome context; return the page.
+
+        Concurrent start() calls are serialized: the second caller waits for the
+        first and then REUSES its launched context instead of launching a second
+        one. Headed mode is enforced fail-closed BEFORE any launch.
+
+        Reuse probe: the shared library never probes or restarts a ready session
+        (guide §5) — that policy is business, so it lives here: when the library
+        reports ready, the working page is probed with a cheap evaluate; a wedged
+        page releases the whole browser and relaunches (same as pre-library).
+        """
+        async with self._start_lock:
+            if self._owner is None:
+                self._owner = self._build_owner()
+            else:
+                state = self._owner.snapshot().state
+                if state == "ready":
+                    try:
+                        page = self._owner.page
+                        await page.evaluate("1 + 1")
+                        self.status = "started"
+                        return page
+                    except Exception:
+                        # 工作页被关/卡死/context 被原生关闭 → 整体重启(接入前行为)。
+                        get_logger().warning(
+                            "working page not responsive — releasing browser for relaunch"
+                        )
+                        await self._ensure_released()
+                elif state == "release_failed":
+                    # 上一次 release 未完成: 先受控重试, 仍失败则 fail-closed。
+                    await self._ensure_released()
             try:
-                if self.page is None:
-                    self.page = p
-                else:
-                    await p.close()
+                page = await self._owner.start()
+            except PageCleanupError:
+                raise  # restored-tab cleanup failed: report attached, resources freed (§8)
+            except Exception as exc:  # channel="chrome" needs Google Chrome installed
+                raise BrowserLaunchError(
+                    f"Could not launch Chrome (channel={self.config.browser.channel!r}): {exc}. "
+                    "Install Google Chrome, or run `.venv/bin/python -m playwright install chrome`. "
+                    "To fall back to bundled Chromium, set channel = \"\" in config.local.toml."
+                ) from exc
+            try:
+                await page.bring_to_front()  # make the Chrome window unambiguous/front-most
             except Exception:
                 pass
-        if self.page is None or self.page.is_closed():
-            try:
-                self.page = await self.context.new_page()
-            except Exception:
-                self.page = self.context.pages[0] if self.context.pages else None
-        try:
-            await self.page.bring_to_front()  # make the Chrome window unambiguous/front-most
-        except Exception:
-            pass
-        self.status = "started"
-        return self.page
+            self.status = "started"
+            return page
 
-    async def close(self) -> None:
+    async def close(self) -> ReleaseReport | None:
+        """Release the browser (lifespan exit / compare reset). Best-effort like
+        before, but HONEST: completion is reported and failures are logged with
+        the library's per-resource report; the session stays releasable. The
+        pre-library behavior of swallowing every error while always claiming
+        "closed" is gone (guide §8 flags this as an intentional improvement).
+        """
+        if self._owner is None:
+            self.status = "closed"
+            return None
         try:
-            if self.context is not None:
-                await self.context.close()
-        except Exception:
-            pass
-        await self._stop_playwright()
-        self.context = None
-        self.page = None
-        self.status = "closed"
-
-    async def _stop_playwright(self) -> None:
-        try:
-            if self.playwright is not None:
-                await self.playwright.stop()
-        except Exception:
-            pass
-        self.playwright = None
+            report = await self._release_owner()
+        except SessionStateError as exc:
+            get_logger().error("browser close refused by ownership rules: %s", exc)
+            return None
+        if report.complete:
+            self.status = "closed"
+        return report
 
     # ---- login -------------------------------------------------------------
     @staticmethod
@@ -249,10 +356,11 @@ class BrowserSession:
 
     async def _has_auth_cookies(self) -> bool:
         """Cheap pre-filter only — guests also receive these cookies."""
-        if self.context is None:
+        context = self._context_or_none()
+        if context is None:
             return False
         try:
-            cookies = await self.context.cookies()
+            cookies = await context.cookies()
         except Exception:
             return False
         names = {c.get("name") for c in cookies}
@@ -306,7 +414,7 @@ class BrowserSession:
         Before the first successful `ensure_logged_in` verification the answer is
         False (safe default) — never a guest-cookie guess.
         """
-        if self.context is None or self.login_confirmed is None:
+        if self._context_or_none() is None or self.login_confirmed is None:
             return False
         if time.monotonic() - self.login_confirmed_at > _CONFIRMED_TTL_S:
             self.login_confirmed = None
@@ -386,7 +494,7 @@ class BrowserSession:
         frequency dialog is present but not closable (→ hand to human). A real
         slider/punish wall is never auto-clicked.
         """
-        page = page or self.page
+        page = page or self._page_or_none()
         if page is None:
             return True
         for _ in range(3):
@@ -426,7 +534,8 @@ class BrowserSession:
         """
         out: list = []
         seen: set[int] = set()
-        for p in [page, *(self.context.pages if self.context is not None else [])]:
+        context = self._context_or_none()
+        for p in [page, *(context.pages if context is not None else [])]:
             try:
                 if p is not None and not p.is_closed() and id(p) not in seen:
                     seen.add(id(p))
@@ -541,10 +650,11 @@ class BrowserSession:
         ar = load_config().anti_risk
         timeout_s = ar.captcha_timeout_s if timeout_s is None else timeout_s
         poll_s = ar.captcha_poll_s if poll_s is None else poll_s
-        page = page or self.page
-        if page is None and self.context is not None:
+        page = page or self._page_or_none()
+        if page is None:
             # 主工作页可能已关, 但浏览器还在(验证码可能在新标签页) — 用任一活动页。
-            for p in self.context.pages:
+            context = self._context_or_none()
+            for p in (context.pages if context is not None else []):
                 if not p.is_closed():
                     page = p
                     break
