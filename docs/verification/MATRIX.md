@@ -76,3 +76,41 @@ Never describe an unexecuted or external deployment check as passed.
   marked resolved.
 - Run: full pytest suite green after adoption (see commit); library-side release
   note reports 111 offline unittests. Browser-host smoke still pending as above.
+
+## Record (deployment upgrade + bridge smoke, 2026-09-10)
+
+- Candidate: main @ `cad398c` (adoption chain `0ba55af`…`ac5def6` + status-handler
+  fix) with `lijq-browser-common==0.1.0.dev2`, deployed to the Windows copy at
+  `C:\MCP\taobao-mcp` (file-copy deployment, not a git clone; pre-sync fingerprint
+  matched `2547c56` with local governance evolution — governance-coupled files
+  `AGENTS.md`/`.agent-guides*`/`dsh/`/`src/runtime_prompt.py` and deployment-only
+  files `bridge/`, `DSH_WSL_BRIDGE.md`, `STDIO_DEPLOYMENT.json`, `.mcp.json`,
+  `config.local.toml`, `user_data/`, `output/` were deliberately NOT synced).
+- Recovery point: `/mnt/c/MCP/taobao-mcp_backup_20260910_pre_dev2.tar.gz`
+  (source tree, excludes runtime dirs) + pre-upgrade pip freeze snapshot; dev1
+  wheel retained.
+- Executed (WSL): full suite 433 passed + 1 skipped (includes the new
+  status-before-start regression test); sync scoped to `src/browser/`,
+  `src/extract/{desc,qa,reviews,orders,favorite,search}.py`, `pyproject.toml`,
+  docs; `py_compile` of all synced files via the deployment interpreter
+  (Python 3.14.6); wheel installed offline (`--force-reinstall --no-deps`);
+  import + new-API check on the deployment venv.
+- Executed (bridge): backend restart gen 1→2 and gen 2→3, both with clean
+  phases (drain → protocol-close → wait, no force-kill); taobao connection
+  expanded and catalogued — exactly the authoritative 13 tools, `verified`;
+  read-only smokes: `taobao_session(action=status)` → `not_started: call
+  taobao_session(action=login) first …` (correct pre-start guidance);
+  `taobao_config(action=get)` → full config, confirms the deployment runs the
+  Edge pinned-binary path (`browser.executable_path=…msedge.exe`), which the
+  facade's `executable_path` branch covers.
+- Finding (fixed during the smoke): the status tool used the retired
+  `session.context is None` semantics; under the shared-library §5 contract
+  (properties raise when unavailable) it errored at the protocol layer instead
+  of returning `not_started`. Fixed in `server.py` with a lazy-imported catch +
+  protocol regression test (`cad398c`); redeployed and re-verified in the same
+  session. Offline fake-based tests had not covered this handler path.
+- Not executed / not claimed: QR login, any Taobao navigation, popup-chain and
+  orders logistics flows on the real account, and `tools/smoke_browser_common.py`
+  on the host (isolated-profile facade smoke still available for the next
+  host-side session). These require the human at the window and separate
+  approval.
