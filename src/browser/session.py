@@ -1,7 +1,7 @@
 """Persistent headed real-Chrome session: launch, login, login-check, captcha pause.
 
 Resource ownership is delegated to the shared library ``browser_common``
-(``AsyncSession``, lijq-browser-common==0.1.0.dev1): it exclusively holds the
+(``AsyncSession``, lijq-browser-common==0.1.0.dev2): it exclusively holds the
 native Playwright driver/context and the single working page, while THIS module
 keeps all Taobao business policy — active QR-polling login, captcha handoff,
 stealth init script, project-local profile boundary (ADAPTATION_GUIDE §2/§10).
@@ -137,19 +137,23 @@ async def _after_context_created(context) -> None:
 
 
 def _report_failures(report: ReleaseReport) -> str:
-    """Compact, type-only rendering of a release report for logs (no page data)."""
-    return ",".join(f"{f.operation}:{f.error_type}" for f in report.failures) or "none"
+    """Compact, type-only rendering of a release report for logs (no page data).
+    Delegates to the library's failures_summary (dev2) — identical rendering."""
+    return report.failures_summary
 
 
 def track_temporary_page(scope, page):
     """Register a popup/temp page with an active temporary_pages() scope
-    (ADAPTATION_GUIDE §6). A page the site already closed needs no cleanup and is
-    skipped; tracked pages are closed by the scope on exit — failures surface as
-    PageCleanupError instead of the old silent swallow (fail-loud, guide 完成指标
-    "临时页不误关"/"失败不误报成功"). Returns the page unchanged.
+    (ADAPTATION_GUIDE §6). Uses the library's try_track (dev2): None and
+    already-closed same-context pages are skipped (they need no cleanup);
+    ownership errors — working page, another active scope, foreign context —
+    still raise SessionStateError and are never suppressed. Tracked pages are
+    closed by the scope on exit; exit failures surface as PageCleanupError
+    instead of the old silent swallow (fail-loud, guide 完成指标
+    "临时页不误关"/"失败不误报成功"). Returns the page unchanged (facade
+    semantics — try_track itself returns bool; never use that as the page).
     """
-    if page is not None and not page.is_closed():
-        scope.track(page)
+    scope.try_track(page)
     return page
 
 

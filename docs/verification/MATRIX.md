@@ -60,3 +60,19 @@ Never describe an unexecuted or external deployment check as passed.
 - Pending target-host evidence (not run, not claimed):
   `tools/smoke_browser_common.py` on the browser host, then human-visible
   session checks only when separately approved.
+
+## Record (shared-library upgrade to 0.1.0.dev2, 2026-09-10)
+
+- Wheel `lijq_browser_common-0.1.0.dev2-py3-none-any.whl` (23582 bytes), sha256
+  `c1763265aa5c968032e7d18116d07e18ddbdbd873a4d6c7db033686a58913cc8` verified
+  against the library's own release note (`FEEDBACK_DEV2.md`). Offline local
+  install with `--force-reinstall --no-deps`; recovery point: reinstall the
+  retained dev1 wheel (sha256 `0a32e9f0…`, recorded in `/tmp/backup_pip_freeze_dev1.txt`
+  snapshot of the pre-upgrade freeze).
+- Business adoption (user-approved): facade `track_temporary_page` now calls the
+  library's `try_track` (identical skip/raise semantics, returns the page
+  unchanged); `_report_failures` delegates to `report.failures_summary`;
+  dependency pinned to `==0.1.0.dev2`; runbook checksum updated; feedback doc
+  marked resolved.
+- Run: full pytest suite green after adoption (see commit); library-side release
+  note reports 111 offline unittests. Browser-host smoke still pending as above.

@@ -6,8 +6,8 @@ Scope: MCP process, browser/profile ownership, DSH policy adapter, and optional 
 ## Preconditions
 
 - A deployment copy on the browser host with Python 3.11+ and dependencies installed.
-- Pinned shared-library wheel in the venv: `lijq-browser-common==0.1.0.dev1`
-  (local wheel, sha256 `0a32e9f0803cabab2fb867fef262ee7b2949114c6f8af7cdfcf852be3f0c6c80`).
+- Pinned shared-library wheel in the venv: `lijq-browser-common==0.1.0.dev2`
+  (local wheel, sha256 `c1763265aa5c968032e7d18116d07e18ddbdbd873a4d6c7db033686a58913cc8`).
 - A visible Chrome/Edge configured by `config.toml` plus ignored `config.local.toml`.
 - Preserved ignored `user_data/chrome_profile`, `output/`, and local configuration.
 - Exactly one MCP process owner for that profile.

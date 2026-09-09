@@ -30,7 +30,11 @@ from types import SimpleNamespace
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_PROJECT_ROOT / "src"))
 
-from src.browser.session import BrowserSession, _STEALTH_JS  # noqa: E402
+from src.browser.session import (  # noqa: E402
+    BrowserSession,
+    _STEALTH_JS,
+    track_temporary_page,
+)
 
 RESULTS: list[tuple[str, bool, str]] = []
 SMOKE_PROFILE = _PROJECT_ROOT / "user_data" / "smoke_profile"
@@ -64,7 +68,7 @@ async def run_smoke() -> None:
            f"n_scripts={len(scripts)}")
 
     async with sess.temporary_pages() as scope:
-        extra = scope.track(await sess._owner.context.new_page())
+        extra = track_temporary_page(scope, await sess._owner.context.new_page())
         await extra.goto("data:text/html,<p>scope-temp</p>")
         body = await extra.evaluate("() => document.body.innerText")
     record("S3 scope tracks+uses native page", body == "scope-temp")

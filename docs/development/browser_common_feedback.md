@@ -1,5 +1,13 @@
 # browser_common 集成反馈(移交共享库维护方)
 
+> **处理状态(2026-09-10,0.1.0.dev2)**:共享库已发布 dev2 回应本件,五条全部处理
+> (详见共享库仓库 `FEEDBACK_DEV2.md`):§1 语义保持并补库侧测试;§2 新增
+> `scope.try_track(page)->bool`(严格 track 不变);§3 手册补内层函数/AsyncExitStack
+> 建议;§4 新增 `ReleaseReport.failures_summary`;§5 错误消息带 owner/current loop id。
+> taobao-mcp 已收编:门面 `track_temporary_page` 改用 try_track(保留返回原 Page 语义)、
+> `_report_failures` 委托 `failures_summary`、依赖固定 ==0.1.0.dev2
+> (wheel sha256 `c1763265aa5c9680…913cc8`)。本件保留为历史移交记录。
+
 来源:taobao-mcp 接入 `lijq-browser-common==0.1.0.dev1`(wheel sha256 `0a32e9f0803cabab…`)的
 阶段 0-3 实施过程(2026-09-09/10)。每条标注证据与建议等级。本文是移交件,不是本仓库的
 权威边界文档。

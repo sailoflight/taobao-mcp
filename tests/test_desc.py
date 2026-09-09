@@ -62,9 +62,14 @@ class _FakeScope:
                     pass
         return False
 
-    def track(self, page):
+    def try_track(self, page):
+        """Mirror of the library's try_track (dev2): None/closed pages are
+        skipped; live pages register; ownership errors stay strict (fakes here
+        never violate ownership, so no raise paths are modelled)."""
+        if page is None or page.is_closed():
+            return False
         self.tracked.append(page)
-        return page
+        return True
 
 
 class _FakeSession:
@@ -336,9 +341,11 @@ def test_scope_skips_already_closed_popup(monkeypatch):
         def __init__(self):
             self.tracked = []
 
-        def track(self, p):
+        def try_track(self, p):
+            if p is None or p.is_closed():
+                return False
             self.tracked.append(p)
-            return p
+            return True
 
     scope = _Scope()
     dead = _Dead()
