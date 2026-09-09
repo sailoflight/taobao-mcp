@@ -327,3 +327,16 @@ def test_debug_watch_start_url_allowlist():
                 "https://taobao.com.evil.com/x", "https://nottaobao.com/x", "",
                 "https://user:pass@taobao.com/x", "https://taobao.com:444/x"):
         assert _check_watch_start_url(bad) is not None, repr(bad)
+
+
+def test_session_status_before_start_returns_not_started(monkeypatch):
+    """协议层回归(2026-09-10 桥上冒烟抓到): 共享库门面按 ADAPTATION_GUIDE §5 契约,
+    未启动时 context 属性抛 ResourceUnavailableError 而非返回 None;status 工具必须
+    捕获并返回 not_started 指引字符串, 而不是让协议层报错。"""
+    import src.browser.session as session_mod
+
+    real = session_mod.BrowserSession()  # 未启动; 离线构造, 绝不触发 playwright
+    monkeypatch.setattr(server, "_get_session", lambda: real)
+    out = asyncio.run(server.taobao_session(action="status"))
+    assert out.startswith("not_started"), out
+    assert "taobao_session(action=login)" in out

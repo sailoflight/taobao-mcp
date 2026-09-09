@@ -241,7 +241,13 @@ async def taobao_session(action: str = "status") -> str:
         return await _ensure_logged_in()
 
     s = _get_session()
-    if s.context is None:
+    from browser_common import ResourceUnavailableError  # 惰性: 不污染协议层导入
+
+    try:
+        ctx = s.context  # 共享库门面契约(ADAPTATION_GUIDE §5): 未启动时抛 ResourceUnavailableError, 不再返回 None
+    except ResourceUnavailableError:
+        ctx = None
+    if ctx is None:
         return "not_started: call taobao_session(action=login) first (opens Chrome for QR login)."
     logged_in = await s.is_logged_in()
     note = (
