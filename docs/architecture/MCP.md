@@ -32,8 +32,26 @@ MCP client or external adapter
 | `run_mcp_stdio.py` | force stdio mode and exec the server | MCP client/adapter |
 | `server.py` | identity, policy, 13 schemas/handlers, process-wide serialization | MCP process |
 | `src/extract/` | search/product/review/order parsers | business module |
-| `src/browser/` | browser session, pacing, scroll, persistent profile | MCP process |
+| `src/browser/` | browser session facade, pacing, scroll, persistent profile | MCP process |
 | `dsh/` | generated runtime-policy companion and external-bridge client example | client compatibility |
+
+### Browser layer composition (shared runtime)
+
+`BrowserSession` in `src/browser/session.py` is a facade over the pinned shared
+library dependency `lijq-browser-common` (`browser_common.AsyncSession`): the
+library owns launch, context, working page, and release exclusively; the facade
+keeps only business rules (stealth init script, headless fail-closed before
+launch, login/captcha/pacing, probe-then-relaunch, error mapping). Temporary
+pages carry explicit cleanup ownership:
+
+- popup chains (favorite producer → desc/qa/reviews consumers) register the
+  popup in a `temporary_pages()` scope on the consumer side; the scope closes
+  it on exit on both success and error paths (`track_temporary_page` skips
+  already-closed pages);
+- the orders logistics tab keeps its reuse + at-most-one-recreate policy and is
+  scope-registered instead of a manual finally close;
+- same-function flows that already have one explicit final owner (newtab and
+  cart_price probes) keep their manual close.
 
 ## Boundaries
 

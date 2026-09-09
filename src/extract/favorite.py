@@ -513,22 +513,26 @@ async def recon_collect(target_pid: str = "") -> dict:
                 await human_click(page, target)
             popup = await pi.value
             try:
-                await popup.wait_for_load_state("domcontentloaded", timeout=20000)
-            except Exception:
-                pass
-            await popup.wait_for_timeout(2500)
-            url = (popup.url or "") if not popup.is_closed() else ""
-            out["clicked"] = {
-                "url": url[:240],
-                "mi_id": miid_from_url(url),
-                "opened_id": (parse_qs(urlparse(url or "").query).get("id") or [None])[0],
-                "matches_target": bool(target_pid and target_pid in (url or "")),
-            }
-            if not popup.is_closed():
                 try:
-                    await popup.close()
+                    await popup.wait_for_load_state("domcontentloaded", timeout=20000)
                 except Exception:
                     pass
+                await popup.wait_for_timeout(2500)
+                url = (popup.url or "") if not popup.is_closed() else ""
+                out["clicked"] = {
+                    "url": url[:240],
+                    "mi_id": miid_from_url(url),
+                    "opened_id": (parse_qs(urlparse(url or "").query).get("id") or [None])[0],
+                    "matches_target": bool(target_pid and target_pid in (url or "")),
+                }
+            finally:
+                # 清理与使用同所有权(ADAPTATION_GUIDE §6): close 在 finally 中,
+                # popup 使用中途异常也不再泄漏标签页(原先 close 在 try 内会被跳过)。
+                if not popup.is_closed():
+                    try:
+                        await popup.close()
+                    except Exception:
+                        pass
         else:
             out["clicked"] = {"error": "no goodsItem cards rendered"}
     except Exception as exc:

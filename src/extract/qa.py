@@ -92,7 +92,7 @@ async def probe_qa_expand(product_url_or_id: str) -> dict:
     双机制取 mi_id 页(足迹→收藏兜底)。
     """
     from src.browser.pacing import human_delay
-    from src.browser.session import get_session
+    from src.browser.session import get_session, track_temporary_page
     from src.extract.favorite import (
         click_from_favorites,
         ensure_favorited,
@@ -106,74 +106,74 @@ async def probe_qa_expand(product_url_or_id: str) -> dict:
     page = await session.start()
     out: dict = {"product_id": pid}
     popup = None
-    res = await open_via_footmark(page, pid)
-    if res.get("url") and res.get("matches_target") and res.get("popup"):
-        out["miid_channel"] = "footmark"
-        popup = res.get("popup")
-    else:
-        out["footmark_fallback"] = res.get("reason")
-        try:  # 兜底收藏渠道
-            fav = await ensure_favorited(page, pid)
-            added = bool(fav.get("added_by_us"))
-            fres = await click_from_favorites(page, pid, added_by_us=added)
-            if fres.get("mi_id") and fres.get("matches_target") and fres.get("popup"):
-                out["miid_channel"] = "favorite"
-                popup = fres.get("popup")
-                if added:
-                    try:
-                        await ensure_unfavorited(page, pid)
-                    except Exception:
-                        pass
-        except Exception as exc:
-            out["favorite_error"] = str(exc)[:120]
-    if not popup:
-        out["miid_error"] = "footmark 与收藏兜底均未取到 mi_id 页"
-        return out
-    out["miid_url"] = (popup.url or "")[:160]
-    qa_sel = '[class*="askAnswerItem"], [class*="qaItem"], [class*="QA"]'
+    # 共享库临时页责任(ADAPTATION_GUIDE §6): popup 由 scope 接管清理, 异常路径也不泄漏。
+    async with session.temporary_pages() as tp_scope:
+        res = await open_via_footmark(page, pid)
+        if res.get("url") and res.get("matches_target") and res.get("popup"):
+            out["miid_channel"] = "footmark"
+            popup = res.get("popup")
+            track_temporary_page(tp_scope, popup)
+        else:
+            out["footmark_fallback"] = res.get("reason")
+            try:  # 兜底收藏渠道
+                fav = await ensure_favorited(page, pid)
+                added = bool(fav.get("added_by_us"))
+                fres = await click_from_favorites(page, pid, added_by_us=added)
+                if fres.get("mi_id") and fres.get("matches_target") and fres.get("popup"):
+                    out["miid_channel"] = "favorite"
+                    popup = fres.get("popup")
+                    track_temporary_page(tp_scope, popup)
+                    if added:
+                        try:
+                            await ensure_unfavorited(page, pid)
+                        except Exception:
+                            pass
+            except Exception as exc:
+                out["favorite_error"] = str(exc)[:120]
+        if not popup:
+            out["miid_error"] = "footmark 与收藏兜底均未取到 mi_id 页"
+            return out
+        out["miid_url"] = (popup.url or "")[:160]
+        qa_sel = '[class*="askAnswerItem"], [class*="qaItem"], [class*="QA"]'
 
-    async def qa_count(p):
-        try:
-            return await p.locator(qa_sel).count()
-        except Exception:
-            return -1
-
-    out["before_cards"] = await qa_count(popup)
-    try:
-        first = popup.locator(qa_sel).first
-        out["first_html"] = (await first.evaluate("el => el.outerHTML") or "")[:1400]
-    except Exception:
-        out["first_html"] = None
-    clicked = None
-    for lbl in ("查看全部问答", "全部问答", "查看更多", "更多问答"):
-        try:
-            loc = popup.get_by_text(lbl, exact=False).first
-            if await loc.count() > 0:
-                await loc.scroll_into_view_if_needed(timeout=3000)
-                await loc.click(timeout=5000)
-                clicked = lbl
-                break
-        except Exception:
-            continue
-    out["clicked"] = clicked
-    await human_delay(3.0, 4.0)
-    ctx = session.context
-    out["pages_after"] = [{"url": (p.url or "")[:150]} for p in (ctx.pages if ctx else [])]
-    out["after_cards"] = await qa_count(popup)
-    try:
-        out["drawer_or_modal"] = await popup.locator('[class*="Drawer"], [class*="modal"], [class*="Modal"]').count()
-    except Exception:
-        out["drawer_or_modal"] = None
-    for p in (ctx.pages if ctx else []):
-        u = (p.url or "").lower()
-        if p is not popup and ("ask" in u or "wenda" in u or "qa" in u):
+        async def qa_count(p):
             try:
-                out["new_page_cards"] = await qa_count(p)
-                out["new_page_url"] = (p.url or "")[:160]
+                return await p.locator(qa_sel).count()
             except Exception:
-                pass
-    try:
-        await popup.close()
-    except Exception:
-        pass
+                return -1
+
+        out["before_cards"] = await qa_count(popup)
+        try:
+            first = popup.locator(qa_sel).first
+            out["first_html"] = (await first.evaluate("el => el.outerHTML") or "")[:1400]
+        except Exception:
+            out["first_html"] = None
+        clicked = None
+        for lbl in ("查看全部问答", "全部问答", "查看更多", "更多问答"):
+            try:
+                loc = popup.get_by_text(lbl, exact=False).first
+                if await loc.count() > 0:
+                    await loc.scroll_into_view_if_needed(timeout=3000)
+                    await loc.click(timeout=5000)
+                    clicked = lbl
+                    break
+            except Exception:
+                continue
+        out["clicked"] = clicked
+        await human_delay(3.0, 4.0)
+        ctx = session.context
+        out["pages_after"] = [{"url": (p.url or "")[:150]} for p in (ctx.pages if ctx else [])]
+        out["after_cards"] = await qa_count(popup)
+        try:
+            out["drawer_or_modal"] = await popup.locator('[class*="Drawer"], [class*="modal"], [class*="Modal"]').count()
+        except Exception:
+            out["drawer_or_modal"] = None
+        for p in (ctx.pages if ctx else []):
+            u = (p.url or "").lower()
+            if p is not popup and ("ask" in u or "wenda" in u or "qa" in u):
+                try:
+                    out["new_page_cards"] = await qa_count(p)
+                    out["new_page_url"] = (p.url or "")[:160]
+                except Exception:
+                    pass
     return out

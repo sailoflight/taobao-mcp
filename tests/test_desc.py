@@ -40,15 +40,47 @@ class _FakePage:
         return None
 
 
+class _FakeScope:
+    """Minimal temporary_pages() scope double: track() registers pages, exit closes
+    the still-open ones — mirroring the shared-library contract the facade delegates
+    to (ADAPTATION_GUIDE §6)."""
+
+    def __init__(self):
+        self.tracked: list = []
+        self.closed: list = []
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        for p in self.tracked:
+            if not p.is_closed():
+                try:
+                    await p.close()
+                    self.closed.append(p)
+                except Exception:
+                    pass
+        return False
+
+    def track(self, page):
+        self.tracked.append(page)
+        return page
+
+
 class _FakeSession:
     def __init__(self):
         self.page = _FakePage()
+        self.last_scope: _FakeScope | None = None
 
     async def start(self):
         return self.page
 
     async def guard_captcha(self, page=None):
         return None
+
+    def temporary_pages(self):
+        self.last_scope = _FakeScope()
+        return self.last_scope
 
 
 async def _noop(*a, **k):
@@ -173,8 +205,9 @@ def test_qa_ordinary_error_still_embedded(monkeypatch):
 
 def test_cleanup_runs_when_captcha_escapes(monkeypatch):
     """A CaptchaError escaping from fine-mode extraction must NOT leave account-state
-    residue: the favorite WE added this round is un-favorited and the popup tab is
-    closed in the finally before the error propagates (audit cleanup-on-error)."""
+    residue: the favorite WE added this round is un-favorited in the finally, and the
+    popup tab is closed by the temporary_pages scope on exit (shared-library cleanup
+    ownership, ADAPTATION_GUIDE §6) before the error propagates (audit cleanup-on-error)."""
     import src.browser.pacing as pacing_mod
     import src.browser.scroll as scroll_mod
     import src.browser.session as session_mod
@@ -198,12 +231,17 @@ def test_cleanup_runs_when_captcha_escapes(monkeypatch):
     class _FavSession:
         def __init__(self):
             self.page = _FakePage()
+            self.last_scope: _FakeScope | None = None
 
         async def start(self):
             return self.page
 
         async def guard_captcha(self, page=None):
             return None
+
+        def temporary_pages(self):
+            self.last_scope = _FakeScope()
+            return self.last_scope
 
     async def noop(*a, **k):
         return None
@@ -238,3 +276,72 @@ def test_cleanup_runs_when_captcha_escapes(monkeypatch):
         asyncio.run(fetch_detail("12345678901", miid_source="favorite"))
     assert unfavorited["called"] is True, "ensure_unfavorited must run before the error escapes"
     assert popup_closed["called"] is True, "popup close must run before the error escapes"
+
+
+def test_popup_closed_when_preharvest_step_raises(monkeypatch):
+    """泄漏路径回归(共享库接入, ADAPTATION_GUIDE §6): popup 经足迹/收藏通道获取后、
+    内层 try/finally 清理(原 _cleanup_fetch)之前 — URL 兜底 goto(638-645)、滚动(663-671)、
+    harvest evaluate(673) — 抛出普通异常时, 旧实现 popup 直接泄漏(finally 根本不在场上);
+    现在由 temporary_pages scope 退出关闭, 异常照常上浮。"""
+    import src.browser.pacing as pacing_mod
+    import src.browser.scroll as scroll_mod
+    import src.browser.session as session_mod
+    import src.extract.favorite as fav_mod
+
+    class _PopupPage(_FakePage):
+        def __init__(self):
+            self._closed = False
+
+        def is_closed(self):
+            return self._closed
+
+        async def close(self):
+            self._closed = True
+
+        async def evaluate(self, js):
+            if js == DESC_PANEL_JS:
+                raise RuntimeError("harvest boom (pre-try window)")
+            return await super().evaluate(js)
+
+    pop = _PopupPage()
+
+    async def _footmark_pop(page, pid):
+        return {"url": PAGE_URL, "mi_id": "abc", "matches_target": True, "popup": pop}
+
+    sess = _FakeSession()
+
+    _install_harness(monkeypatch)
+    monkeypatch.setattr(session_mod, "get_session", lambda: sess)
+    monkeypatch.setattr(fav_mod, "open_via_footmark", _footmark_pop)
+
+    with pytest.raises(RuntimeError, match="harvest boom"):
+        asyncio.run(fetch_detail("12345678901", miid_source="footmark"))
+    assert pop._closed is True, "scope exit must close the popup even when harvest raises"
+    assert sess.last_scope is not None and pop in sess.last_scope.closed
+
+
+def test_scope_skips_already_closed_popup(monkeypatch):
+    """track_temporary_page 的容错面: 通道返回已被站点/生产者关闭的 popup 时登记跳过,
+    scope 退出不再触碰(closed 页面 close 会抛)。"""
+    from src.browser.session import track_temporary_page
+
+    class _Dead:
+        def is_closed(self):
+            return True
+
+        async def close(self):
+            raise AssertionError("closed pages must never be tracked/closed again")
+
+    class _Scope:
+        def __init__(self):
+            self.tracked = []
+
+        def track(self, p):
+            self.tracked.append(p)
+            return p
+
+    scope = _Scope()
+    dead = _Dead()
+    assert track_temporary_page(scope, dead) is dead
+    assert track_temporary_page(scope, None) is None
+    assert scope.tracked == [], "closed/None pages are skipped, not tracked"

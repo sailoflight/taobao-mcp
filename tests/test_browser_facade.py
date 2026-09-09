@@ -203,3 +203,37 @@ def test_adopt_page_switches_working_page_without_closing_old(managers):
     assert obs["old_still_open"]  # adoption never closes the previous working page
     assert obs["status"] == "closed"
     assert obs["report_complete"]
+
+
+def test_temporary_pages_scope_delegates_and_closes_tracked(managers):
+    """Facade delegation (guide §6): temporary_pages() returns the library scope;
+    a tracked native page closes on scope exit while the working page is untouched.
+    Before start() it fails closed with ResourceUnavailableError."""
+    created, factory = managers
+    sess = _session(factory)
+
+    from browser_common import ResourceUnavailableError
+
+    with pytest.raises(ResourceUnavailableError):
+        sess.temporary_pages()
+
+    async def go():
+        page = await sess.start()
+        extra = await sess._owner.context.new_page()
+        async with sess.temporary_pages() as scope:
+            sess_mod.track_temporary_page(scope, extra)
+            obs = {
+                "extra_open_inside": not extra.is_closed(),
+                "work_open_inside": not page.is_closed(),
+            }
+        obs["extra_closed_after"] = extra.is_closed()
+        obs["work_open_after"] = not page.is_closed()
+        report = await sess.close()
+        obs["report"] = (report.complete, report.clean)
+        return obs
+
+    obs = asyncio.run(go())
+    assert obs["extra_open_inside"] and obs["work_open_inside"]
+    assert obs["extra_closed_after"], "scope exit must close the tracked temporary page"
+    assert obs["work_open_after"], "the working page is never a scope victim"
+    assert obs["report"] == (True, True)

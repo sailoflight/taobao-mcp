@@ -358,7 +358,7 @@ async def probe_reviews_rendering(product_url_or_id: str) -> dict:
     收藏链路每次经 收藏→点击收藏卡 新建弹窗页(新鲜 mi_id), 用完即关 — 不存在可复用 miid。
     """
     from src.browser.pacing import human_delay, human_scroll
-    from src.browser.session import get_session
+    from src.browser.session import get_session, track_temporary_page
     from src.extract.favorite import click_from_favorites, ensure_favorited, ensure_unfavorited
     from src.extract.fav_quota import check_and_record
     from src.extract.product import _to_product_id
@@ -399,58 +399,58 @@ async def probe_reviews_rendering(product_url_or_id: str) -> dict:
             res = await click_from_favorites(page, pid, added_by_us=entry["added_by_us"])
             popup = res.get("popup")
             if popup and res.get("mi_id"):
-                out["mi_id"] = res["mi_id"]
-                out["clicked_url"] = res["url"]
-                await human_delay(2.0, 3.2)
-                out["pages"]["miid"] = evidence("miid_popup", await popup.content())
-                drawer_info: dict = {"clicked": False, "comment_cards": 0, "extracted": 0}
-                try:
-                    for _ in range(5):
-                        await human_scroll(popup, 2)
-                        await human_delay(0.8, 1.2)
-                    for label in VIEW_ALL_LABELS:
-                        loc = popup.get_by_text(label, exact=False).first
-                        if await loc.count() > 0:
-                            await loc.scroll_into_view_if_needed(timeout=3000)
-                            await loc.click(timeout=3000)
-                            drawer_info["clicked"] = True
-                            break
-                    await human_delay(2.0, 3.0)
-                    drawer_info["comment_cards"] = await popup.locator('[class*="Comment--"]').count()
-                    drawer_info["drawer_present"] = await popup.locator(DRAWER_SELECTOR).count() > 0
-                    extracted = await popup.evaluate(_EXTRACT_JS)
-                    drawer_info["extracted"] = len(extracted or [])
-                    drawer_info["sample"] = [(r.get("text") or "")[:40] for r in (extracted or [])[:3]]
+                # 共享库临时页责任(ADAPTATION_GUIDE §6): popup 由 scope 接管清理 —
+                # 原 close 在 try 内, 异常时被跳过导致泄漏; scope 异常路径也关闭。
+                async with session.temporary_pages() as tp_scope:
+                    track_temporary_page(tp_scope, popup)
+                    out["mi_id"] = res["mi_id"]
+                    out["clicked_url"] = res["url"]
+                    await human_delay(2.0, 3.2)
+                    out["pages"]["miid"] = evidence("miid_popup", await popup.content())
+                    drawer_info: dict = {"clicked": False, "comment_cards": 0, "extracted": 0}
                     try:
-                        first = popup.locator('[class*="Comment--"]').first
-                        drawer_info["first_card_html"] = (await first.evaluate("el => el.outerHTML") or "")[:2000]
-                    except Exception:
-                        drawer_info["first_card_html"] = None
-                except Exception as exc:
-                    drawer_info["error"] = str(exc)[:120]
-                out["drawer_on_miid"] = drawer_info
+                        for _ in range(5):
+                            await human_scroll(popup, 2)
+                            await human_delay(0.8, 1.2)
+                        for label in VIEW_ALL_LABELS:
+                            loc = popup.get_by_text(label, exact=False).first
+                            if await loc.count() > 0:
+                                await loc.scroll_into_view_if_needed(timeout=3000)
+                                await loc.click(timeout=3000)
+                                drawer_info["clicked"] = True
+                                break
+                        await human_delay(2.0, 3.0)
+                        drawer_info["comment_cards"] = await popup.locator('[class*="Comment--"]').count()
+                        drawer_info["drawer_present"] = await popup.locator(DRAWER_SELECTOR).count() > 0
+                        extracted = await popup.evaluate(_EXTRACT_JS)
+                        drawer_info["extracted"] = len(extracted or [])
+                        drawer_info["sample"] = [(r.get("text") or "")[:40] for r in (extracted or [])[:3]]
+                        try:
+                            first = popup.locator('[class*="Comment--"]').first
+                            drawer_info["first_card_html"] = (await first.evaluate("el => el.outerHTML") or "")[:2000]
+                        except Exception:
+                            drawer_info["first_card_html"] = None
+                    except Exception as exc:
+                        drawer_info["error"] = str(exc)[:120]
+                    out["drawer_on_miid"] = drawer_info
 
-                # Q&A(问大家)区结构: 可见卡数 / "查看更多·查看全部"按钮 / 问答页链接
-                qa_info: dict = {}
-                try:
-                    qa_sel = '[class*="askAnswerItem"], [class*="qaItem"], [class*="QA"]'
-                    qa_info["cards"] = await popup.locator(qa_sel).count()
-                    first_qa = popup.locator(qa_sel).first
-                    if await first_qa.count() > 0:
-                        qa_info["first_html"] = (await first_qa.evaluate("el => el.outerHTML") or "")[:1200]
-                    for lbl in ("查看更多", "查看全部问答", "全部问答", "更多问答", "问大家"):
-                        n = await popup.get_by_text(lbl, exact=False).count()
-                        if n:
-                            qa_info.setdefault("buttons", {})[lbl] = n
-                    qa_info["links"] = await popup.evaluate(
-                        """() => [...document.querySelectorAll('a[href*="ask"],a[href*="qa"],a[href*="wenda"],a[href*="answer"],a[href*="wenj"]')].map(a => a.href).slice(0,6)""")
-                except Exception as exc:
-                    qa_info["error"] = str(exc)[:100]
-                out["qa_on_miid"] = qa_info
-                try:
-                    await popup.close()
-                except Exception:
-                    pass
+                    # Q&A(问大家)区结构: 可见卡数 / "查看更多·查看全部"按钮 / 问答页链接
+                    qa_info: dict = {}
+                    try:
+                        qa_sel = '[class*="askAnswerItem"], [class*="qaItem"], [class*="QA"]'
+                        qa_info["cards"] = await popup.locator(qa_sel).count()
+                        first_qa = popup.locator(qa_sel).first
+                        if await first_qa.count() > 0:
+                            qa_info["first_html"] = (await first_qa.evaluate("el => el.outerHTML") or "")[:1200]
+                        for lbl in ("查看更多", "查看全部问答", "全部问答", "更多问答", "问大家"):
+                            n = await popup.get_by_text(lbl, exact=False).count()
+                            if n:
+                                qa_info.setdefault("buttons", {})[lbl] = n
+                        qa_info["links"] = await popup.evaluate(
+                            """() => [...document.querySelectorAll('a[href*="ask"],a[href*="qa"],a[href*="wenda"],a[href*="answer"],a[href*="wenj"]')].map(a => a.href).slice(0,6)""")
+                    except Exception as exc:
+                        qa_info["error"] = str(exc)[:100]
+                    out["qa_on_miid"] = qa_info
             else:
                 out["click_fail_reason"] = res.get("reason")
         else:

@@ -250,7 +250,7 @@ async def track_orders(
             raise CacheCoverageError(cached_drilled, drill_n)
 
     from src.browser.pacing import human_delay, human_scroll
-    from src.browser.session import get_session
+    from src.browser.session import get_session, track_temporary_page
 
     session = get_session()
     page = await session.start()
@@ -275,7 +275,10 @@ async def track_orders(
     # if it wedges (Appendix B), never in a burst.
     lp = await session.context.new_page()
     recreated = False
-    try:
+    # 共享库临时页登记(ADAPTATION_GUIDE §10): 复用+至多一次重建策略保持不变;
+    # 重建出的新页重新登记, scope 退出关闭仍存活的物流页(取代原 finally close)。
+    async with session.temporary_pages() as tp_scope:
+        track_temporary_page(tp_scope, lp)
         for oid in ids[:drill_n]:
             o = OrderStatus(order_id=oid, title="", status="未知")
             try:
@@ -311,6 +314,7 @@ async def track_orders(
                     except Exception:
                         pass
                     lp = await session.context.new_page()
+                    track_temporary_page(tp_scope, lp)
                 else:
                     # already recreated once this run — do NOT open another tab in a burst.
                     # Stop drilling; keep what we have and hand the rest back for a retry.
@@ -318,11 +322,7 @@ async def track_orders(
                     break
             all_orders.append(o)
             await human_delay(4.0, 7.0)   # space logistics navigations — never burst
-    finally:
-        try:
-            await lp.close()
-        except Exception:
-            pass
+    # 物流页关闭由 tp_scope 退出负责(仍存活的页关闭; 重建前的旧页报 already_closed)。
     _save_cache(all_orders)   # stamp today's run so same-day re-calls serve the cache
     return _filter_orders(all_orders, only_active, drill_n)
 

@@ -141,6 +141,18 @@ def _report_failures(report: ReleaseReport) -> str:
     return ",".join(f"{f.operation}:{f.error_type}" for f in report.failures) or "none"
 
 
+def track_temporary_page(scope, page):
+    """Register a popup/temp page with an active temporary_pages() scope
+    (ADAPTATION_GUIDE §6). A page the site already closed needs no cleanup and is
+    skipped; tracked pages are closed by the scope on exit — failures surface as
+    PageCleanupError instead of the old silent swallow (fail-loud, guide 完成指标
+    "临时页不误关"/"失败不误报成功"). Returns the page unchanged.
+    """
+    if page is not None and not page.is_closed():
+        scope.track(page)
+    return page
+
+
 class BrowserSession:
     """Business facade over ONE exclusive shared-library AsyncSession.
 
@@ -237,6 +249,17 @@ class BrowserSession:
         if self._owner is None:
             raise ResourceUnavailableError("Browser not started; call start() first")
         self._owner.adopt_page(page)
+
+    def temporary_pages(self, *, budget_ms=None):
+        """Delegate: temporary-page cleanup scope (guide §6).
+
+        Pages tracked inside the scope are closed on scope exit; the working page
+        and pages of other active scopes are protected. Business keeps its own
+        pacing/sequencing — the scope only owns cleanup responsibility.
+        """
+        if self._owner is None:
+            raise ResourceUnavailableError("Browser not started; call start() first")
+        return self._owner.temporary_pages(budget_ms=budget_ms)
 
     async def _release_owner(self) -> ReleaseReport:
         assert self._owner is not None

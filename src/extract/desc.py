@@ -288,7 +288,7 @@ async def probe_miid_price(product_url_or_id: str, target_chip: str = "特大号
     Read-only navigation + one chip click; un-favorites if we added it this round.
     """
     from src.browser.pacing import human_click
-    from src.browser.session import get_session
+    from src.browser.session import get_session, track_temporary_page
     from src.extract.favorite import click_from_favorites, ensure_favorited, ensure_unfavorited
     from src.extract.product import _to_product_id
     from src.extract.selectors import PRICE_LINES_JS, SUBSIDY_PRICE_JS
@@ -301,66 +301,64 @@ async def probe_miid_price(product_url_or_id: str, target_chip: str = "特大号
     out["favorite"] = fav
     res = await click_from_favorites(page, pid, added_by_us=fav.get("state") == "added")
     popup = res.get("popup")
-    tp = popup or page
-    try:
-        await tp.wait_for_timeout(2500)
-        for _ in range(2):  # light scroll to trigger the price area to render
+    # 共享库临时页责任(ADAPTATION_GUIDE §6): popup 由 scope 接管清理, 异常路径也不泄漏。
+    async with session.temporary_pages() as tp_scope:
+        track_temporary_page(tp_scope, popup)
+        tp = popup or page
+        try:
+            await tp.wait_for_timeout(2500)
+            for _ in range(2):  # light scroll to trigger the price area to render
+                try:
+                    await tp.mouse.wheel(0, 400)
+                except Exception:
+                    pass
+                await tp.wait_for_timeout(600)
             try:
-                await tp.mouse.wheel(0, 400)
+                await tp.evaluate("window.scrollTo(0, 0)")
             except Exception:
                 pass
-            await tp.wait_for_timeout(600)
-        try:
-            await tp.evaluate("window.scrollTo(0, 0)")
-        except Exception:
-            pass
-        await tp.wait_for_timeout(1200)
-        out["landed_url"] = (res.get("url") or "")[:160]
-        out["subsidy_default"] = await tp.evaluate(SUBSIDY_PRICE_JS)
-        out["page_default"] = await tp.evaluate(PRICE_LINES_JS)
-    except Exception as exc:
-        out["land_error"] = str(exc)
-
-    # try to select the target chip (特大号 / 56*41*32) inside the sku area
-    chip_clicked = False
-    for sel in (f'[class*="sku"]:has-text("{target_chip}")',
-                f'[class*="Sku"]:has-text("{target_chip}")',
-                f'[class*="skuItem"]:has-text("{target_chip}")',
-                f'[class*="item"]:has-text("{target_chip}")'):
-        try:
-            loc = tp.locator(sel).first
-            if await loc.count() > 0:
-                await human_click(tp, loc)
-                await tp.wait_for_timeout(1800)
-                chip_clicked = True
-                break
-        except Exception:
-            continue
-    out["chip_clicked"] = chip_clicked
-    if chip_clicked:
-        try:
-            await tp.wait_for_timeout(2200)
-            out["subsidy_after_chip"] = await tp.evaluate(SUBSIDY_PRICE_JS)
-            out["page_after_chip"] = await tp.evaluate(PRICE_LINES_JS)
+            await tp.wait_for_timeout(1200)
+            out["landed_url"] = (res.get("url") or "")[:160]
+            out["subsidy_default"] = await tp.evaluate(SUBSIDY_PRICE_JS)
+            out["page_default"] = await tp.evaluate(PRICE_LINES_JS)
         except Exception as exc:
-            out["post_chip_error"] = str(exc)
+            out["land_error"] = str(exc)
 
-    if fav.get("added_by_us"):
-        try:
-            out["cleanup"] = await ensure_unfavorited(page, pid)
-        except Exception as exc:
-            out["cleanup"] = {"error": str(exc)}
-    if popup and not popup.is_closed():
-        try:
-            await popup.close()
-        except Exception:
-            pass
+        # try to select the target chip (特大号 / 56*41*32) inside the sku area
+        chip_clicked = False
+        for sel in (f'[class*="sku"]:has-text("{target_chip}")',
+                    f'[class*="Sku"]:has-text("{target_chip}")',
+                    f'[class*="skuItem"]:has-text("{target_chip}")',
+                    f'[class*="item"]:has-text("{target_chip}")'):
+            try:
+                loc = tp.locator(sel).first
+                if await loc.count() > 0:
+                    await human_click(tp, loc)
+                    await tp.wait_for_timeout(1800)
+                    chip_clicked = True
+                    break
+            except Exception:
+                continue
+        out["chip_clicked"] = chip_clicked
+        if chip_clicked:
+            try:
+                await tp.wait_for_timeout(2200)
+                out["subsidy_after_chip"] = await tp.evaluate(SUBSIDY_PRICE_JS)
+                out["page_after_chip"] = await tp.evaluate(PRICE_LINES_JS)
+            except Exception as exc:
+                out["post_chip_error"] = str(exc)
+
+        if fav.get("added_by_us"):
+            try:
+                out["cleanup"] = await ensure_unfavorited(page, pid)
+            except Exception as exc:
+                out["cleanup"] = {"error": str(exc)}
     return out
 
 
 async def probe_sku_structure(product_url_or_id: str, target: str = "特大号白色") -> dict:
     """诊断: SKU 芯片真实结构 + 点击后 selected 态/URL/价格是否变化. 走收藏链路落 mi_id 页."""
-    from src.browser.session import get_session
+    from src.browser.session import get_session, track_temporary_page
     from src.extract.favorite import click_from_favorites, ensure_favorited, ensure_unfavorited
     from src.extract.product import _to_product_id
     from src.extract.selectors import PRICE_LINES_JS
@@ -372,63 +370,61 @@ async def probe_sku_structure(product_url_or_id: str, target: str = "特大号�
     fav = await ensure_favorited(page, pid)
     res = await click_from_favorites(page, pid, added_by_us=fav.get("state") == "added")
     popup = res.get("popup")
-    tp = popup or page
-    await tp.wait_for_timeout(2500)
+    # 共享库临时页责任(ADAPTATION_GUIDE §6): popup 由 scope 接管清理, 异常路径也不泄漏。
+    async with session.temporary_pages() as tp_scope:
+        track_temporary_page(tp_scope, popup)
+        tp = popup or page
+        await tp.wait_for_timeout(2500)
 
-    SKU_STATE_JS = r"""() => {
-      const out = { chips: [] };
-      // 只取 SKU 选项根元素(带 data-vid 的 valueItem), 避免把 imgWrap/img/text 子元素算进来;
-      // 去掉 10-chip 上限 — 多档位商品(如 19 档食品袋)也能全量返回。
-      const nodes = document.querySelectorAll('[class*="valueItem"][data-vid]');
-      if (!nodes.length) {
-        document.querySelectorAll('[class*="valueItem"]').forEach(e => {
-          const t = (e.innerText || '').trim().replace(/\s+/g, ' ').slice(0, 30);
-          out.chips.push({
-            text: t,
-            cls: String(e.className || '').slice(0, 60),
-            selected: /selected|active|cur|on/i.test(String(e.className || '')),
-            html: (e.outerHTML || '').slice(0, 220),
+        SKU_STATE_JS = r"""() => {
+          const out = { chips: [] };
+          // 只取 SKU 选项根元素(带 data-vid 的 valueItem), 避免把 imgWrap/img/text 子元素算进来;
+          // 去掉 10-chip 上限 — 多档位商品(如 19 档食品袋)也能全量返回。
+          const nodes = document.querySelectorAll('[class*="valueItem"][data-vid]');
+          if (!nodes.length) {
+            document.querySelectorAll('[class*="valueItem"]').forEach(e => {
+              const t = (e.innerText || '').trim().replace(/\s+/g, ' ').slice(0, 30);
+              out.chips.push({
+                text: t,
+                cls: String(e.className || '').slice(0, 60),
+                selected: /selected|active|cur|on/i.test(String(e.className || '')),
+                html: (e.outerHTML || '').slice(0, 220),
+              });
+            });
+            return out;
+          }
+          nodes.forEach(e => {
+            const t = (e.innerText || '').trim().replace(/\s+/g, ' ').slice(0, 40);
+            out.chips.push({
+              text: t,
+              cls: String(e.className || '').slice(0, 80),
+              selected: /selected|active|cur|on/i.test(String(e.className || '')),
+              html: (e.outerHTML || '').slice(0, 260),
+            });
           });
-        });
-        return out;
-      }
-      nodes.forEach(e => {
-        const t = (e.innerText || '').trim().replace(/\s+/g, ' ').slice(0, 40);
-        out.chips.push({
-          text: t,
-          cls: String(e.className || '').slice(0, 80),
-          selected: /selected|active|cur|on/i.test(String(e.className || '')),
-          html: (e.outerHTML || '').slice(0, 260),
-        });
-      });
-      return out;
-    }"""
-    try:
-        out["chips_before"] = await tp.evaluate(SKU_STATE_JS)
-        # click the target chip
-        chip = tp.locator('[class*="valueItem"]').filter(has_text=target).first
-        if await chip.count() == 0:
-            chip = tp.get_by_text(target, exact=False).last
-        await chip.click(timeout=6000)
-        await tp.wait_for_timeout(3800)  # price re-render is async
-        out["url_after"] = (tp.url or "")[:200]
-        out["chips_after"] = await tp.evaluate(SKU_STATE_JS)
-        out["price_after"] = await tp.evaluate(PRICE_LINES_JS)
-        from src.extract.selectors import PRICE_NODE_JS
-        out["price_nodes_after"] = await tp.evaluate(PRICE_NODE_JS)
-    except Exception as exc:
-        out["error"] = str(exc)[:120]
-
-    if fav.get("added_by_us"):
+          return out;
+        }"""
         try:
-            out["cleanup"] = await ensure_unfavorited(page, pid)
+            out["chips_before"] = await tp.evaluate(SKU_STATE_JS)
+            # click the target chip
+            chip = tp.locator('[class*="valueItem"]').filter(has_text=target).first
+            if await chip.count() == 0:
+                chip = tp.get_by_text(target, exact=False).last
+            await chip.click(timeout=6000)
+            await tp.wait_for_timeout(3800)  # price re-render is async
+            out["url_after"] = (tp.url or "")[:200]
+            out["chips_after"] = await tp.evaluate(SKU_STATE_JS)
+            out["price_after"] = await tp.evaluate(PRICE_LINES_JS)
+            from src.extract.selectors import PRICE_NODE_JS
+            out["price_nodes_after"] = await tp.evaluate(PRICE_NODE_JS)
         except Exception as exc:
-            out["cleanup"] = {"error": str(exc)}
-    if popup and not popup.is_closed():
-        try:
-            await popup.close()
-        except Exception:
-            pass
+            out["error"] = str(exc)[:120]
+
+        if fav.get("added_by_us"):
+            try:
+                out["cleanup"] = await ensure_unfavorited(page, pid)
+            except Exception as exc:
+                out["cleanup"] = {"error": str(exc)}
     return out
 
 
@@ -437,7 +433,7 @@ async def sweep_variant_prices(product_url_or_id: str, max_chips: int = 12) -> d
     读每个型号的显示价格(店铺优惠后/券后/到手价/价格行) — 确认能分清每个 SKU 型号的价格。
     Read-only navigation + per-chip clicks; un-favorites if we added it this round.
     """
-    from src.browser.session import get_session
+    from src.browser.session import get_session, track_temporary_page
     from src.extract.favorite import click_from_favorites, ensure_favorited, ensure_unfavorited
     from src.extract.product import _to_product_id
     from src.extract.selectors import CHIP_DISCOVER_JS, DESC_PANEL_JS, PRICE_LINES_JS
@@ -449,72 +445,71 @@ async def sweep_variant_prices(product_url_or_id: str, max_chips: int = 12) -> d
     fav = await ensure_favorited(page, pid)
     res = await click_from_favorites(page, pid, added_by_us=fav.get("state") == "added")
     popup = res.get("popup")
-    tp = popup or page
-    try:
-        # DESC_PANEL scroll trick renders the whole page (prices included) — proven in fetch_detail
-        await tp.evaluate(DESC_PANEL_JS)
-        await tp.evaluate("window.scrollTo(0, 0)")
-        await tp.wait_for_timeout(1000)
-    except Exception:
-        pass
-    out["landed_url"] = (res.get("url") or "")[:160]
-    try:
-        out["base"] = await tp.evaluate(PRICE_LINES_JS)
-    except Exception as exc:
-        out["base"] = {"error": str(exc)[:80]}
-    try:
-        chips = await tp.evaluate(CHIP_DISCOVER_JS)
-    except Exception as exc:
-        chips = []
-        out["chip_discover_error"] = str(exc)
-    out["chips"] = chips
-    out["per_variant"] = {}
-    clicked = 0
-    for ch in chips[:max_chips]:
-        text = (ch or {}).get("text", "")
-        if not text or text in ("规格", "颜色分类") or "物品类型" in text or "重量" in text:
-            continue
-        # only the real SKU option chips (valueItem) carrying a size/color marker
+    # 共享库临时页责任(ADAPTATION_GUIDE §6): popup 由 scope 接管清理, 异常路径也不泄漏。
+    async with session.temporary_pages() as tp_scope:
+        track_temporary_page(tp_scope, popup)
+        tp = popup or page
         try:
-            size_part = text.split("【")[0].strip()
-            chip = tp.locator('[class*="valueItem"]').filter(has_text=size_part).first
-            if await chip.count() == 0:
-                chip = tp.get_by_text(text, exact=False).last
-            await chip.click(timeout=6000)  # native click — reliable selection for this diagnostic
-            await tp.wait_for_timeout(3200)  # the price/URL re-render is async — give it time
-            url_now = tp.url or ""
-            # upStreamPrice in the URL is Taobao's own per-variant price (authoritative)
-            import re as _re
-            m = _re.search(r'upStreamPrice=(\d+)', url_now)
-            out["per_variant"][text] = {
-                "url": url_now[:200],
-                "upstream_price": (m.group(1)[:-2] + "." + m.group(1)[-2:]) if m else None,
-                "price": await tp.evaluate(PRICE_LINES_JS),
-            }
-            clicked += 1
-        except Exception as exc:
-            out["per_variant"][text] = {"error": str(exc)[:80]}
-    out["chips_clicked"] = clicked
-    if fav.get("added_by_us"):
-        try:
-            out["cleanup"] = await ensure_unfavorited(page, pid)
-        except Exception as exc:
-            out["cleanup"] = {"error": str(exc)}
-    if popup and not popup.is_closed():
-        try:
-            await popup.close()
+            # DESC_PANEL scroll trick renders the whole page (prices included) — proven in fetch_detail
+            await tp.evaluate(DESC_PANEL_JS)
+            await tp.evaluate("window.scrollTo(0, 0)")
+            await tp.wait_for_timeout(1000)
         except Exception:
             pass
+        out["landed_url"] = (res.get("url") or "")[:160]
+        try:
+            out["base"] = await tp.evaluate(PRICE_LINES_JS)
+        except Exception as exc:
+            out["base"] = {"error": str(exc)[:80]}
+        try:
+            chips = await tp.evaluate(CHIP_DISCOVER_JS)
+        except Exception as exc:
+            chips = []
+            out["chip_discover_error"] = str(exc)
+        out["chips"] = chips
+        out["per_variant"] = {}
+        clicked = 0
+        for ch in chips[:max_chips]:
+            text = (ch or {}).get("text", "")
+            if not text or text in ("规格", "颜色分类") or "物品类型" in text or "重量" in text:
+                continue
+            # only the real SKU option chips (valueItem) carrying a size/color marker
+            try:
+                size_part = text.split("【")[0].strip()
+                chip = tp.locator('[class*="valueItem"]').filter(has_text=size_part).first
+                if await chip.count() == 0:
+                    chip = tp.get_by_text(text, exact=False).last
+                await chip.click(timeout=6000)  # native click — reliable selection for this diagnostic
+                await tp.wait_for_timeout(3200)  # the price/URL re-render is async — give it time
+                url_now = tp.url or ""
+                # upStreamPrice in the URL is Taobao's own per-variant price (authoritative)
+                import re as _re
+                m = _re.search(r'upStreamPrice=(\d+)', url_now)
+                out["per_variant"][text] = {
+                    "url": url_now[:200],
+                    "upstream_price": (m.group(1)[:-2] + "." + m.group(1)[-2:]) if m else None,
+                    "price": await tp.evaluate(PRICE_LINES_JS),
+                }
+                clicked += 1
+            except Exception as exc:
+                out["per_variant"][text] = {"error": str(exc)[:80]}
+        out["chips_clicked"] = clicked
+        if fav.get("added_by_us"):
+            try:
+                out["cleanup"] = await ensure_unfavorited(page, pid)
+            except Exception as exc:
+                out["cleanup"] = {"error": str(exc)}
     return out
 
 
-async def _cleanup_fetch(entry: dict, page, pid: str, popup) -> None:
+async def _cleanup_fetch(entry: dict, page, pid: str) -> None:
     """User-rule cleanup that MUST run even when a CaptchaError/SelectorDriftError
     escapes from on-page extraction (audit HIGH-3, cleanup-on-error guarantee):
-    un-favorite what WE favorited this round (no residue) and close the popup tab
-    we opened (single-tab hygiene, CLAUDE.md §7.3). Populates entry['cleanup'] for
-    the success-path return; on the error path it still runs first and then the
-    exception propagates.
+    un-favorite what WE favorited this round (no residue). The popup tab itself is
+    owned by the fetch_detail temporary-pages scope (ADAPTATION_GUIDE §6), which
+    closes it on scope exit on both success and error paths. Populates
+    entry['cleanup'] for the success-path return; on the error path it still runs
+    first and then the exception propagates.
     """
     if entry.get("added_by_us"):
         try:
@@ -525,11 +520,6 @@ async def _cleanup_fetch(entry: dict, page, pid: str, popup) -> None:
             entry["cleanup"] = {"error": str(exc)}
     else:
         entry["cleanup"] = {"state": "not_added_by_us", "clicked": False}
-    if popup and not popup.is_closed():
-        try:
-            await popup.close()
-        except Exception:
-            pass
 
 
 async def fetch_detail(product_url_or_id: str, miid_source: str = "config",
@@ -561,7 +551,7 @@ async def fetch_detail(product_url_or_id: str, miid_source: str = "config",
          (no residue); close the popup tab (single-tab hygiene).
     """
     from src.browser.pacing import human_delay
-    from src.browser.session import get_session
+    from src.browser.session import get_session, track_temporary_page
     from src.config import load_config
     from src.extract.miid import miid_from_url
     from src.extract.product import _to_product_id
@@ -583,181 +573,185 @@ async def fetch_detail(product_url_or_id: str, miid_source: str = "config",
     popup = None
     footmark_ok = False
 
-    # 1) 足迹渠道(默认, 不耗收藏配额; 列表易受用户手动浏览并发扰动 → 校验 opened_id==pid)
-    if miid_channel in ("auto", "footmark"):
-        from src.extract.favorite import open_via_footmark
+    # 共享库临时页责任(ADAPTATION_GUIDE §6): popup 由 scope 接管清理, 异常路径也不泄漏;
+    async with session.temporary_pages() as tp_scope:
+        # 1) 足迹渠道(默认, 不耗收藏配额; 列表易受用户手动浏览并发扰动 → 校验 opened_id==pid)
+        if miid_channel in ("auto", "footmark"):
+            from src.extract.favorite import open_via_footmark
 
-        fres = await open_via_footmark(page, pid)
-        if fres.get("url") and fres.get("mi_id") and fres.get("matches_target"):
-            entry["footmark"] = {k: fres[k] for k in ("url", "mi_id", "opened_id", "cards", "matched_idx")
-                                 if k in fres}
-            entry["miid_from"] = "footmark_click"
-            popup = fres.get("popup")
-            harvest_page = popup or page
-            footmark_ok = True
-        else:
-            entry["footmark"] = {k: fres.get(k) for k in ("reason", "cards") if fres.get(k) is not None}
-            entry["footmark_fallback"] = True
-            entry["click_fail_reason"] = fres.get("reason")
-
-    # 2) 收藏渠道(兜底: "auto" 且足迹失败, 或显式 "favorite")
-    if not footmark_ok and miid_channel in ("auto", "favorite"):
-        from src.config import load_config
-        if not load_config().anti_risk.fav_flow:
-            # 收藏链路总开关关闭 — 不碰收藏, 落到静态 config mi_id 快速查看
-            entry["favorite"] = {"state": "disabled", "quota": {"allowed": False}}
-            entry["favorite_fallback"] = True
-            entry["click_fail_reason"] = ("anti_risk.fav_flow=false(配置总开关关闭), 已用 config mi_id 快速查看; "
-                                          "如需收藏链路细查请 taobao_config set anti_risk.fav_flow true(人工确认)")
-        else:
-            from src.extract.favorite import click_from_favorites, ensure_favorited, ensure_unfavorited
-            from src.extract.fav_quota import check_and_record
-
-            quota = check_and_record()  # anti-risk: daily cap on the favorite flow
-            entry["quota"] = quota
-            if not quota.get("allowed"):
-                # 今日收藏链路配额已尽 — 不碰收藏, 落到静态 config mi_id 快速查看
-                entry["favorite"] = {"state": "quota_exceeded", "quota": quota}
-                entry["favorite_fallback"] = True
-                entry["click_fail_reason"] = (f"今日收藏链路已达上限({quota.get('limit')}次), "
-                                              "已用 config mi_id 快速查看; 明日或调大 "
-                                              "limits.fav_flow_per_day 后再细查")
+            fres = await open_via_footmark(page, pid)
+            if fres.get("url") and fres.get("mi_id") and fres.get("matches_target"):
+                entry["footmark"] = {k: fres[k] for k in ("url", "mi_id", "opened_id", "cards", "matched_idx")
+                                     if k in fres}
+                entry["miid_from"] = "footmark_click"
+                popup = fres.get("popup")
+                track_temporary_page(tp_scope, popup)
+                harvest_page = popup or page
+                footmark_ok = True
             else:
-                fav = await ensure_favorited(page, pid)
-                entry["favorite"] = fav
-                entry["added_by_us"] = bool(fav.get("added_by_us"))
-                res = await click_from_favorites(page, pid, added_by_us=entry["added_by_us"])
-                popup2 = res.get("popup")
-                if res.get("mi_id") and res.get("matches_target"):
-                    entry["clicked_url"] = res["url"]
-                    entry["miid_from"] = "favorite_click"
-                    popup = popup2
-                    harvest_page = popup2 or page
+                entry["footmark"] = {k: fres.get(k) for k in ("reason", "cards") if fres.get(k) is not None}
+                entry["footmark_fallback"] = True
+                entry["click_fail_reason"] = fres.get("reason")
+
+        # 2) 收藏渠道(兜底: "auto" 且足迹失败, 或显式 "favorite")
+        if not footmark_ok and miid_channel in ("auto", "favorite"):
+            from src.config import load_config
+            if not load_config().anti_risk.fav_flow:
+                # 收藏链路总开关关闭 — 不碰收藏, 落到静态 config mi_id 快速查看
+                entry["favorite"] = {"state": "disabled", "quota": {"allowed": False}}
+                entry["favorite_fallback"] = True
+                entry["click_fail_reason"] = ("anti_risk.fav_flow=false(配置总开关关闭), 已用 config mi_id 快速查看; "
+                                              "如需收藏链路细查请 taobao_config set anti_risk.fav_flow true(人工确认)")
+            else:
+                from src.extract.favorite import click_from_favorites, ensure_favorited, ensure_unfavorited
+                from src.extract.fav_quota import check_and_record
+
+                quota = check_and_record()  # anti-risk: daily cap on the favorite flow
+                entry["quota"] = quota
+                if not quota.get("allowed"):
+                    # 今日收藏链路配额已尽 — 不碰收藏, 落到静态 config mi_id 快速查看
+                    entry["favorite"] = {"state": "quota_exceeded", "quota": quota}
+                    entry["favorite_fallback"] = True
+                    entry["click_fail_reason"] = (f"今日收藏链路已达上限({quota.get('limit')}次), "
+                                                  "已用 config mi_id 快速查看; 明日或调大 "
+                                                  "limits.fav_flow_per_day 后再细查")
                 else:
-                    entry["favorite_fallback"] = True  # click missed/not found → static config below
-                    entry["click_fail_reason"] = res.get("reason")
-                    entry["clicked_opened_id"] = res.get("opened_id")
-    else:
-        entry["favorite"] = None
+                    fav = await ensure_favorited(page, pid)
+                    entry["favorite"] = fav
+                    entry["added_by_us"] = bool(fav.get("added_by_us"))
+                    res = await click_from_favorites(page, pid, added_by_us=entry["added_by_us"])
+                    popup2 = res.get("popup")
+                    if res.get("mi_id") and res.get("matches_target"):
+                        entry["clicked_url"] = res["url"]
+                        entry["miid_from"] = "favorite_click"
+                        popup = popup2
+                        track_temporary_page(tp_scope, popup)
+                        harvest_page = popup2 or page
+                    else:
+                        entry["favorite_fallback"] = True  # click missed/not found → static config below
+                        entry["click_fail_reason"] = res.get("reason")
+                        entry["clicked_opened_id"] = res.get("opened_id")
+        else:
+            entry["favorite"] = None
 
-    # Ensure we're on an item page carrying a usable mi_id (fallback / config path).
-    if not (harvest_page.url and "item.htm" in harvest_page.url and miid_from_url(harvest_page.url or "")):
-        mi_id = load_config().detail.mi_id
-        url = f"https://item.taobao.com/item.htm?id={pid}"
-        if mi_id:
-            url += f"&mi_id={mi_id}"
-        await page.goto(url, wait_until="domcontentloaded")
-        await session.guard_captcha(page)
-        harvest_page = page
+        # Ensure we're on an item page carrying a usable mi_id (fallback / config path).
+        if not (harvest_page.url and "item.htm" in harvest_page.url and miid_from_url(harvest_page.url or "")):
+            mi_id = load_config().detail.mi_id
+            url = f"https://item.taobao.com/item.htm?id={pid}"
+            if mi_id:
+                url += f"&mi_id={mi_id}"
+            await page.goto(url, wait_until="domcontentloaded")
+            await session.guard_captcha(page)
+            harvest_page = page
 
-    # URL 轨迹诊断(2026-08-20): 用户观察到 足迹→详情→搜索页→详情 的异常导航。
-    # 记录每一步的 URL, 下次实机即可定位搜索页出现在哪个分支(主流程本不应经过搜索页)。
-    try:
-        get_logger().info(
-            "detail url-trace: miid_from=%s harvest=%s popup_closed=%s page=%s",
-            entry.get("miid_from"), (harvest_page.url or "")[:160],
-            (popup.is_closed() if popup else None), (page.url or "")[:160])
-    except Exception:
-        pass
-
-    # Bring the SKU panel into view (it sits below the fold). Use the element's own
-    # position, NOT window.scrollTo(0, scrollHeight) — the latter also drags the page
-    # through the 推广商品 area (2026-08-20 user: "细查会一直下滑到推广区, 浪费时间").
-    from src.browser.scroll import scroll_into_view
-
-    panel_loc = harvest_page.locator("#tbpcDetail_SkuPanelBody")
-    for _ in range(2):
+        # URL 轨迹诊断(2026-08-20): 用户观察到 足迹→详情→搜索页→详情 的异常导航。
+        # 记录每一步的 URL, 下次实机即可定位搜索页出现在哪个分支(主流程本不应经过搜索页)。
         try:
-            await scroll_into_view(harvest_page, panel_loc)
+            get_logger().info(
+                "detail url-trace: miid_from=%s harvest=%s popup_closed=%s page=%s",
+                entry.get("miid_from"), (harvest_page.url or "")[:160],
+                (popup.is_closed() if popup else None), (page.url or "")[:160])
         except Exception:
+            pass
+
+        # Bring the SKU panel into view (it sits below the fold). Use the element's own
+        # position, NOT window.scrollTo(0, scrollHeight) — the latter also drags the page
+        # through the 推广商品 area (2026-08-20 user: "细查会一直下滑到推广区, 浪费时间").
+        from src.browser.scroll import scroll_into_view
+
+        panel_loc = harvest_page.locator("#tbpcDetail_SkuPanelBody")
+        for _ in range(2):
             try:
-                await harvest_page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                await scroll_into_view(harvest_page, panel_loc)
             except Exception:
-                pass
-        await human_delay(0.6, 1.2)
-
-    harvest = await harvest_page.evaluate(DESC_PANEL_JS)
-    raw = harvest.get("imgs") or harvest.get("imgsAnyWidth") or []
-    normalized: list[str] = []
-    for u in raw:
-        s = str(u).strip()
-        if s.startswith("//"):
-            s = "https:" + s
-        elif not s.startswith("http"):
-            continue
-        if s not in normalized:
-            normalized.append(s)
-
-    try:
-        await harvest_page.evaluate("window.scrollTo(0, 0)")
-    except Exception:
-        pass
-
-    # Price observation (fine-compare): on the mi_id-entered page the personalized
-    # channel may show the platform-subsidy / coupon price (e.g. 平台加补后 ¥33.75).
-    # The whole on-page extraction region lives in a try/finally so the user-rule
-    # cleanup (un-favorite + popup close) ALWAYS runs — even when a
-    # CaptchaError/SelectorDriftError escapes from review/QA/recommend extraction
-    # (cleanup-on-error: fail loud WITHOUT leaving account-state residue).
-    try:
-        price_observed: dict = {}
-        if entry.get("miid_from") in ("footmark_click", "favorite_click"):
-            from src.extract.selectors import PRICE_LINES_JS, SUBSIDY_PRICE_JS
-
-            try:
-                price_observed["platform_subsidy_after"] = await harvest_page.evaluate(SUBSIDY_PRICE_JS)
-            except Exception:
-                price_observed["platform_subsidy_after"] = None
-            try:
-                price_observed["page"] = await harvest_page.evaluate(PRICE_LINES_JS)
-            except Exception:
-                pass
-
-        # On-page 评论/问答 (Tmall 只在 mi_id 详情页渲染): 关闭弹窗前就地一次抽取。
-        # mi_id 每次经 足迹/收藏 点击新建、用完即关, 不存在可复用 URL — 所以必须在这里取。
-        # 先问答后评论: 问答抽屉("查看全部问答")需页面无其它抽屉遮挡; 评论抽屉最后开。
-        reviews_extra: list = []
-        qa_extra: list = []
-        if harvest_page is not None and harvest_page.url and "item.htm" in harvest_page.url:
-            if entry.get("miid_from") in ("footmark_click", "favorite_click"):
                 try:
-                    from src.extract.qa import parse_qa
+                    await harvest_page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                except Exception:
+                    pass
+            await human_delay(0.6, 1.2)
 
-                    qa_extra = [q.model_dump() for q in await parse_qa(pid, page=harvest_page)]
-                except (CaptchaError, SelectorDriftError):
-                    raise  # 风控墙/布局漂移必须上浮给调用方 — 问答是 fine 模式必提取项, 不嵌入 error 静默
-                except Exception as exc:
-                    qa_extra = [{"error": str(exc)[:120]}]
-            try:
-                if with_reviews:
-                    from src.extract.reviews import parse_reviews_stratified
+        harvest = await harvest_page.evaluate(DESC_PANEL_JS)
+        raw = harvest.get("imgs") or harvest.get("imgsAnyWidth") or []
+        normalized: list[str] = []
+        for u in raw:
+            s = str(u).strip()
+            if s.startswith("//"):
+                s = "https:" + s
+            elif not s.startswith("http"):
+                continue
+            if s not in normalized:
+                normalized.append(s)
 
-                    revs = await parse_reviews_stratified(pid, max_reviews=reviews_max,
-                                                          keyword=reviews_keyword, page=harvest_page)
-                    reviews_extra = [r.model_dump() for r in revs]
-            except (CaptchaError, SelectorDriftError):
-                raise  # 风控墙/布局漂移必须上浮给调用方 — with_reviews=True 时评论是必提取项, 不嵌入 error 静默
-            except Exception as exc:
-                reviews_extra = [{"error": str(exc)[:120]}]
-
-        # 同类推荐/看了又看 (近似搜索通道, 2026-08-20): 搜索页被验证码风控, 但详情页
-        # 零验证码。从当前详情页 DOM 顺带收集同类商品卡(id+标题+¥) → 零额外流量/零验证码
-        # 的"近似搜索"。推荐列表无限长且含泛推荐噪声 → rank_recommendations 排序/过滤/压缩
-        # (按耗材关键词打分, 降序, 截断到上限, 防大量清单冲击上下文)。失败静默。
-        recommendations: dict = {"items": [], "total_raw": 0, "kept": 0, "dropped_noise": 0, "capped": False}
         try:
-            from src.extract.recommend import rank_recommendations
-            from src.extract.selectors import RECOMMEND_JS
+            await harvest_page.evaluate("window.scrollTo(0, 0)")
+        except Exception:
+            pass
 
-            raw_rec = await harvest_page.evaluate(RECOMMEND_JS)
-            recommendations = rank_recommendations(raw_rec or [])
-        except CaptchaError:
-            raise  # 撞上风控墙必须上浮 — 推荐虽是可选提取, 墙不能被吞掉后继续
-        except Exception as exc:
-            get_logger().warning("detail: recommend extraction failed: %s", exc)
-    finally:
-        # 用户规则清理(必须始终执行, 含异常上浮路径): 本轮收藏的取消收藏 + 关闭弹窗标签页。
-        await _cleanup_fetch(entry, page, pid, popup)
+        # Price observation (fine-compare): on the mi_id-entered page the personalized
+        # channel may show the platform-subsidy / coupon price (e.g. 平台加补后 ¥33.75).
+        # The whole on-page extraction region lives in a try/finally so the user-rule
+        # cleanup (un-favorite + popup close) ALWAYS runs — even when a
+        # CaptchaError/SelectorDriftError escapes from review/QA/recommend extraction
+        # (cleanup-on-error: fail loud WITHOUT leaving account-state residue).
+        try:
+            price_observed: dict = {}
+            if entry.get("miid_from") in ("footmark_click", "favorite_click"):
+                from src.extract.selectors import PRICE_LINES_JS, SUBSIDY_PRICE_JS
+
+                try:
+                    price_observed["platform_subsidy_after"] = await harvest_page.evaluate(SUBSIDY_PRICE_JS)
+                except Exception:
+                    price_observed["platform_subsidy_after"] = None
+                try:
+                    price_observed["page"] = await harvest_page.evaluate(PRICE_LINES_JS)
+                except Exception:
+                    pass
+
+            # On-page 评论/问答 (Tmall 只在 mi_id 详情页渲染): 关闭弹窗前就地一次抽取。
+            # mi_id 每次经 足迹/收藏 点击新建、用完即关, 不存在可复用 URL — 所以必须在这里取。
+            # 先问答后评论: 问答抽屉("查看全部问答")需页面无其它抽屉遮挡; 评论抽屉最后开。
+            reviews_extra: list = []
+            qa_extra: list = []
+            if harvest_page is not None and harvest_page.url and "item.htm" in harvest_page.url:
+                if entry.get("miid_from") in ("footmark_click", "favorite_click"):
+                    try:
+                        from src.extract.qa import parse_qa
+
+                        qa_extra = [q.model_dump() for q in await parse_qa(pid, page=harvest_page)]
+                    except (CaptchaError, SelectorDriftError):
+                        raise  # 风控墙/布局漂移必须上浮给调用方 — 问答是 fine 模式必提取项, 不嵌入 error 静默
+                    except Exception as exc:
+                        qa_extra = [{"error": str(exc)[:120]}]
+                try:
+                    if with_reviews:
+                        from src.extract.reviews import parse_reviews_stratified
+
+                        revs = await parse_reviews_stratified(pid, max_reviews=reviews_max,
+                                                              keyword=reviews_keyword, page=harvest_page)
+                        reviews_extra = [r.model_dump() for r in revs]
+                except (CaptchaError, SelectorDriftError):
+                    raise  # 风控墙/布局漂移必须上浮给调用方 — with_reviews=True 时评论是必提取项, 不嵌入 error 静默
+                except Exception as exc:
+                    reviews_extra = [{"error": str(exc)[:120]}]
+
+            # 同类推荐/看了又看 (近似搜索通道, 2026-08-20): 搜索页被验证码风控, 但详情页
+            # 零验证码。从当前详情页 DOM 顺带收集同类商品卡(id+标题+¥) → 零额外流量/零验证码
+            # 的"近似搜索"。推荐列表无限长且含泛推荐噪声 → rank_recommendations 排序/过滤/压缩
+            # (按耗材关键词打分, 降序, 截断到上限, 防大量清单冲击上下文)。失败静默。
+            recommendations: dict = {"items": [], "total_raw": 0, "kept": 0, "dropped_noise": 0, "capped": False}
+            try:
+                from src.extract.recommend import rank_recommendations
+                from src.extract.selectors import RECOMMEND_JS
+
+                raw_rec = await harvest_page.evaluate(RECOMMEND_JS)
+                recommendations = rank_recommendations(raw_rec or [])
+            except CaptchaError:
+                raise  # 撞上风控墙必须上浮 — 推荐虽是可选提取, 墙不能被吞掉后继续
+            except Exception as exc:
+                get_logger().warning("detail: recommend extraction failed: %s", exc)
+        finally:
+            # 用户规则清理(必须始终执行, 含异常上浮路径): 本轮收藏的取消收藏 + 关闭弹窗标签页。
+            await _cleanup_fetch(entry, page, pid)
 
     stale = not harvest.get("scope")
     # 分层评价摘要(让"检查分层详细评价"的过程可见, 2026-08-20 用户反馈):
