@@ -237,3 +237,57 @@ def test_temporary_pages_scope_delegates_and_closes_tracked(managers):
     assert obs["extra_closed_after"], "scope exit must close the tracked temporary page"
     assert obs["work_open_after"], "the working page is never a scope victim"
     assert obs["report"] == (True, True)
+
+
+def test_scope_exit_never_masks_body_exception(managers):
+    """库语义锁定(browser_common async_session.__aexit__): 业务异常传播途中清理
+    不完整 → 原异常上浮 + add_note(不抛 PageCleanupError);正常退出才 fail-loud。
+    desc/qa/reviews 的 CaptchaError/SelectorDriftError 上浮依赖此语义 — 若库回退为
+    一律抛 PageCleanupError, 风控墙会被清理失败遮蔽。"""
+    created, factory = managers
+    sess = _session(factory)
+
+    async def go():
+        await sess.start()
+
+        async def bad_close():
+            raise RuntimeError("stuck tab")
+
+        stuck = await sess._owner.context.new_page()
+        stuck.close = bad_close
+        raised = None
+        scope = None
+        try:
+            async with sess.temporary_pages() as tp_scope:
+                scope = tp_scope
+                sess_mod.track_temporary_page(scope, stuck)
+                raise RuntimeError("boom")  # 业务异常(如 CaptchaError 的占位)
+        except RuntimeError as exc:
+            raised = exc
+        obs1 = {
+            "msg": str(raised),
+            "notes": [n for n in (getattr(raised, "__notes__", None) or [])],
+            "incomplete": scope is not None and not scope.report.complete,
+        }
+
+        stuck2 = await sess._owner.context.new_page()
+        stuck2.close = bad_close
+        err2 = None
+        try:
+            async with sess.temporary_pages() as tp_scope2:
+                sess_mod.track_temporary_page(tp_scope2, stuck2)
+        except Exception as exc:  # noqa: BLE001
+            err2 = exc
+        obs2 = {
+            "type": type(err2).__name__ if err2 else None,
+            "report_complete": err2.report.complete if err2 is not None else None,
+        }
+        await sess.close()
+        return obs1, obs2
+
+    obs1, obs2 = asyncio.run(go())
+    assert obs1["msg"] == "boom", "the body exception must surface, not the cleanup failure"
+    assert obs1["notes"] and "cleanup incomplete" in obs1["notes"][0]
+    assert obs1["incomplete"]
+    assert obs2["type"] == "PageCleanupError", "clean exit + failed close must fail loud"
+    assert obs2["report_complete"] is False

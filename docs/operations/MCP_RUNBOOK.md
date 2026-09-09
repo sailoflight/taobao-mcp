@@ -6,6 +6,8 @@ Scope: MCP process, browser/profile ownership, DSH policy adapter, and optional 
 ## Preconditions
 
 - A deployment copy on the browser host with Python 3.11+ and dependencies installed.
+- Pinned shared-library wheel in the venv: `lijq-browser-common==0.1.0.dev1`
+  (local wheel, sha256 `0a32e9f0803cabab2fb867fef262ee7b2949114c6f8af7cdfcf852be3f0c6c80`).
 - A visible Chrome/Edge configured by `config.toml` plus ignored `config.local.toml`.
 - Preserved ignored `user_data/chrome_profile`, `output/`, and local configuration.
 - Exactly one MCP process owner for that profile.
@@ -36,10 +38,13 @@ copy those mechanisms into this repository.
 
 1. Record environment, identity, current process/profile owner, user/data impact,
    recovery point, stop conditions, and explicit approval.
-2. Verify the new source offline and run `tools/mcp_probe.py` on its target host.
+2. Verify the new source offline; on the target host run
+   `tools/smoke_browser_common.py` (isolated profile, zero Taobao traffic) and
+   `tools/mcp_probe.py`.
 3. Stop the client/adapter so the ordinary MCP and browser exit cleanly.
 4. Preserve `config.local.toml`, `user_data/`, `output/`, and any local secrets.
-5. Replace source/dependencies without creating a second profile owner.
+5. Replace source/dependencies — installing the pinned wheel above when
+   `lijq-browser-common` is missing — without creating a second profile owner.
 6. Start the client/adapter and verify initialize, exact tool list, runtime-policy
    companion, and `taobao_session(action=status)` only.
 7. Stop on captcha, profile lock, ambiguous writes, unexpected browser pages, or
