@@ -524,7 +524,10 @@ async def taobao_tracking(
     """物流跟踪(一个工具 + action 参数)。list 返回今日订单物流摘要: 状态/快递/运单号/取件码📦/驿站.
 
     每日首次实机抓取(限速, 由 anti_risk.track_cache 控制) + 同日缓存(零流量); force=true 强制同日刷新。
+    列表状态优先: 交易成功/交易关闭的订单不再导航物流页(关闭单没有物流)。
     只读 — 不写入/不付款/不发消息。摘要转发给中国代购收件。
+    ⚠️ 高隐私: 输出与缓存含订单号/运单号/取件码等 PII; 缓存仅本地(gitignored),
+    摘要只应转发给代购, 勿公开/勿入日志外发。
     format=md(默认)可读摘要表; format=json 结构化。
     导出 md 文件请用 taobao_export(type=tracking)。
     Example: {"only_active": true, "max": 12}

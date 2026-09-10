@@ -31,7 +31,11 @@ _BOUGHT_LIST_URL = "https://buyertrade.taobao.com/trade/itemlist/list_bought_ite
 # max_drill) are RE-APPLIED to the cached list, so a cache fetched with other params is
 # still served correctly.
 
-_DONE_STATUSES = ("已签收", "交易成功")
+_DONE_STATUSES = ("已签收", "交易成功", "交易关闭")
+
+# 列表页即可判定为终态、无需物流页演练的状态(用户 2026-09-10 指示: 先查状态 —
+# 交易关闭的订单自然没有物流; 交易成功的包裹已签收、取件码已失效)。
+_TERMINAL_LIST_STATUSES = ("交易成功", "交易关闭")
 
 # Enumeration-stage budget (seconds): goto/captcha/scroll/evaluate must ALL finish
 # within this window or the run fails loud instead of wedging the browser lock
@@ -229,13 +233,15 @@ ORDER_LIST_JS = r"""() => {
   const out = []; const seen = new Set();
   const re = /订单号[:：]?\s*(\d{15,})/g;    // Taobao order ids are ~19 digits
   const tre = /\n([^\n]{4,120})\s*\[交易快照\]/;   // \s*: 分隔符可能是 NBSP/全角空格/换行
+  const sre = /\n订单详情\n([^\n]{2,12})/;   // 卡片状态行紧跟 订单详情 标签
   let m;
   while ((m = re.exec(txt)) !== null) {
     if (seen.has(m[1])) continue;
     seen.add(m[1]);
     const card = txt.slice(m.index, m.index + 1200);
     const tm = tre.exec(card);
-    out.push({id: m[1], title: tm ? tm[1].trim() : ''});
+    const sm = sre.exec(card);
+    out.push({id: m[1], title: tm ? tm[1].trim() : '', status: sm ? sm[1].trim() : ''});
   }
   return out.slice(0, 60);
 }"""
@@ -297,7 +303,14 @@ async def track_orders(
     """Live: read order#s from 已买到的宝贝, then drill the newest `max_drill` orders'
     logistics for real status + carrier/tracking# + 取件码 + station (read-only).
 
-    only_active drops orders whose logistics status is already 已签收/交易成功.
+    List-status-first (用户 2026-09-10): each card's own status line (订单详情 下一行)
+    is read during enumeration; terminal list statuses (交易成功/交易关闭) skip the
+    logistics navigation entirely — a closed order never has logistics, and skipping
+    also avoids loading pages that contain the recipient address (privacy minimization:
+    this tool carries order PII; logs keep only order#/status/carrier, tracking#/取件码
+    live only in the gitignored local cache).
+
+    only_active drops orders whose logistics status is already 已签收/交易成功/交易关闭.
 
     ONCE-PER-DAY cap (anti-detection): the first call each day fetches live and caches the
     result (with the drilled-coverage metadata); later same-day calls return the cache with
@@ -354,8 +367,10 @@ async def track_orders(
     cards = [c for c in cards if isinstance(c, dict) and c.get("id")]
     ids = [str(c["id"]) for c in cards]
     titles = {str(c["id"]): str(c.get("title") or "")[:60] for c in cards}
-    get_logger().info("track: enumerated %d order ids (%d titled) from 已买到的宝贝",
-                      len(ids), sum(1 for t in titles.values() if t))
+    list_statuses = {str(c["id"]): str(c.get("status") or "") for c in cards}
+    get_logger().info("track: enumerated %d order ids (%d titled, %d with list status) from 已买到的宝贝",
+                      len(ids), sum(1 for t in titles.values() if t),
+                      sum(1 for s in list_statuses.values() if s))
     if ids and not any(titles.values()):
         get_logger().warning(
             "track: %d ids but 0 titles — [交易快照] card-title selector may have drifted",
@@ -442,6 +457,16 @@ async def track_orders(
 
             for i, oid in enumerate(ids[:drill_n], 1):
                 o = OrderStatus(order_id=oid, title=titles.get(oid, ""), status="未知")
+                if list_statuses.get(oid, "") in _TERMINAL_LIST_STATUSES:
+                    # 列表状态已是终态: 交易关闭永远不会有物流; 交易成功包裹已签收、
+                    # 取件码已失效 — 都不值得一次物流页导航(少一次含收件地址的页面
+                    # 加载, 也是隐私最小化)。状态直接采信列表页。
+                    o.status = list_statuses[oid]
+                    all_orders.append(o)
+                    get_logger().info("track: order %s → %s (list status; logistics drill skipped)",
+                                      oid, o.status)
+                    await human_delay(1.0, 2.0)   # 轻节奏, 无导航
+                    continue
                 get_logger().info("track: drilling order %s (%d/%d)", oid, i, len(ids[:drill_n]))
                 try:
                     # 每单整体预算兜底: fr.evaluate 已单帧有界, 这里再防 goto/captcha 段的
@@ -461,8 +486,10 @@ async def track_orders(
                     if not await _wedge_recover(oid):
                         break
                 all_orders.append(o)
-                get_logger().info("track: order %s → %s | %s %s", oid, o.status,
-                                  o.carrier or "-", o.tracking_no or "-")
+                # 隐私最小化(用户 2026-09-10: tracking 属高隐私工具): 日志只留
+                # 订单号+状态+承运商, 运单号/取件码只进 gitignored 缓存, 不落日志。
+                get_logger().info("track: order %s → %s | %s", oid, o.status,
+                                  o.carrier or "-")
                 await human_delay(4.0, 7.0)   # space logistics navigations — never burst
         # 物流页关闭由 tp_scope 退出负责(仍存活的页关闭; 重建前的旧页报 already_closed)。
         _save_cache(all_orders)   # stamp today's run so same-day re-calls serve the cache
@@ -531,6 +558,14 @@ async def probe_orders_evidence(order_id: str = "") -> dict:
         out["list"] = await page.evaluate(list_js)
     except Exception as exc:  # noqa: BLE001
         out["list"] = {"error": str(exc)[:120]}
+
+    # 生产枚举 JS 的实机验证: 直接跑 ORDER_LIST_JS 本体, 确认 id/title/status
+    # 三元组提取(状态行在 订单详情 下一行)与列表页当前渲染一致 — 只读, 无导航。
+    try:
+        parsed = await page.evaluate(ORDER_LIST_JS)
+        out["cards_parsed"] = [c for c in parsed if isinstance(c, dict)][:5]
+    except Exception as exc:  # noqa: BLE001
+        out["cards_parsed"] = {"error": str(exc)[:120]}
 
     # --- 物流页: 分帧文本 + 当前解析器命中(活跃包裹漂移现场) ---
     if order_id:

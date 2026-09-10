@@ -204,3 +204,23 @@ Never describe an unexecuted or external deployment check as passed.
   wedge/cancel scenarios; all four wedge classes were orders.py business code.
   `docs/development/browser_common_feedback.md` unchanged (all 5 items remain
   resolved in dev2).
+
+## Record (tracking 隐私收敛 + 列表状态优先, 2026-09-10, 用户反馈驱动)
+
+- Scope: 用户两点反馈 — ① tracking 属高隐私工具须收敛 PII; ② …18370 应先查
+  列表状态(交易关闭), 自然没有物流, 不该再演练物流页。
+- 修复(业务侧, `src/extract/orders.py` + `server.py` docstring):
+  1. ORDER_LIST_JS 增采卡片状态行(`\n订单详情\n([^\n]{2,12})`); 列表终态
+     (交易成功/交易关闭)直接采信, 跳过物流页导航 — 少一次含收件地址的页面
+     加载(隐私最小化), 也省流量/时间; 交易关闭加入 _DONE_STATUSES, 活跃摘要
+     (转发代购)不再出现关闭单。
+  2. 隐私最小化: 逐单结果日志去掉运单号(只留 订单号/状态/承运商); 运单号/
+     取件码只进 gitignored 本地缓存; tracking 工具 docstring 加 ⚠️ 高隐私标注。
+  3. order_probe 增 `cards_parsed` 字段: 实机直跑生产 ORDER_LIST_JS, 零物流
+     导航即可验证 id/title/status 三元组提取。
+- 验证: 全量 444 passed / 1 skipped(新增 终态跳过导航/关闭单过滤 2 项回归);
+  部署同步(sha256 一致) + 桥重启 gen 8→9; 实机 order_probe(仅一次列表页加载)
+  确认 cards_parsed 提取 …18370 → status=交易关闭, 其余 卖家已发货, 5/5 卡片
+  三元组正确。跳过逻辑的摘要级效果由单元测试覆盖, 下一个自然日首次 tracking
+  运行(每日一次上限重置)即会在实机摘要中体现 — 今日不再消耗额外物流页流量。
+- 共享库反馈: 无新缺陷, feedback 文档不变。

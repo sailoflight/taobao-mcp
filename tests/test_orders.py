@@ -638,3 +638,96 @@ def test_drill_survives_tool_task_cancellation_and_stamps_cache(tmp_path, monkey
         assert [o["order_id"] for o in data["orders"]] == ["3601", "3602", "3603"]
 
     asyncio.run(_scenario())
+
+
+def test_track_orders_skips_logistics_drill_for_terminal_list_status(tmp_path, monkeypatch):
+    """用户 2026-09-10 指示: 先查列表状态 — 交易关闭的订单自然没有物流, 不该再花
+    一次物流页导航(也少加载一次含收件地址的页面, 隐私最小化)。终态单直接采信
+    列表状态; 其余订单照常演练。"""
+    from contextlib import asynccontextmanager
+
+    import src.browser.pacing as pacing_mod
+    import src.browser.session as session_mod
+
+    class _Page:
+        url = ""
+
+        async def goto(self, *a, **k):
+            return None
+
+        async def evaluate(self, js):
+            return [
+                {"id": "3701", "title": "弹簧钢定制", "status": "交易关闭"},
+                {"id": "3702", "title": "转接头", "status": "买家已付款"},
+            ]
+
+    class _LP:
+        url = ""
+        frames: list = []
+        navigated_to: list = []
+
+        async def goto(self, *a, **k):
+            _LP.navigated_to.append(k.get("url") or (a[0] if a else ""))
+
+        async def close(self):
+            return None
+
+    class _Ctx:
+        async def new_page(self):
+            return _LP()
+
+    class _Scope:
+        async def try_track(self, page):
+            return True
+
+    class _TempPages:
+        @asynccontextmanager
+        async def _cm(self):
+            yield _Scope()
+
+        def __call__(self):
+            return self._cm()
+
+    class _Session:
+        human_action_required = False
+        context = _Ctx()
+
+        async def start(self):
+            return _Page()
+
+        async def guard_captcha(self, page=None):
+            return None
+
+        def temporary_pages(self):
+            return _TempPages()()
+
+    async def _noop(*a, **k):
+        return None
+
+    monkeypatch.setattr(session_mod, "get_session", lambda: _Session())
+    monkeypatch.setattr(session_mod, "track_temporary_page", lambda scope, page: page)
+    monkeypatch.setattr(pacing_mod, "human_scroll", _noop)
+    monkeypatch.setattr(pacing_mod, "human_delay", _noop)
+    state = tmp_path / ".track_state.json"
+    monkeypatch.setattr(O, "_state_file", lambda: state)
+
+    orders = asyncio.run(O.track_orders(only_active=False, max_drill=5, force=True))
+    # 交易关闭单: 状态采信列表页, 物流页从未被导航
+    assert orders[0].status == "交易关闭"
+    assert not any("3701" in u for u in _LP.navigated_to), "closed order must not be drilled"
+    # 活跃单照常演练(空帧→未知)
+    assert len(_LP.navigated_to) == 1 and "3702" in _LP.navigated_to[0]
+    assert orders[1].status == "未知"
+    # 缓存仍包含全部订单(重过滤语义不变)
+    data = json.loads(state.read_text(encoding="utf-8"))
+    assert [o["order_id"] for o in data["orders"]] == ["3701", "3702"]
+
+
+def test_filter_orders_drops_transaction_closed_from_active():
+    """交易关闭是终态: 活跃摘要(转发代购)里不该出现无物流的关闭单。"""
+    orders = [
+        OrderStatus(order_id="1", title="a", status="交易关闭"),
+        OrderStatus(order_id="2", title="b", status="已发货"),
+    ]
+    got = O._filter_orders(orders, only_active=True, max_drill=5)
+    assert [o.order_id for o in got] == ["2"]
