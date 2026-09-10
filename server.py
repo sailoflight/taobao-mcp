@@ -783,6 +783,7 @@ async def taobao_debug(
     a2_mode: str = "auto",             # a2: auto=全自动 | interactive=人机协同 | queue=AI自驱队列
     a2_budget: int | None = None,      # a2: 本轮访问页数(默认 auto 6 / interactive 3 / queue 每组 3; 全程≤15)
     a2_state: str = "",                # a2 interactive: 上轮返回的 state(JSON, 续跑回传)
+    order_id: str = "",                # order_probe: 物流页诊断的目标订单号
 ) -> str:
     """调试诊断(一个工具 + action 参数, [DEBUG] 观测/诊断为主; collect/favorite 会临时收藏再取消
     无残留, watch 持续监听 — 有状态, 非纯只读).
@@ -790,8 +791,9 @@ async def taobao_debug(
       sweep_price/miid_price(被 product deep_price / fine、compare(cart) 覆盖)与
       recommend(A2 原语并入 a2; 单页渲染/raw 体检用 config_detail)。
 
-    参数: action(必填)=detail|sku_structure|entry_probe|a2|home|collect|favorite|watch|activity|probe_reviews|footmark|qa_expand|config_detail|open_probe|cart_probe ·
+    参数: action(必填)=detail|sku_structure|entry_probe|a2|home|collect|favorite|watch|activity|probe_reviews|footmark|qa_expand|config_detail|open_probe|cart_probe|order_probe ·
       product_url_or_id(detail/sku_structure/favorite/probe_reviews/footmark/qa_expand/config_detail/open_probe/cart_probe 时) · target(sku_structure 目标芯片) ·
+      order_id(order_probe: 物流页诊断目标订单号) ·
       target_chip(entry_probe: entry=url|recommend|search; open_probe: 来源 bare=首页) · target_pid(collect 可选) ·
       entry_probe=一次性诊断三种进入方式(entry=url|recommend|search)的详情/推荐/评论/问答/优惠价
       (2026-09-08 矩阵后为裸直达回归探针; 推荐区延伸/渲染体检请用 a2 或 config_detail) ·
@@ -821,6 +823,9 @@ async def taobao_debug(
       商品链接(记录其 URL 参数)并在购物车页开新标签 → ENTRY_PROBE。不写购物车、绝不删行;
       商品不在购物车时返回门控指引(先 taobao_cart add confirm=true 暂存 1 件 → 重跑;
       退回用 taobao_export cart_atomic 或手动)。
+    order_probe: 订单页 DOM 取证(只读, 2026-09-10) — 已买到的宝贝列表卡片快照
+      (订单号±附近文本, 前 3 张) + 指定订单物流页分帧 innerText 与当前解析器命中,
+      用于 tracking 选择器漂移诊断。order_id 给定才访问物流页。
     [DEBUG] 仅诊断/观测; 收藏链路调试会收藏再取消(无残留)。Example: {"action": "activity"} / {"action": "probe_reviews", "product_url_or_id": "862892097837"} / {"action": "config_detail", "product_url_or_id": "861510231125"} / {"action": "a2", "a2_seeds": "990615757513,736546459871", "a2_mode": "queue", "a2_budget": 3}
     """
     if await _ensure_logged_in() != "logged_in":
@@ -981,9 +986,15 @@ async def taobao_debug(
 
         return json.dumps(await probe_cart_entry(product_url_or_id), ensure_ascii=False, indent=2)
 
+    if act == "order_probe":
+        from src.extract.orders import probe_orders_evidence
+
+        return json.dumps(await probe_orders_evidence(order_id=order_id),
+                          ensure_ascii=False, indent=1)
+
     return (f"未知 action={action}; 支持 detail/sku_structure/entry_probe/a2/home/collect/"
             "favorite/watch/activity/probe_reviews/footmark/qa_expand/"
-            "config_detail/open_probe/cart_probe")
+            "config_detail/open_probe/cart_probe/order_probe")
 
 
 @mcp.tool(annotations=ToolAnnotations(

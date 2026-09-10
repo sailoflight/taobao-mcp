@@ -148,3 +148,59 @@ Never describe an unexecuted or external deployment check as passed.
   today's 已买到的宝贝 (全部订单 tab) and/or logistics page DOM has drifted.
   Per the change matrix, live selector work requires separate approval. The
   adoption paths themselves are fully verified.
+
+## Record (orders digest fix round: probe → fix → verify, 2026-09-10, user present)
+
+- Scope: user directive "对发现的问题进行修复,涉及共享库内部的问题反馈" — resolve
+  Finding 3 (degraded tracking digest) end-to-end. Route: development/maintainer
+  (code). Read-only live work; 4 forced same-day tracking runs total (the
+  sanctioned `force=True` exception), each human-paced, window watched by user.
+- Evidence: new debug action `taobao_debug(action=order_probe, order_id=…)` —
+  read-only DOM dump (list-card snippets + per-frame logistics innerText +
+  current-parser parse_hits). Probed both degraded orders:
+  `3316828549329009188` (unshipped page: 已下单/暂无单号/商品已经下单) and
+  `3316830061160018370` (对不起，查不到包裹信息). Neither wording was in the
+  parser's vocabulary → misleading 未知; the old ltext gate (快递/驿站/承运商
+  only) dropped unshipped pages entirely; recommendation junk (猜你喜欢…,
+  titles containing 顺丰包邮) contaminated carrier/tracking picks.
+- Fixes (all business-side, `src/extract/orders.py`):
+  1. `parse_logistics`: truncate at the first 猜你喜欢 marker before ANY field
+     match; add 未发货/无包裹 vocabulary (已下单 / 查不到包裹信息) so active
+     unshipped orders report a truthful status instead of 未知; in-transit
+     statuses win over the timeline's historical 已下单 node.
+  2. Frame selection prefers the `pc-trade-logistics` main frame (the
+     search-suggest iframe is 150KB of JS text); gate accepts unshipped/
+     no-package pages via `_qualifies`.
+  3. Titles: ORDER_LIST_JS now captures the per-card item title (line ending
+     in [交易快照], NBSP/newline-tolerant separator — first attempt with a
+     plain space matched 0/30); dead `parse_order_title` removed; 0-titled
+     enumeration logs a selector-drift warning.
+  4. Wedge hardening (2026-09-10 lessons 2–4): per-frame `_frame_text` bounded
+     at 2.5s (fr.evaluate has NO default timeout — a hung frame JS stalled a
+     run 16+ min); per-order `_DRILL_BUDGET_S=360` outer bound (does not cut
+     into the legit 300s captcha handoff); wedge-recover now bounds
+     `lp.close()` at 5s / `new_page()` at 30s and logs BOTH branches (playwright
+     goto TimeoutError takes the generic Exception path — the first recreate was
+     silent); per-order progress logging (drilling N/M, result line).
+  5. Bridge-cancellation survival: the bridge's downstream_timeout cancels the
+     in-flight tool task (~120s) — a 12-order drill + enumeration + login sits
+     exactly at that line, so the cancel always landed before `_save_cache` and
+     every force run burned traffic without stamping the cache (log frozen at
+     order 8/12 while the loop still served other calls). The drill + cache
+     stamp now run in a shielded detached task: outer cancellation is logged
+     and re-raised, the drill completes and stamps the cache for same-day
+     cache-serve recovery.
+- Verification: full suite 442 passed / 1 skipped (new regression tests:
+  unshipped page, no-package page, junk truncation, in-transit-wins, qualify
+  gate, title plumbing, hung-frame budget, second-wedge stop, cancellation
+  survival). Deployment synced (sha256-verified) + bridge restarts gen 4→8.
+  Final live run `force=true max=5` completed IN-BAND (~30s drill): digest
+  shows 3316828549329009188 → 已发货 极兔 JT3177040812884 (real title captured;
+  the order shipped between probe and verify) and 3316830061160018370 →
+  查不到包裹信息 (truthful) with real titles; 30/30 ids titled; cache
+  re-stamped (drilled 5, orders 5). Previous "未知" degradation eliminated.
+- Shared-library feedback: no new library defect found. The library's budgeted
+  temporary-page cleanup (`_cleanup(budget_ms)`) behaved correctly under all
+  wedge/cancel scenarios; all four wedge classes were orders.py business code.
+  `docs/development/browser_common_feedback.md` unchanged (all 5 items remain
+  resolved in dev2).
