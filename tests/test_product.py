@@ -20,23 +20,28 @@ from src.extract.product import (
     parse_product_res,
     parse_sku_info,
 )
-from src.errors import SkuIncompleteError
+from src.errors import ProductNotFoundError, SelectorDriftError, SkuIncompleteError
 from src.models import Product, SkuVariant
 
 FIXTURES = Path(__file__).parent / "fixtures"
 P100_ID = "736546459871"
 
 
-def _p100_html() -> str:
-    path = FIXTURES / P100_ID / "page.html"
-    if not path.exists():
-        pytest.skip(f"raw fixture {path} not present (gitignored; capture locally to test HTML extraction)")
-    return path.read_text(encoding="utf-8")
-
-
 def _p100_res() -> dict:
     """The committed, token-free sanitized fixture (CI-safe)."""
     return json.loads((FIXTURES / P100_ID / "detail_res.json").read_text(encoding="utf-8"))
+
+
+# 原始 page.html 含 PII/令牌, 被 .gitignore 有意排除且不随仓库分发 — ICE 提取
+# 的覆盖改用合成 HTML(契约: anchor → 平衡 JSON 对象 → loaderData.<child>.data.res
+# 含 skuBase), 不再依赖本机才有的文件, 也不再有 skip。
+_ICE_HTML = (
+    "<html><head><script>\n"
+    'var b = {"loaderData": {"home": {"data": {"res": '
+    '{"skuBase": {"props": [], "skus": []}, "skuCore": {"sku2info": {}}}}}}};\n'
+    "</script></head>\n"
+    f'<body><a href="https://item.taobao.com/item.htm?id={P100_ID}">P100</a></body></html>'
+)
 
 
 def test_specs_extracted_from_components():
@@ -270,8 +275,22 @@ def test_product_metadata():
 
 
 def test_extract_ice_res_has_blocks():
-    res = extract_ice_res(_p100_html())
+    """ICE 提取走合成 HTML(原始 page.html 被 gitignore 且不再分发) — 覆盖不缩水。"""
+    res = extract_ice_res(_ICE_HTML)
     assert "skuBase" in res and "skuCore" in res
+
+
+def test_extract_ice_res_anchor_without_res_raises_drift():
+    """页面有 ICE anchor 但结构里没有 res.skuBase → SelectorDriftError(漂移要响)。"""
+    drifted = '<script>var b = {"loaderData": {"home": {"data": {"other": 1}}}};</script>'
+    with pytest.raises(SelectorDriftError):
+        extract_ice_res(drifted)
+
+
+def test_extract_ice_res_no_anchor_raises_not_found():
+    """非详情页(无任何 ICE anchor)→ ProductNotFoundError, 不是静默空结果。"""
+    with pytest.raises(ProductNotFoundError):
+        extract_ice_res("<html><body>search results</body></html>")
 
 
 def test_multigroup_cartesian_3x4():
