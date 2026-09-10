@@ -114,3 +114,37 @@ Never describe an unexecuted or external deployment check as passed.
   on the host (isolated-profile facade smoke still available for the next
   host-side session). These require the human at the window and separate
   approval.
+
+## Record (real-account live smoke through the bridge, 2026-09-10, user present)
+
+- Scope: user said "继续测试" with the window visible; staged read-only ladder —
+  login → status → favorites list → fine-mode product (popup chain) →
+  tracking (orders logistics). All via the bridge against deployment gen 3+
+  (dev2, Edge pinned-binary path). Pacing/quotas respected (fav/search quota
+  0/30 untouched; footmark channel only; no writes beyond the tool-designed
+  reversible favorite flow, which was not triggered).
+- Passed: `taobao_session(action=login)` → `logged_in` (warm profile, no QR);
+  status telemetry (pacing slots + dual quotas) intact; `taobao_favorites
+  list` rendered 10 items; **popup chain end-to-end** on product 862892097837 —
+  footmark channel (`miid_from=footmark_click`, opened_id matched, 0 favorite
+  quota), fresh mi_id, 平台加补后 price observed, 23 detail images, 9 QA pairs,
+  46→5 recommendations, `_cleanup_fetch` ran, scope exit silent (fail-loud
+  contract ⇒ no PageCleanupError ⇒ clean close); tracking live run enumerated
+  30 order ids within the new 90s budget and stamped today's cache (09:28:18);
+  restart-time release log `browser released (clean=True, driver=stopped)`
+  confirms the library releases cleanly even on process teardown.
+- Finding 1 (fixed, `cad398c`): status tool vs the §5 raise contract — see the
+  previous record.
+- Finding 2 (fixed, `baa7251`): tracking wedge — the first live run hung 8+
+  minutes on the order-list stage with zero logs (unbounded evaluate after
+  goto; the user watching the window reported the page parked on 全部订单).
+  The enumeration stage is now bounded (`_ENUM_BUDGET_S=90`) and fails loud as
+  SelectorDriftError without stamping a cache; a success log
+  `track: enumerated N order ids` was added. Regression test replays the hang.
+  The wedge did not reproduce after the fix (page rendered; 30 ids in ~47s).
+- Finding 3 (OPEN — selector drift, NOT a shared-library issue): today's
+  tracking digest is degraded — 2 active orders, status 未知, empty titles/
+  tracking#/取件码. The orders parsers are byte-identical to the 8/19-era code;
+  today's 已买到的宝贝 (全部订单 tab) and/or logistics page DOM has drifted.
+  Per the change matrix, live selector work requires separate approval. The
+  adoption paths themselves are fully verified.
