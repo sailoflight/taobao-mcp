@@ -8,13 +8,14 @@ writes, no purchasing — the buyer forwards the digest to the China agent who c
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from pathlib import Path
 
 from src.config import load_config
 from src.dates import today_cn
-from src.errors import CacheCoverageError, CaptchaError
+from src.errors import CacheCoverageError, CaptchaError, SelectorDriftError
 from src.log import get_logger
 from src.models import OrderStatus
 
@@ -30,6 +31,12 @@ _LOGISTICS_URL = "https://market.m.taobao.com/app/dinamic/pc-trade-logistics/hom
 # still served correctly.
 
 _DONE_STATUSES = ("已签收", "交易成功")
+
+# Enumeration-stage budget (seconds): goto/captcha/scroll/evaluate must ALL finish
+# within this window or the run fails loud instead of wedging the browser lock
+# (2026-09-10 real-machine lesson: an unbounded evaluate on the order list hung the
+# run for 8+ minutes with zero logs until the bridge's downstream timeout fired).
+_ENUM_BUDGET_S = 90.0
 
 # Sane anti-block ceiling on logistics drills per run (each drill = one well-paced
 # navigation on the ONE reused logistics tab). max_drill is clamped into [1, _MAX_DRILL]
@@ -254,12 +261,26 @@ async def track_orders(
 
     session = get_session()
     page = await session.start()
-    await page.goto("https://buyertrade.taobao.com/trade/itemlist/list_bought_items.htm",
-                    wait_until="domcontentloaded")
-    await session.guard_captcha(page)
-    await human_scroll(page, 3)
-    await human_delay(2.0, 3.0)
-    ids = await page.evaluate(ORDER_LIST_JS)
+
+    # 枚举段整体有界(2026-09-10 实机教训): goto 自带超时, 但 evaluate/滚动等待无超时 —
+    # 订单列表页(全部订单标签)曾把整个运行楔死 8+ 分钟且零日志, 直到桥 downstream
+    # timeout 才暴露。整段 90s 预算, 超时 fail loud 为 SelectorDriftError; 缓存不落盘,
+    # 当日可重试或 force 重跑。
+    async def _enumerate_ids() -> list[str]:
+        await page.goto("https://buyertrade.taobao.com/trade/itemlist/list_bought_items.htm",
+                        wait_until="domcontentloaded")
+        await session.guard_captcha(page)
+        await human_scroll(page, 3)
+        await human_delay(2.0, 3.0)
+        return await page.evaluate(ORDER_LIST_JS)
+
+    try:
+        ids = await asyncio.wait_for(_enumerate_ids(), timeout=_ENUM_BUDGET_S)
+    except asyncio.TimeoutError as exc:
+        raise SelectorDriftError(
+            step="track: 已买到的宝贝 枚举段(90s 预算内未完成 — 页面可能改版或未空闲)",
+        ) from exc
+    get_logger().info("track: enumerated %d order ids from 已买到的宝贝", len(ids))
     if not ids:
         # Nothing parsed (page didn't render / soft block) — do NOT stamp an empty digest
         # as "today's run" (would serve an all-day-empty cache). Retry next call.

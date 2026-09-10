@@ -219,3 +219,50 @@ def test_track_orders_undercovered_cache_force_allows_live(tmp_path, monkeypatch
     monkeypatch.setattr(S, "get_session", _enter_live)
     with pytest.raises(_LiveEntered):
         asyncio.run(O.track_orders(only_active=True, max_drill=5, force=True))
+
+
+def test_track_orders_enumeration_budget_fails_loud(tmp_path, monkeypatch):
+    """2026-09-10 实机教训(桥上冒烟): 订单列表页 evaluate 无超时 → 运行楔死 8+ 分钟
+    且零日志。枚举段现在整体有界(_ENUM_BUDGET_S, 测试收缩到 0.2s), 超时 fail loud
+    为 SelectorDriftError, 缓存绝不落盘, browser 锁随工具返回而释放。"""
+    import asyncio as aio
+
+    import src.browser.pacing as pacing_mod
+    import src.browser.session as session_mod
+    from src.errors import SelectorDriftError
+    from src.extract import orders as O
+
+    class _HangPage:
+        url = ""
+
+        async def goto(self, *a, **k):
+            return None
+
+        async def evaluate(self, js):
+            await aio.sleep(999)  # 楔死现场复现: evaluate 永不返回
+
+    class _HangSession:
+        human_action_required = False
+
+        async def start(self):
+            return _HangPage()
+
+        async def guard_captcha(self, page=None):
+            return None
+
+        def temporary_pages(self):  # pragma: no cover — 楔死时不应到达 logistics 阶段
+            raise AssertionError("enumeration wedge must not reach the logistics stage")
+
+    async def _noop(*a, **k):
+        return None
+
+    monkeypatch.setattr(session_mod, "get_session", lambda: _HangSession())
+    monkeypatch.setattr(pacing_mod, "human_scroll", _noop)
+    monkeypatch.setattr(pacing_mod, "human_delay", _noop)
+    monkeypatch.setattr(O, "_ENUM_BUDGET_S", 0.2)
+    state = tmp_path / ".track_state.json"
+    monkeypatch.setattr(O, "_state_file", lambda: state)
+
+    with pytest.raises(SelectorDriftError, match="枚举段"):
+        asyncio.run(O.track_orders(only_active=True, max_drill=5, force=True))
+    assert not state.exists(), "wedge path must NOT stamp a cache"
