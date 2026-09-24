@@ -1,7 +1,7 @@
 <!-- agent-project-guides:v3:start -->
 ## Project governance routing
 
-Project ID: `taobao-mcp`; variant: `shared-runtime.pinned`; pinned release: `3.0.3` / `sha256:f3dc0ca9cd50d27deac2b4e9c063d243dd3ce20127edc88d9f8b4c3aac4bd603`; manifest: `sha256:50a5769025fcb44d6ca35d367fbfd2e2259d8e57a449a7137c8ae2ed4a02dd17`.
+Project ID: `taobao-mcp`; variant: `shared-runtime.pinned`; pinned release: `3.0.7` / `sha256:50852ae93ac3a935a00d4e3d0f6c8b76857f53b9228f0d47c75dfb3a8a8e5e24`; manifest: `sha256:b0ef101ae43ca1d68f205ffdd073a6c7e4457dc216d19de9111686ccfd4a04c6`.
 
 Before work, run `apg context --target . --task <current-task> --format context` and use only the returned governance content. Resolve any ambiguity before protected work. The shared CLI and exact packed digest are runtime dependencies; missing content fails explicitly and never falls back to `latest`. Returned sources are intended context and do not prove model-effective context.
 <!-- agent-project-guides:v3:end -->
